@@ -64,7 +64,6 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
   const isPermDisabled = modelNowConfig?.permanentlyDisabled === true
   const actualDisabledReason = modelNowConfig?.disabledReason || ''
 
-  const debugMode = await getDebugMode(env)
   const fullId = `${providerId}/${modelId}`
   let storage = await getTierStorage(env)
 
@@ -78,9 +77,9 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
       changed = true
       console.log(`[proxy] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
-    } else if (debugMode && inTier1) {
-      // 调试模式下：如果当前模型在第一梯队中且出现异常，实时踢出第一梯队并触发第二梯队自动补位
-      console.log(`[proxy] [调试模式] 第一梯队模型 ${fullId} 调用异常(${status})，立即实时剔除并补充备用模型`)
+    } else if (inTier1) {
+      // 第一梯队模型调用出现明确故障（如 429 超限、5xx 崩溃、网络超时）：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
+      console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
       storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
       const ref = { providerId, modelId, fullId, addedAt: Date.now() }
       if (!storage.tier2.some((m) => m.fullId === fullId)) {

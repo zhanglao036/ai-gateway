@@ -133,7 +133,6 @@ export async function applyModelProbeResult(
     const actualDisabledReason = modelNowConfig.disabledReason || ''
     const fullId = `${providerId}/${modelId}`
 
-    const debugMode = await getDebugMode(env)
     let storage = await getTierStorage(env)
 
     if (storage) {
@@ -145,8 +144,8 @@ export async function applyModelProbeResult(
         storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
         changed = true
         console.log(`[applyModelProbeResult] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
-      } else if (!success && debugMode && inTier1) {
-        console.log(`[applyModelProbeResult] [调试模式] 第一梯队模型 ${fullId} 调用异常(${statusCode})，立即实时剔除并补充备用模型`)
+      } else if (!success && inTier1) {
+        console.log(`[applyModelProbeResult] 第一梯队模型 ${fullId} 探测异常(${statusCode})，立即踢出至第二梯队并启动自动补位`)
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         const ref = { providerId, modelId, fullId, addedAt: Date.now() }
         if (!storage.tier2.some((m) => m.fullId === fullId)) {
