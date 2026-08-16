@@ -37,6 +37,7 @@ export const KV_KEYS = {
   OPENCODE_MIGRATION: 'migration:opencode-default:v1',
   REQUEST_LOGS: 'gateway:request_logs',
   DEBUG_MODE: 'config:debug_mode',
+  LOG_CONFIG: 'config:log_settings',
   TIER_DATA: 'gateway:tier_data',
 } as const
 

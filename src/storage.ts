@@ -26,8 +26,10 @@ const memoryCache = new Map<string, { value: string; expiresAt?: number }>()
 const pendingWrites = new Map<string, { value: string; options?: { expirationTtl?: number }; isDelete?: boolean }>()
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
-// 动态调试模式控制
+// 动态调试模式与日志参数控制
 let dynamicDebugMode: boolean | null = null
+let dynamicBufferMaxCount: number | null = null
+let dynamicFlushIntervalSeconds: number | null = null
 
 export function isDebugMode(env?: Env): boolean {
   if (dynamicDebugMode !== null) return dynamicDebugMode
@@ -36,26 +38,71 @@ export function isDebugMode(env?: Env): boolean {
   return false
 }
 
-export async function getDebugMode(env: Env): Promise<boolean> {
-  if (dynamicDebugMode !== null) return dynamicDebugMode
-  const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
-  if (kvVal !== null) {
-    dynamicDebugMode = kvVal === 'true'
-    return dynamicDebugMode
+export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; bufferMaxCount: number; flushIntervalSeconds: number }> {
+  let debug = dynamicDebugMode
+  let maxCount = dynamicBufferMaxCount
+  let intervalSec = dynamicFlushIntervalSeconds
+
+  if (debug === null || maxCount === null || intervalSec === null) {
+    const raw = await getKV(env).get(KV_KEYS.LOG_CONFIG)
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
+        if (typeof parsed.bufferMaxCount === 'number' && parsed.bufferMaxCount > 0) maxCount = parsed.bufferMaxCount
+        if (typeof parsed.flushIntervalSeconds === 'number' && parsed.flushIntervalSeconds > 0) intervalSec = parsed.flushIntervalSeconds
+      } catch {}
+    }
   }
-  return isDebugMode(env)
+
+  if (debug === null) {
+    const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
+    debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
+  }
+  if (maxCount === null) maxCount = 50 // 默认 50 条
+  if (intervalSec === null) intervalSec = 30 // 默认 30 秒
+
+  dynamicDebugMode = debug
+  dynamicBufferMaxCount = maxCount
+  dynamicFlushIntervalSeconds = intervalSec
+
+  return { debugMode: debug, bufferMaxCount: maxCount, flushIntervalSeconds: intervalSec }
+}
+
+export async function getDebugMode(env: Env): Promise<boolean> {
+  const config = await getLogConfig(env)
+  return config.debugMode
+}
+
+export async function saveLogConfig(
+  env: Env,
+  config: { debugMode: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }
+): Promise<void> {
+  const current = await getLogConfig(env)
+  const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : current.debugMode
+  const newMaxCount = typeof config.bufferMaxCount === 'number' && config.bufferMaxCount > 0 ? config.bufferMaxCount : current.bufferMaxCount
+  const newInterval = typeof config.flushIntervalSeconds === 'number' && config.flushIntervalSeconds > 0 ? config.flushIntervalSeconds : current.flushIntervalSeconds
+
+  dynamicDebugMode = newDebug
+  dynamicBufferMaxCount = newMaxCount
+  dynamicFlushIntervalSeconds = newInterval
+
+  const configObj = {
+    debugMode: newDebug,
+    bufferMaxCount: newMaxCount,
+    flushIntervalSeconds: newInterval,
+  }
+
+  await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
+  await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
+
+  // 切换配置或调试模式瞬间，未落地日志及缓存强制落盘
+  await flushPendingLogs(env)
+  await flushPendingWrites(env)
 }
 
 export async function setDebugMode(env: Env, enabled: boolean): Promise<void> {
-  const wasDebug = await getDebugMode(env)
-  dynamicDebugMode = enabled
-  await getKV(env).put(KV_KEYS.DEBUG_MODE, enabled ? 'true' : 'false')
-
-  // 切换调试开关瞬间，内存未落地日志及缓存强制落盘
-  if (wasDebug !== enabled) {
-    await flushPendingLogs(env)
-    await flushPendingWrites(env)
-  }
+  await saveLogConfig(env, { debugMode: enabled })
 }
 
 export async function kvGet(env: Env, key: string): Promise<string | null> {
@@ -328,8 +375,8 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 }
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
-  const isDebug = await getDebugMode(env)
-  if (isDebug) {
+  const config = await getLogConfig(env)
+  if (config.debugMode) {
     // 调试模式开启：每条请求日志实时写入 KV
     const currentLogs = await getLogs(env)
     const updated = [log, ...currentLogs].slice(0, 100)
@@ -342,20 +389,21 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   if (logQueue.length > 100) logQueue.length = 100
 
   // 达到队列条数阈值：立即批量落盘
-  if (logQueue.length >= LOG_BATCH_SIZE) {
+  const maxCount = config.bufferMaxCount || LOG_BATCH_SIZE
+  if (logQueue.length >= maxCount) {
     await flushPendingLogs(env)
   } else {
-    // 30s 定时器规则批量落盘
-    scheduleLogFlush(env)
+    // 定时器规则批量落盘
+    scheduleLogFlush(env, (config.flushIntervalSeconds || 30) * 1000)
   }
 }
 
-function scheduleLogFlush(env: Env) {
+function scheduleLogFlush(env: Env, intervalMs: number = LOG_FLUSH_INTERVAL_MS) {
   if (logFlushTimer) return
   logFlushTimer = setTimeout(() => {
     logFlushTimer = null
     flushPendingLogs(env).catch(console.error)
-  }, LOG_FLUSH_INTERVAL_MS)
+  }, intervalMs)
 }
 
 export async function flushPendingLogs(env: Env): Promise<void> {

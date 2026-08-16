@@ -83,6 +83,18 @@ export interface RequestLog {
   latency: number
   status: number
   error?: string | null
+  // 扩展排查详情字段
+  keyMask?: string | null
+  attemptIndex?: number
+  routePath?: string | null
+  isStream?: boolean
+  clientIp?: string | null
+}
+
+export interface LogConfig {
+  debugMode: boolean
+  bufferMaxCount: number
+  flushIntervalSeconds: number
 }
 
 export interface TierModelRef {

@@ -1,5 +1,5 @@
 import { Context } from 'hono'
-import { getProviders, getProxyKeys, getLogs, getDebugMode } from './storage'
+import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env } from './types'
 import { CSS_CONTENT } from './pages.css'
@@ -588,7 +588,8 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
   const providers = await getProviders(c.env)
   const proxyKeys = await getProxyKeys(c.env)
   const logs = await getLogs(c.env)
-  const isDebug = await getDebugMode(c.env)
+  const logConfig = await getLogConfig(c.env)
+  const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
   const modelsCount = providers.reduce((total, provider) => total + provider.models.length, 0)
   const enabledModelsCount = providers.reduce((total, provider) => total + provider.models.filter((model) => model.enabled).length, 0)
@@ -838,9 +839,17 @@ ${H('管理')}
 
       <section id="logs" class="workspace-section" aria-labelledby="logs-title">
         <div class="section-heading section-heading--admin">
-          <div><h2 id="logs-title">网关请求日志</h2><p>记录客户端 API 请求，包含耗时、HTTP 状态与失败原因。</p></div>
-          <div class="fc" style="gap:12px;flex-wrap:wrap;">
-            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条日志实时写入 KV 并前端实时刷新">
+          <div><h2 id="logs-title">网关请求日志</h2><p>记录客户端 API 请求，包含耗时、HTTP 状态、调用详情与失败原因。</p></div>
+          <div class="fc" style="gap:12px;flex-wrap:wrap;align-items:center;">
+            <div id="log-buffer-config-box" class="fc" style="gap:8px;align-items:center;background:var(--color-paper-2);padding:4px 10px;border-radius:var(--radius-control);border:1px solid var(--color-rule);display:${isDebug ? 'none' : 'flex'};">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);" title="队列达到该条数后立即批量写入 KV">缓存阈值:</span>
+              <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" style="width:58px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="最大缓冲条数" onchange="saveLogBufferConfig()">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);">条</span>
+              <span style="font-size:var(--text-xs);color:var(--color-muted);margin-left:4px;" title="定时器强制落盘间隔">间隔:</span>
+              <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" style="width:52px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="定时器强制落盘间隔（秒）" onchange="saveLogBufferConfig()">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);">秒</span>
+            </div>
+            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条日志实时写入 KV 并前端实时刷新；关闭后启用内存缓存批量落盘策略">
               <span style="font-size:var(--text-xs);font-weight:600;">调试模式 (实时落盘)</span>
               <span class="tg"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)"><span class="sl"></span></span>
             </label>
@@ -2208,7 +2217,15 @@ async function fetchLogs() {
       var dbgToggle = document.getElementById('debug-mode-toggle');
       if (dbgToggle && typeof json.data.debugMode === 'boolean') {
         dbgToggle.checked = json.data.debugMode;
+        var cfgBox = document.getElementById('log-buffer-config-box');
+        if (cfgBox) cfgBox.style.display = json.data.debugMode ? 'none' : 'flex';
         setupAutoRefresh(json.data.debugMode);
+      }
+      if (json.data.config) {
+        var cntInput = document.getElementById('log-cfg-max-count');
+        var intInput = document.getElementById('log-cfg-interval');
+        if (cntInput && json.data.config.bufferMaxCount) cntInput.value = json.data.config.bufferMaxCount;
+        if (intInput && json.data.config.flushIntervalSeconds) intInput.value = json.data.config.flushIntervalSeconds;
       }
     }
   } catch (err) {
@@ -2232,10 +2249,19 @@ function setupAutoRefresh(enabled) {
 
 async function toggleDebugMode(checked) {
   try {
+    var cfgBox = document.getElementById('log-buffer-config-box');
+    if (cfgBox) cfgBox.style.display = checked ? 'none' : 'flex';
+    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
+    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+
     var res = await fetch('/admin/api/debug-mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ debugMode: checked })
+      body: JSON.stringify({
+        debugMode: checked,
+        bufferMaxCount: cntVal,
+        flushIntervalSeconds: intVal,
+      })
     });
     var json = await res.json();
     if (json.success) {
@@ -2247,6 +2273,32 @@ async function toggleDebugMode(checked) {
     }
   } catch (err) {
     toast('切换调试模式请求异常', 'error');
+  }
+}
+
+async function saveLogBufferConfig() {
+  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
+  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+  var dbgChecked = document.getElementById('debug-mode-toggle')?.checked || false;
+
+  try {
+    var res = await fetch('/admin/api/debug-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        debugMode: dbgChecked,
+        bufferMaxCount: cntVal,
+        flushIntervalSeconds: intVal,
+      })
+    });
+    var json = await res.json();
+    if (json.success) {
+      toast('日志缓存策略已保存（达到 ' + cntVal + ' 条或 ' + intVal + ' 秒定时清空落盘）', 'success');
+    } else {
+      toast(json.message || '保存缓存参数失败', 'error');
+    }
+  } catch (err) {
+    toast('保存缓存参数异常', 'error');
   }
 }
 
@@ -2286,23 +2338,30 @@ function renderLogsTable(logs) {
     var timeStr = escapeHtml(item.time || '-');
     var modelStr = escapeHtml(item.model || 'unknown');
     var latencyStr = (item.latency || 0) + ' ms';
+    var keyMaskStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '<span style="color:var(--color-muted);">-</span>';
+    var attemptStr = item.attemptIndex ? ('第 ' + item.attemptIndex + ' 次') : '-';
+    var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
 
     return '<tr>' +
-      '<td style="padding:10px 12px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
-      '<td style="padding:10px 12px;"><code>' + modelStr + '</code></td>' +
-      '<td style="padding:10px 12px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span></td>' +
-      '<td style="padding:10px 12px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
-      '<td style="padding:10px 12px;font-size:var(--text-xs);color:' + (isSuccess ? 'var(--color-muted)' : 'var(--color-danger)') + ';max-width:320px;word-break:break-all;">' + errText + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
+      '<td style="padding:8px 10px;"><code>' + modelStr + '</code></td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;">' + keyMaskStr + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + attemptStr + '</td>' +
+      '<td style="padding:8px 10px;font-size:var(--text-xs);color:' + (isSuccess ? 'var(--color-muted)' : 'var(--color-danger)') + ';max-width:300px;word-break:break-all;">' + errText + '</td>' +
     '</tr>';
   }).join('');
 
   container.innerHTML = '<div class="table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);"><table class="data-table" style="width:100%;text-align:left;border-collapse:collapse;">' +
     '<thead><tr style="border-bottom:1px solid var(--color-rule);font-size:var(--text-xs);color:var(--color-muted);background:var(--color-paper-2);">' +
-      '<th style="padding:10px 12px;">请求时间</th>' +
-      '<th style="padding:10px 12px;">选中模型</th>' +
-      '<th style="padding:10px 12px;">状态码</th>' +
-      '<th style="padding:10px 12px;">响应耗时</th>' +
-      '<th style="padding:10px 12px;">失败原因</th>' +
+      '<th style="padding:10px 10px;">请求时间</th>' +
+      '<th style="padding:10px 10px;">选中模型</th>' +
+      '<th style="padding:10px 10px;">API Key</th>' +
+      '<th style="padding:10px 10px;">状态码</th>' +
+      '<th style="padding:10px 10px;">响应耗时</th>' +
+      '<th style="padding:10px 10px;">尝试轮次</th>' +
+      '<th style="padding:10px 10px;">失败原因</th>' +
     '</tr></thead>' +
     '<tbody style="divide-y:1px solid var(--color-rule);">' + rowsHtml + '</tbody>' +
   '</table></div>';

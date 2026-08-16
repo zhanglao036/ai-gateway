@@ -100,12 +100,26 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
   }
 }
 
+function maskKey(key: string): string {
+  if (!key) return ''
+  const trimmed = key.trim()
+  if (trimmed.length <= 8) return '***'
+  return `${trimmed.substring(0, 4)}***${trimmed.substring(trimmed.length - 4)}`
+}
+
 async function recordLog(
   env: Env,
   startTime: number,
   model: string,
   status: number,
-  error?: string | null
+  error?: string | null,
+  extra?: {
+    keyMask?: string | null
+    attemptIndex?: number
+    routePath?: string | null
+    isStream?: boolean
+    clientIp?: string | null
+  }
 ) {
   const latency = Date.now() - startTime
   const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
@@ -116,6 +130,11 @@ async function recordLog(
     latency,
     status,
     error: error || null,
+    keyMask: extra?.keyMask || null,
+    attemptIndex: extra?.attemptIndex || 1,
+    routePath: extra?.routePath || null,
+    isStream: extra?.isStream || false,
+    clientIp: extra?.clientIp || null,
   })
 }
 
@@ -277,9 +296,17 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
     let model = rawModel
     requestedModel = model || 'unknown'
+    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null
+    const routeUrl = new URL(c.req.url)
+    const routePath = routeUrl.pathname
+    const isStreamReq = !!body.stream
 
     if (!model) {
-      await recordLog(c.env, startTime, requestedModel, 400, '缺少 model 参数')
+      await recordLog(c.env, startTime, requestedModel, 400, '缺少 model 参数', {
+        routePath,
+        isStream: isStreamReq,
+        clientIp,
+      })
       return c.json({ error: { message: '缺少 model 参数', type: 'invalid_request_error' } }, 400)
     }
 
@@ -391,8 +418,11 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       const enabledKeys = provider.apiKeys.filter(k => k.enabled)
       const forwardBody = { ...body, model: modelId }
-      // 自动清洗兼容性参数：剥离听书/客户端自动附带但部分上游模型不支持的 thinking 属性
+      // 自动清洗兼容性参数：剥离听书/客户端自动附带但部分上游模型不支持的非标参数
       delete (forwardBody as Record<string, unknown>).thinking
+      delete (forwardBody as Record<string, unknown>).disable_think
+      delete (forwardBody as Record<string, unknown>).no_chain_of_thought
+      delete (forwardBody as Record<string, unknown>).do_sample
       const url = new URL(c.req.url)
       const subPath = url.pathname.replace(/^\/v1\//, '') || 'chat/completions'
 
@@ -521,6 +551,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
     for (const keyIndex of keyOrder) {
       const apiKey = enabledKeys[keyIndex].key
+      const masked = maskKey(apiKey)
       try {
         const forwardHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -591,7 +622,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             'Content-Type': response.headers.get('Content-Type') || 'application/json',
             'Cache-Control': 'no-store',
           }
-          await recordLog(c.env, startTime, requestedModel, response.status, null)
+          await recordLog(c.env, startTime, requestedModel, response.status, null, {
+            keyMask: masked,
+            attemptIndex: attempts,
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+          })
           await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
           return new Response(resText !== null ? resText : response.body, {
             status: response.status,
@@ -623,7 +660,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         const errorData = await response.json().catch(async () => ({ error: { message: await response.text() } }))
         const errMsg = (errorData as { error?: { message?: string } })?.error?.message || `HTTP ${response.status}`
         await recordModelFailure(c.env, providerId, modelId, response.status, errMsg)
-        await recordLog(c.env, startTime, requestedModel, response.status, errMsg)
+        await recordLog(c.env, startTime, requestedModel, response.status, errMsg, {
+          keyMask: masked,
+          attemptIndex: attempts,
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+        })
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
         if (isAutoRequest && attempts < maxAttempts) {
           lastError = response
@@ -657,7 +700,12 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       const errorBody = await lastError.text().catch(() => '所有 API Key 均失败')
       const errMsg = `所有 API Key 已用完，最后一次错误: HTTP ${lastError.status}`
       await recordModelFailure(c.env, providerId, modelId, lastError.status || 502, errorBody)
-      await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg)
+      await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg, {
+        attemptIndex: attempts,
+        routePath,
+        isStream: isStreamReq,
+        clientIp,
+      })
       await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
       if (isAutoRequest && attempts < maxAttempts) {
         continue // outer while-loop continue to next provider in Tier 1
@@ -676,13 +724,23 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       continue // outer while-loop continue to next provider
     }
 
-    await recordLog(c.env, startTime, requestedModel, 500, '没有可用的 API Key')
+    await recordLog(c.env, startTime, requestedModel, 500, '没有可用的 API Key', {
+      attemptIndex: attempts,
+      routePath,
+      isStream: isStreamReq,
+      clientIp,
+    })
     return c.json({
       error: { message: '没有可用的 API Key', type: 'configuration_error' },
     }, 500)
   }
 
-  await recordLog(c.env, startTime, requestedModel, 500, '所有自动补位与重试模型均已失败')
+  await recordLog(c.env, startTime, requestedModel, 500, '所有自动补位与重试模型均已失败', {
+    attemptIndex: attempts,
+    routePath,
+    isStream: isStreamReq,
+    clientIp,
+  })
   return c.json({
     error: { message: '所有自动补位与重试模型均已失败', type: 'server_error' },
   }, 500)

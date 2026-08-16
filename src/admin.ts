@@ -15,6 +15,8 @@ import {
   clearLogs,
   getDebugMode,
   setDebugMode,
+  getLogConfig,
+  saveLogConfig,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
@@ -410,10 +412,10 @@ export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
 
 export async function handleGetLogs(c: Context<{ Bindings: Env }>) {
   const logs = await getLogs(c.env)
-  const debugMode = await getDebugMode(c.env)
+  const config = await getLogConfig(c.env)
   return c.json<ApiResponse>({
     success: true,
-    data: { logs, debugMode },
+    data: { logs, debugMode: config.debugMode, config },
   })
 }
 
@@ -426,22 +428,27 @@ export async function handleClearLogs(c: Context<{ Bindings: Env }>) {
 }
 
 export async function handleGetDebugMode(c: Context<{ Bindings: Env }>) {
-  const debugMode = await getDebugMode(c.env)
+  const config = await getLogConfig(c.env)
   return c.json<ApiResponse>({
     success: true,
-    data: { debugMode },
+    data: { debugMode: config.debugMode, config },
   })
 }
 
 export async function handleToggleDebugMode(c: Context<{ Bindings: Env }>) {
-  const body = await c.req.json<{ debugMode: boolean }>().catch(() => ({ debugMode: false }))
-  await setDebugMode(c.env, !!body.debugMode)
+  const body = await c.req.json<{ debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }>().catch(() => ({} as { debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }))
+  await saveLogConfig(c.env, {
+    debugMode: !!body.debugMode,
+    bufferMaxCount: body.bufferMaxCount,
+    flushIntervalSeconds: body.flushIntervalSeconds,
+  })
+  const updatedConfig = await getLogConfig(c.env)
   return c.json<ApiResponse>({
     success: true,
-    data: { debugMode: !!body.debugMode },
+    data: { debugMode: updatedConfig.debugMode, config: updatedConfig },
     message: body.debugMode
       ? '调试模式已开启：每条请求日志实时写入 KV，前端面板实时刷新'
-      : '调试模式已关闭：日志采用内存缓存队列，满足阈值/定时器批量落盘（未落地日志已强制落盘）',
+      : `正式模式已启用：日志内存缓存策略生效（满 ${updatedConfig.bufferMaxCount} 条或 ${updatedConfig.flushIntervalSeconds} 秒定时批量落盘，未落地日志已强制立即落盘）`,
   })
 }
 
