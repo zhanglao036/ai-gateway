@@ -626,6 +626,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         await recordLog(c.env, startTime, requestedModel, response.status, errMsg)
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
         if (isAutoRequest && attempts < maxAttempts) {
+          lastError = response
           break // break standard key loop to let outer while-loop continue to next provider
         }
         return c.json(errorData, response.status as Parameters<typeof c.json>[1])
@@ -651,7 +652,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     // 写回健康状态
     if (healthUpdated) await writeHealth(c.env, providerId, healthData)
 
-    // 所有 key 均失败
+    // 所有 key 均失败或遇到异常中断
     if (lastError) {
       const errorBody = await lastError.text().catch(() => '所有 API Key 均失败')
       const errMsg = `所有 API Key 已用完，最后一次错误: HTTP ${lastError.status}`
@@ -659,7 +660,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg)
       await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
       if (isAutoRequest && attempts < maxAttempts) {
-        continue // outer while-loop continue to next provider
+        continue // outer while-loop continue to next provider in Tier 1
       }
       return c.json({
         error: {
