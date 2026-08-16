@@ -263,9 +263,22 @@ export async function getAllAvailableModels(env: Env): Promise<Array<{ provider:
 }
 
 /**
+ * 辅助函数：计算每个提供商在第一梯队中的最大允许席位上限 (Fair Share Cap)
+ * 假设总席位为 9 席：
+ * - 若可用提供商 >= 9 家：每家最多 1 席（确保 9 个席位分给 9 家不同提供商）
+ * - 若可用提供商 < 9 家（如 N 家）：单家基础配额为 ceil(9 / N)
+ */
+export function calculateProviderMaxQuota(activeProviderCount: number, maxSlots: number = TIER_1_MAX_SLOTS): number {
+  if (activeProviderCount <= 0) return maxSlots
+  if (activeProviderCount >= maxSlots) return 1
+  return Math.ceil(maxSlots / activeProviderCount)
+}
+
+/**
  * 无历史梯队时的“轮询交叉初始化探测”策略：
- * 各个提供商轮询各抽一个模型交叉测试，目标填满9个第一梯队席位；
- * 一轮没填满继续下一轮；直到梯队满，或者全部模型探测完毕就停止。
+ * 保证模型均匀分布在所有提供商中：
+ * 1. 严格遵守单提供商席位配额（Quota），避免前几家提供商独占所有 9 个名额。
+ * 2. 轮询交叉测试，第一轮优先让每家提供商贡献 1 个成功模型，未满时再进入第二轮填充。
  * 探测完成后批量把延迟、探测结果一次性写入 KV。
  */
 export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
@@ -295,16 +308,41 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
   const nowStr = new Date().toISOString().split('T')[0]
 
   const providerIds = Array.from(providerModelsMap.keys())
+  const activeProviderCount = providerIds.length
+  const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviderCount, TIER_1_MAX_SLOTS)
+
   const providerPointers = new Map<string, number>()
-  for (const pid of providerIds) providerPointers.set(pid, 0)
+  const providerTier1Count = new Map<string, number>()
+  for (const pid of providerIds) {
+    providerPointers.set(pid, 0)
+    providerTier1Count.set(pid, 0)
+  }
+
+  // 区分【文本】模型优先
+  for (const pid of providerIds) {
+    const models = providerModelsMap.get(pid) || []
+    models.sort((a, b) => {
+      const mA = a.provider.models.find((m) => m.id === a.modelId)
+      const mB = b.provider.models.find((m) => m.id === b.modelId)
+      const catA = mA?.category === '文本' ? 0 : 1
+      const catB = mB?.category === '文本' ? 0 : 1
+      if (catA !== catB) return catA - catB
+      return a.modelId.localeCompare(b.modelId)
+    })
+  }
 
   let remainingProviders = providerIds.length
 
-  // 轮询交叉测试
+  // 轮询交叉测试，严格受控于单厂家配额
   while (tier1.length < TIER_1_MAX_SLOTS && remainingProviders > 0) {
     remainingProviders = 0
     for (const pid of providerIds) {
       if (tier1.length >= TIER_1_MAX_SLOTS) break
+
+      const currentCount = providerTier1Count.get(pid) || 0
+      if (currentCount >= maxQuotaPerProvider) {
+        continue // 该提供商已达均匀配额上限
+      }
 
       const models = providerModelsMap.get(pid) || []
       const ptr = providerPointers.get(pid) || 0
@@ -325,14 +363,51 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
             fullId: item.fullId,
             addedAt: now,
           })
+          providerTier1Count.set(pid, currentCount + 1)
         } else {
-          // 记录失败
           tier2.push({
             providerId: item.provider.id,
             modelId: item.modelId,
             fullId: item.fullId,
             addedAt: now,
           })
+        }
+      }
+    }
+  }
+
+  // 如果各厂家严格配额后仍未补满 9 席（例如部分厂家模型不足或测试失败），放宽配额继续填充剩余席位
+  if (tier1.length < TIER_1_MAX_SLOTS) {
+    let hasMore = true
+    while (tier1.length < TIER_1_MAX_SLOTS && hasMore) {
+      hasMore = false
+      for (const pid of providerIds) {
+        if (tier1.length >= TIER_1_MAX_SLOTS) break
+        const models = providerModelsMap.get(pid) || []
+        const ptr = providerPointers.get(pid) || 0
+        if (ptr < models.length) {
+          hasMore = true
+          const item = models[ptr]
+          providerPointers.set(pid, ptr + 1)
+
+          const metric = await runSingleModelProbe(env, item.provider, item.modelId)
+          probeStats[item.fullId] = metric
+
+          if (metric.success) {
+            tier1.push({
+              providerId: item.provider.id,
+              modelId: item.modelId,
+              fullId: item.fullId,
+              addedAt: now,
+            })
+          } else {
+            tier2.push({
+              providerId: item.provider.id,
+              modelId: item.modelId,
+              fullId: item.fullId,
+              addedAt: now,
+            })
+          }
         }
       }
     }
@@ -371,7 +446,8 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
 /**
  * 带有历史 KV 数据的初始化与重测逻辑：
  * ①如果KV存在前一日/历史有效的第一梯队历史数据：以此作为基底；对梯队内模型执行一轮轻量探测；
- * 剔除失败、冷却、永久失效的模型；之后正常运行动态淘汰、空位补位规则。
+ * 剔除失败、冷却、永久失效以及严重超出提供商均匀配额的多余模型；
+ * 之后正常运行动态淘汰、空位补位规则。
  */
 export async function validateAndRebuildHistoryTier1(
   env: Env,
@@ -380,17 +456,35 @@ export async function validateAndRebuildHistoryTier1(
   const allModels = await getAllAvailableModels(env)
   const modelMap = new Map(allModels.map((item) => [item.fullId, item]))
 
+  // 获取所有活跃提供商数量并计算均匀配额
+  const activeProviders = new Set(allModels.map((item) => item.provider.id))
+  const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.size, TIER_1_MAX_SLOTS)
+
   const probeStats: Record<string, ProbeMetric> = { ...(existing.probeStats || {}) }
   const businessStats: Record<string, BusinessMetric> = { ...(existing.businessStats || {}) }
   const newTier1: TierModelRef[] = []
   const newTier2: TierModelRef[] = []
   const now = Date.now()
 
-  // 1. 对前一日/历史 Tier 1 内的模型执行一轮轻量探测
+  const providerCounts = new Map<string, number>()
+
+  // 1. 对历史 Tier 1 内的模型执行一轮轻量探测，并执行多样性配额检查
   for (const m of existing.tier1 || []) {
     const item = modelMap.get(m.fullId)
     if (!item) {
       // 模型不存在/已被永久禁用/已删除
+      continue
+    }
+
+    const currentCount = providerCounts.get(m.providerId) || 0
+    // 如果单个提供商在第一梯队中超出均匀配额，多余模型主动降级至第二梯队，给其他提供商让位
+    if (currentCount >= maxQuotaPerProvider) {
+      newTier2.push({
+        providerId: m.providerId,
+        modelId: m.modelId,
+        fullId: m.fullId,
+        addedAt: now,
+      })
       continue
     }
 
@@ -402,6 +496,7 @@ export async function validateAndRebuildHistoryTier1(
         ...m,
         addedAt: m.addedAt || now,
       })
+      providerCounts.set(m.providerId, currentCount + 1)
     } else {
       // 探测失败或处于冷却/失效状态，从第一梯队剔除，降至第二梯队
       newTier2.push({
@@ -451,10 +546,11 @@ export async function validateAndRebuildHistoryTier1(
  * 当第一梯队有空位时，从第二梯队候选池中选拔模型填满 9 席。
  * 
  * 1. 探测执行必须经过块4的探测互斥锁，不可并发执行补位探测。
- * 2. 探测优先遍历第二梯队内标记【文本】分类的模型；各个提供商轮抽模型交叉测试；一轮探测没有补满梯队席位，继续下一轮；直到梯队填满或者所有模型遍历完毕停止。
- * 3. 探测游标持久化存KV：每次探测结束记录当前游标位置；下一次补位探测从上一次游标下一个模型继续遍历，不要每次探测从头开始遍历全部提供商。
- * 4. 每一轮探测结束，选取本轮探测延迟最低的可用模型晋升进入第一梯队。
- * 5. 全部状态、游标、梯队变更，落盘严格遵守块1调试/正式模式KV策略。
+ * 2. 均匀分布保障：严格计算单提供商席位配额（Quota），优先给第一梯队中席位较少/为0的提供商补位。
+ * 3. 探测优先遍历第二梯队内标记【文本】分类的模型；各个提供商轮抽模型交叉测试；
+ * 4. 探测游标持久化存KV：每次探测结束记录当前游标位置；下一次补位探测从上一次游标下一个模型继续遍历。
+ * 5. 每一轮探测结束，选取本轮探测延迟最低的可用模型晋升进入第一梯队（不超过单厂家配额）。
+ * 6. 全部状态、游标、梯队变更，落盘严格遵守块1调试/正式模式KV策略。
  */
 export async function backfillTier1FromTier2(
   env: Env,
@@ -484,6 +580,16 @@ export async function backfillTier1FromTier2(
       return storage
     }
 
+    // 统计当前活跃提供商总数与当前各提供商在 Tier 1 中的占位
+    const allProviders = await getProviders(env)
+    const activeProviders = allProviders.filter((p) => {
+      if (!p.enabled) return false
+      const keys = p.apiKeys.filter((k) => k.enabled)
+      if (!isOpenCodeProvider(p.id) && keys.length === 0) return false
+      return true
+    })
+    const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.length, TIER_1_MAX_SLOTS)
+
     // 区分【文本】模型优先：优先遍历第二梯队内标记【文本】分类的模型
     const textCandidates: typeof candidates = []
     const otherCandidates: typeof candidates = []
@@ -504,11 +610,9 @@ export async function backfillTier1FromTier2(
     let currentSlotsNeeded = TIER_1_MAX_SLOTS - storage.tier1.length
 
     // 辅助函数：针对候选模型组运行轮询交叉探测
-    const runWheelForGroup = async (groupCandidates: typeof candidates) => {
+    const runWheelForGroup = async (groupCandidates: typeof candidates, enforceQuota: boolean) => {
       if (groupCandidates.length === 0 || currentSlotsNeeded <= 0) return
 
-      // 获取全量提供商 ID 列表，以支持动态数量提供商无缝轮转（Round-Robin）
-      const allProviders = await getProviders(env)
       const allProviderIds = allProviders.map((p) => p.id).sort()
 
       // 按 providerId 将候选模型分组
@@ -522,25 +626,33 @@ export async function backfillTier1FromTier2(
 
       let providerIds = Object.keys(providerToModels)
 
-      // 1. 探测游标持久化存 KV：如果在全量提供商中找到上一次游标，按轮询偏置距离（Round-Robin Offset）排序
-      const lastCursor = storage.lastCursorProviderId
-      if (lastCursor && allProviderIds.includes(lastCursor)) {
-        const lastIdx = allProviderIds.indexOf(lastCursor)
-        const N = allProviderIds.length
-        providerIds.sort((a, b) => {
-          const idxA = allProviderIds.indexOf(a)
-          const idxB = allProviderIds.indexOf(b)
-          const distA = (idxA - lastIdx + N) % N
-          const distB = (idxB - lastIdx + N) % N
-          const weightA = distA === 0 ? N : distA
-          const weightB = distB === 0 ? N : distB
-          return weightA - weightB
-        })
-      } else {
-        providerIds.sort()
-      }
+      // 统计每个提供商目前在 Tier 1 拥有的席位数量，优先排布席位少的提供商（确保均匀）
+      const getProviderTier1Count = (pid: string) => storage.tier1.filter((m) => m.providerId === pid).length
 
-      // 组内各个提供商内部候选模型排序
+      // 探测游标与席位均衡综合排序：
+      // 1. 在 Tier 1 中席位较少（甚至为 0）的提供商排在最前面
+      // 2. 席位相同的情况下，根据上次轮抽游标偏置进行平滑轮转
+      const lastCursor = storage.lastCursorProviderId
+      const lastIdx = lastCursor && allProviderIds.includes(lastCursor) ? allProviderIds.indexOf(lastCursor) : 0
+      const N = Math.max(allProviderIds.length, 1)
+
+      providerIds.sort((a, b) => {
+        const countA = getProviderTier1Count(a)
+        const countB = getProviderTier1Count(b)
+        if (countA !== countB) {
+          return countA - countB // 席位少的优先探测与晋升
+        }
+
+        const idxA = allProviderIds.indexOf(a)
+        const idxB = allProviderIds.indexOf(b)
+        const distA = (idxA - lastIdx + N) % N
+        const distB = (idxB - lastIdx + N) % N
+        const weightA = distA === 0 ? N : distA
+        const weightB = distB === 0 ? N : distB
+        return weightA - weightB
+      })
+
+      // 组内各个提供商内部候选模型排序 (文本/通用优先)
       for (const pid of providerIds) {
         providerToModels[pid].sort((a, b) => a.modelId.localeCompare(b.modelId))
       }
@@ -581,8 +693,12 @@ export async function backfillTier1FromTier2(
         hasMoreToTest = false
         const roundToTest: typeof candidates = []
 
-        // 各个提供商轮抽 1 个正常候选模型
+        // 各个提供商轮抽 1 个正常候选模型（若受配额控制，超额提供商本轮跳过）
         for (const pid of providerIds) {
+          if (enforceQuota && getProviderTier1Count(pid) >= maxQuotaPerProvider) {
+            continue // 该提供商已达均匀配额
+          }
+
           const idx = providerPointers[pid]
           const list = providerToModels[pid]
           if (idx < list.length) {
@@ -630,12 +746,16 @@ export async function backfillTier1FromTier2(
           }
         }
 
-        // 3. 选取本轮探测成功的可用模型按延迟由低到高（最快的）晋升进入第一梯队
+        // 选取本轮探测成功的可用模型按延迟由低到高晋升进入第一梯队
         const successCandidates = roundTested.filter((item) => item.metric.success)
         if (successCandidates.length > 0) {
           successCandidates.sort((a, b) => a.metric.latency - b.metric.latency)
           for (const item of successCandidates) {
             if (currentSlotsNeeded <= 0) break
+
+            if (enforceQuota && getProviderTier1Count(item.ref.providerId) >= maxQuotaPerProvider) {
+              continue // 晋升时再次严格校验配额
+            }
 
             // 晋升到第一梯队
             storage.tier1.push({
@@ -657,12 +777,20 @@ export async function backfillTier1FromTier2(
       }
     }
 
-    // 优先遍历标记【文本】分类的模型
-    await runWheelForGroup(textCandidates)
+    // 阶段 1：在严格执行均匀配额（Fair Share Quota）的前提下，优先遍历标记【文本】分类的模型
+    await runWheelForGroup(textCandidates, true)
 
-    // 若依然未满，继续遍历其余分类模型
+    // 阶段 2：在严格执行配额前提下，若仍有空位，遍历其余分类模型
     if (currentSlotsNeeded > 0) {
-      await runWheelForGroup(otherCandidates)
+      await runWheelForGroup(otherCandidates, true)
+    }
+
+    // 阶段 3：若由于部分提供商无可用模型导致第一梯队仍未补满 9 席，放宽配额限制（false）用剩余模型填满
+    if (currentSlotsNeeded > 0) {
+      await runWheelForGroup(textCandidates, false)
+    }
+    if (currentSlotsNeeded > 0) {
+      await runWheelForGroup(otherCandidates, false)
     }
 
     // 全部状态、游标、梯队变更落盘
