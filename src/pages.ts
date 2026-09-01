@@ -1,5 +1,5 @@
 import { Context } from 'hono'
-import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig } from './storage'
+import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env } from './types'
 import { CSS_CONTENT } from './pages.css'
@@ -589,6 +589,7 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
   const proxyKeys = await getProxyKeys(c.env)
   const logs = await getLogs(c.env)
   const logConfig = await getLogConfig(c.env)
+  const customRoutes = await getCustomModelRoutes(c.env)
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
   const modelsCount = providers.reduce((total, provider) => total + provider.models.length, 0)
@@ -607,6 +608,7 @@ ${H('管理')}
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
       <a class="admin-nav__link" href="#providers"><i class="fas fa-server" aria-hidden="true"></i><span>提供商</span><b>${providers.length}</b></a>
+      <a class="admin-nav__link" href="#custom-routes"><i class="fas fa-route" aria-hidden="true"></i><span>指定模型路由</span><b id="custom-routes-count-badge">${customRoutes.length}</b></a>
       <a class="admin-nav__link" href="#proxy-keys"><i class="fas fa-key" aria-hidden="true"></i><span>转发 Key</span><b>${proxyKeys.length}</b></a>
       <a class="admin-nav__link" href="#logs"><i class="fas fa-list-alt" aria-hidden="true"></i><span>请求日志</span><b id="logs-count-badge">${logs.length}</b></a>
     </nav>
@@ -627,7 +629,7 @@ ${H('管理')}
   <div class="admin-main">
     <header class="admin-topbar">
       <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span></a>
-      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#providers">提供商</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
+      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
       <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
       <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
     </header>
@@ -826,6 +828,32 @@ ${H('管理')}
             </div>
           </article>`
           }).join('') : `<div class="empty-state"><i class="fas fa-server" aria-hidden="true"></i><h3>还没有提供商</h3><p>添加第一个上游提供商，配置 API 地址、Key 和模型。</p><button class="btn btn-p" onclick="showAdd()">添加提供商</button></div>`}
+        </div>
+      </section>
+
+      <section id="custom-routes" class="workspace-section" aria-labelledby="routes-title">
+        <div class="section-heading section-heading--admin">
+          <div>
+            <h2 id="routes-title">指定模型路由</h2>
+            <p>指定客户端请求特定模型名时，强制转发至特定提供商的指定模型（如客户端请求 <code>openclaw/auto</code> 时转发到指定的高性能模型）。</p>
+          </div>
+          <button type="button" class="btn btn-p" onclick="openAddCustomRouteModal()"><i class="fas fa-plus" aria-hidden="true"></i>添加指定规则</button>
+        </div>
+        <div class="table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);">
+          <table class="data-table" id="custom-routes-table" style="width:100%;text-align:left;border-collapse:collapse;">
+            <thead>
+              <tr style="border-bottom:1px solid var(--color-rule);font-size:var(--text-xs);color:var(--color-muted);background:var(--color-paper-2);">
+                <th style="padding:10px 12px;">请求模型名称 (匹配项)</th>
+                <th style="padding:10px 12px;">目标提供商</th>
+                <th style="padding:10px 12px;">目标模型</th>
+                <th style="padding:10px 12px;">启用状态</th>
+                <th style="padding:10px 12px;text-align:right;">操作</th>
+              </tr>
+            </thead>
+            <tbody id="custom-routes-tbody">
+              ${customRoutes.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型。</td></tr>' : ''}
+            </tbody>
+          </table>
         </div>
       </section>
 
@@ -2596,7 +2624,168 @@ async function updateModelCat(providerId, modelId, category) {
   } catch (err) {}
 }
 
+/* ========== 自定义指定模型路由逻辑 ========== */
+var customRoutesData = [];
+var currentEditingRouteId = '';
+
+async function loadCustomRoutes() {
+  try {
+    var res = await fetch('/admin/api/custom-routes');
+    var json = await res.json();
+    if (json.success && Array.isArray(json.data)) {
+      customRoutesData = json.data;
+      renderCustomRoutesTable();
+      var countBadge = document.getElementById('custom-routes-count-badge');
+      if (countBadge) countBadge.textContent = customRoutesData.length;
+    }
+  } catch (err) {
+    console.error('加载自定义路由失败:', err);
+  }
+}
+
+function renderCustomRoutesTable() {
+  var tbody = document.getElementById('custom-routes-tbody');
+  if (!tbody) return;
+  if (!customRoutesData || customRoutesData.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型。</td></tr>';
+    return;
+  }
+  tbody.innerHTML = customRoutesData.map(function(r) {
+    var pName = r.targetProviderId;
+    var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+    if (pObj) pName = pObj.name + ' (' + pObj.id + ')';
+
+    return '<tr>' +
+      '<td style="padding:10px 12px;"><code>' + escapeHtml(r.sourceModel) + '</code></td>' +
+      '<td style="padding:10px 12px;color:var(--color-ink);">' + escapeHtml(pName) + '</td>' +
+      '<td style="padding:10px 12px;"><code>' + escapeHtml(r.targetModelId) + '</code></td>' +
+      '<td style="padding:10px 12px;"><label class="tg"><input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' data-id="' + escapeHtml(r.id) + '" onchange="toggleCustomRouteBtn(this)"><span class="sl"></span></label></td>' +
+      '<td style="padding:10px 12px;text-align:right;">' +
+        '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="editCustomRouteBtn(this)"><i class="fas fa-edit"></i> 编辑</button>' +
+        '<button type="button" class="btn btn-d btn-xs" data-id="' + escapeHtml(r.id) + '" onclick="deleteCustomRouteBtn(this)"><i class="fas fa-trash"></i> 删除</button>' +
+      '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function openAddCustomRouteModal() {
+  currentEditingRouteId = '';
+  var modalHtml = '<h3><i class="fas fa-route c-p"></i> 添加指定模型路由</h3>' +
+    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 openclaw" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
+    '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
+      draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="">请先选择提供商...</option></select></div>' +
+    '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存规则</button></div>';
+  showM(modalHtml);
+}
+
+function updateCustomRouteModelOptions(selectedModelId) {
+  var pSelect = document.getElementById('cr-provider');
+  var mSelect = document.getElementById('cr-model');
+  if (!pSelect || !mSelect) return;
+  var pid = pSelect.value;
+  if (!pid) {
+    mSelect.innerHTML = '<option value="">请先选择提供商...</option>';
+    return;
+  }
+  var p = draftProviders.find(function(item) { return item.id === pid; });
+  if (!p || !p.models || p.models.length === 0) {
+    mSelect.innerHTML = '<option value="">该提供商暂无可用模型</option>';
+    return;
+  }
+  mSelect.innerHTML = p.models.map(function(m) {
+    var isSel = m.id === selectedModelId ? 'selected' : '';
+    return '<option value="' + escapeHtml(m.id) + '" ' + isSel + '>' + escapeHtml(m.name || m.id) + ' (' + escapeHtml(m.id) + ')</option>';
+  }).join('');
+}
+
+function editCustomRouteBtn(btn) {
+  var id = btn.getAttribute('data-id');
+  if (!id) return;
+  var r = customRoutesData.find(function(item) { return item.id === id; });
+  if (!r) return;
+  currentEditingRouteId = id;
+  var modalHtml = '<h3><i class="fas fa-edit c-p"></i> 编辑指定模型路由</h3>' +
+    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
+    '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
+      draftProviders.map(function(p) {
+        var isSel = p.id === r.targetProviderId ? 'selected' : '';
+        return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
+      }).join('') +
+    '</select></div>' +
+    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"></select></div>' +
+    '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存更改</button></div>';
+  showM(modalHtml);
+  updateCustomRouteModelOptions(r.targetModelId);
+}
+
+async function saveCustomRouteFromModal() {
+  var sourceEl = document.getElementById('cr-source');
+  var provEl = document.getElementById('cr-provider');
+  var modelEl = document.getElementById('cr-model');
+  if (!sourceEl || !provEl || !modelEl) return;
+  var source = sourceEl.value.trim();
+  var pid = provEl.value;
+  var mid = modelEl.value;
+  if (!source || !pid || !mid) {
+    toast('请完整填写请求模型名称、提供商和模型', 'error');
+    return;
+  }
+  var ruleId = currentEditingRouteId || ('cr_' + Date.now());
+  var existingIdx = customRoutesData.findIndex(function(r) { return r.id === ruleId; });
+  var routeObj = { id: ruleId, sourceModel: source, targetProviderId: pid, targetModelId: mid, enabled: true };
+  if (existingIdx >= 0) {
+    routeObj.enabled = customRoutesData[existingIdx].enabled;
+    customRoutesData[existingIdx] = routeObj;
+  } else {
+    customRoutesData.push(routeObj);
+  }
+  await saveCustomRoutesToServer();
+  closeM();
+}
+
+async function toggleCustomRouteBtn(checkbox) {
+  var id = checkbox.getAttribute('data-id');
+  if (!id) return;
+  var r = customRoutesData.find(function(item) { return item.id === id; });
+  if (r) {
+    r.enabled = checkbox.checked;
+    await saveCustomRoutesToServer();
+  }
+}
+
+async function deleteCustomRouteBtn(btn) {
+  var id = btn.getAttribute('data-id');
+  if (!id) return;
+  if (!(await cM('确定删除该条指定路由规则？'))) return;
+  customRoutesData = customRoutesData.filter(function(r) { return r.id !== id; });
+  await saveCustomRoutesToServer();
+}
+
+async function saveCustomRoutesToServer() {
+  try {
+    var res = await fetch('/admin/api/custom-routes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ routes: customRoutesData })
+    });
+    var json = await res.json();
+    if (json.success) {
+      renderCustomRoutesTable();
+      var countBadge = document.getElementById('custom-routes-count-badge');
+      if (countBadge) countBadge.textContent = customRoutesData.length;
+      toast('指定路由规则已保存生效', 'success');
+    } else {
+      aM(json.message || '保存失败', 'error');
+    }
+  } catch (err) {
+    aM('保存指定路由异常：' + ((err && err.message) || String(err)), 'error');
+  }
+}
+
 fetchLogs();
+loadCustomRoutes();
 </script>
 </body></html>`)
 }

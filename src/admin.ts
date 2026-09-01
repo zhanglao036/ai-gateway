@@ -17,6 +17,8 @@ import {
   setDebugMode,
   getLogConfig,
   saveLogConfig,
+  getCustomModelRoutes,
+  saveCustomModelRoutes,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
@@ -37,6 +39,7 @@ import type {
   CreateProxyKeyRequest,
   TestModelRequest,
   Model,
+  CustomModelRoute,
 } from './types'
 
 // ===== 系统状态 =====
@@ -451,6 +454,27 @@ export async function handleToggleDebugMode(c: Context<{ Bindings: Env }>) {
       : `正式模式已启用：日志内存缓存策略生效（满 ${updatedConfig.bufferMaxCount} 条或 ${updatedConfig.flushIntervalSeconds} 秒定时批量落盘，未落地日志已强制立即落盘）`,
   })
 }
+
+export async function handleGetCustomRoutes(c: Context<{ Bindings: Env }>) {
+  const routes = await getCustomModelRoutes(c.env)
+  return c.json<ApiResponse>({
+    success: true,
+    data: routes,
+  })
+}
+
+export async function handleSaveCustomRoutes(c: Context<{ Bindings: Env }>) {
+  const body = await c.req.json<{ routes: CustomModelRoute[] }>().catch(() => ({ routes: [] }))
+  const list = Array.isArray(body.routes) ? body.routes : []
+  await saveCustomModelRoutes(c.env, list)
+  const updated = await getCustomModelRoutes(c.env)
+  return c.json<ApiResponse>({
+    success: true,
+    data: updated,
+    message: '自定义指定模型规则已保存',
+  })
+}
+
 
 // ===== 探测任务内存互斥锁 =====
 // 注意：该内存锁仅单 Worker 实例生效。Cloudflare Workers 多实例并发无法实现全局锁，后续可扩展 KV 分布式锁。

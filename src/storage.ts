@@ -1,5 +1,5 @@
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
-import type { Env, Provider, ProxyKey, RequestLog, Session } from './types'
+import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
 import { createLocalKV } from './localKv'
 
 let defaultKV: ReturnType<typeof createLocalKV> | null = null
@@ -442,3 +442,19 @@ export async function clearLogs(env: Env): Promise<void> {
   }
   await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
 }
+
+export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {
+  const raw = await kvGet(env, KV_KEYS.CUSTOM_MODEL_ROUTES)
+  if (!raw) return []
+  try {
+    const list = JSON.parse(raw)
+    return Array.isArray(list) ? list : []
+  } catch {
+    return []
+  }
+}
+
+export async function saveCustomModelRoutes(env: Env, routes: CustomModelRoute[]): Promise<void> {
+  await kvPut(env, KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(routes))
+}
+

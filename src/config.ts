@@ -38,6 +38,7 @@ export const KV_KEYS = {
   REQUEST_LOGS: 'gateway:request_logs',
   DEBUG_MODE: 'config:debug_mode',
   LOG_CONFIG: 'config:log_settings',
+  CUSTOM_MODEL_ROUTES: 'config:custom_model_routes',
   TIER_DATA: 'gateway:tier_data',
 } as const
 

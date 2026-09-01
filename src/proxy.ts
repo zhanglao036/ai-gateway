@@ -1,5 +1,5 @@
 import { Context } from 'hono'
-import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode } from './storage'
+import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
 import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './config'
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
@@ -308,6 +308,14 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         clientIp,
       })
       return c.json({ error: { message: '缺少 model 参数', type: 'invalid_request_error' } }, 400)
+    }
+
+    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型）
+    const customRoutes = await getCustomModelRoutes(c.env)
+    const matchedRoute = customRoutes.find((r) => r.enabled && r.sourceModel.trim().toLowerCase() === model.trim().toLowerCase())
+    if (matchedRoute) {
+      model = `${matchedRoute.targetProviderId}/${matchedRoute.targetModelId}`
+      requestedModel = `${rawModel} -> ${model}`
     }
 
     if (model === 'auto' || model === 'auto/auto') {

@@ -97,6 +97,14 @@ export interface LogConfig {
   flushIntervalSeconds: number
 }
 
+export interface CustomModelRoute {
+  id: string
+  sourceModel: string
+  targetProviderId: string
+  targetModelId: string
+  enabled: boolean
+}
+
 export interface TierModelRef {
   providerId: string
   modelId: string

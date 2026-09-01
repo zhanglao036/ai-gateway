@@ -23,6 +23,8 @@ import {
   handleClearLogs,
   handleGetDebugMode,
   handleToggleDebugMode,
+  handleGetCustomRoutes,
+  handleSaveCustomRoutes,
   handleRunProbe,
   handleResetCooldowns,
   handleFetchUpstreamModels,
@@ -129,6 +131,10 @@ app.get('/admin/api/logs', handleGetLogs)
 app.delete('/admin/api/logs', handleClearLogs)
 app.get('/admin/api/debug-mode', handleGetDebugMode)
 app.post('/admin/api/debug-mode', handleToggleDebugMode)
+
+// 自定义指定模型路由
+app.get('/admin/api/custom-routes', handleGetCustomRoutes)
+app.post('/admin/api/custom-routes', handleSaveCustomRoutes)
 
 // ===== API 转发路由（需转发 Key 验证） =====
 app.use('/v1/*', proxyKeyAuthMiddleware)
