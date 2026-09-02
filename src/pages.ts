@@ -2652,15 +2652,22 @@ function renderCustomRoutesTable() {
   }
   tbody.innerHTML = customRoutesData.map(function(r) {
     var pName = r.targetProviderId;
-    var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
-    if (pObj) pName = pObj.name + ' (' + pObj.id + ')';
+    if (r.targetProviderId === 'auto' || r.targetModelId === 'auto') {
+      pName = '⭐ 第一梯队智能路由';
+    } else {
+      var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+      if (pObj) pName = pObj.name + ' (' + pObj.id + ')';
+    }
 
     return '<tr>' +
       '<td style="padding:10px 12px;"><code>' + escapeHtml(r.sourceModel) + '</code></td>' +
       '<td style="padding:10px 12px;color:var(--color-ink);">' + escapeHtml(pName) + '</td>' +
-      '<td style="padding:10px 12px;"><code>' + escapeHtml(r.targetModelId) + '</code></td>' +
+      '<td style="padding:10px 12px;"><code>' + escapeHtml(r.targetModelId) + '</code>' +
+        '<span id="cr-test-res-' + escapeHtml(r.id) + '" style="margin-left:8px;font-size:12px;display:none;"></span>' +
+      '</td>' +
       '<td style="padding:10px 12px;"><label class="tg"><input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' data-id="' + escapeHtml(r.id) + '" onchange="toggleCustomRouteBtn(this)"><span class="sl"></span></label></td>' +
       '<td style="padding:10px 12px;text-align:right;">' +
+        '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="testCustomRouteBtn(this)"><i class="fas fa-bolt"></i> 测延迟</button>' +
         '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="editCustomRouteBtn(this)"><i class="fas fa-edit"></i> 编辑</button>' +
         '<button type="button" class="btn btn-d btn-xs" data-id="' + escapeHtml(r.id) + '" onclick="deleteCustomRouteBtn(this)"><i class="fas fa-trash"></i> 删除</button>' +
       '</td>' +
@@ -2673,6 +2680,7 @@ function openAddCustomRouteModal() {
   var modalHtml = '<h3><i class="fas fa-route c-p"></i> 添加指定模型路由</h3>' +
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 openclaw" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
     '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
+      '<option value="auto">⭐ 智能路由 (第一梯队池 auto/auto)</option>' +
       draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
     '</select></div>' +
     '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="">请先选择提供商...</option></select></div>' +
@@ -2687,6 +2695,10 @@ function updateCustomRouteModelOptions(selectedModelId) {
   var pid = pSelect.value;
   if (!pid) {
     mSelect.innerHTML = '<option value="">请先选择提供商...</option>';
+    return;
+  }
+  if (pid === 'auto') {
+    mSelect.innerHTML = '<option value="auto" selected>auto (全自动毫秒选拔与容灾)</option>';
     return;
   }
   var p = draftProviders.find(function(item) { return item.id === pid; });
@@ -2706,11 +2718,13 @@ function editCustomRouteBtn(btn) {
   var r = customRoutesData.find(function(item) { return item.id === id; });
   if (!r) return;
   currentEditingRouteId = id;
+  var isAuto = r.targetProviderId === 'auto' || r.targetModelId === 'auto';
   var modalHtml = '<h3><i class="fas fa-edit c-p"></i> 编辑指定模型路由</h3>' +
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
     '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
+      '<option value="auto" ' + (isAuto ? 'selected' : '') + '>⭐ 智能路由 (第一梯队池 auto/auto)</option>' +
       draftProviders.map(function(p) {
-        var isSel = p.id === r.targetProviderId ? 'selected' : '';
+        var isSel = (!isAuto && p.id === r.targetProviderId) ? 'selected' : '';
         return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
       }).join('') +
     '</select></div>' +
@@ -2761,6 +2775,61 @@ async function deleteCustomRouteBtn(btn) {
   if (!(await cM('确定删除该条指定路由规则？'))) return;
   customRoutesData = customRoutesData.filter(function(r) { return r.id !== id; });
   await saveCustomRoutesToServer();
+}
+
+async function testCustomRouteBtn(btn) {
+  var id = btn.getAttribute('data-id');
+  if (!id) return;
+  var r = customRoutesData.find(function(item) { return item.id === id; });
+  if (!r) return;
+
+  var resEl = document.getElementById('cr-test-res-' + id);
+  var origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 测速中...';
+  if (resEl) {
+    resEl.style.display = 'inline-block';
+    resEl.style.color = 'var(--color-muted)';
+    resEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 探测中...';
+  }
+
+  try {
+    var res = await fetch('/admin/api/custom-routes/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetProviderId: r.targetProviderId,
+        targetModelId: r.targetModelId
+      })
+    });
+    var json = await res.json();
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+
+    if (json.success) {
+      toast(json.message || '目标模型连通良好', 'success');
+      if (resEl) {
+        var lat = json.data && json.data.latencyMs ? json.data.latencyMs + 'ms' : 'OK';
+        resEl.style.color = '#10b981';
+        resEl.innerHTML = '<span class="bd bd-on" style="font-size:11px;padding:2px 6px;"><i class="fas fa-check"></i> ' + escapeHtml(lat) + '</span>';
+      }
+    } else {
+      toast(json.message || '测试失败', 'error');
+      if (resEl) {
+        resEl.style.color = '#ef4444';
+        resEl.innerHTML = '<span class="bd bd-del" style="font-size:11px;padding:2px 6px;" title="' + escapeHtml(json.message || '异常') + '"><i class="fas fa-times"></i> 失败</span>';
+      }
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+    var errMsg = (err && err.message) || String(err);
+    toast('网络异常: ' + errMsg, 'error');
+    if (resEl) {
+      resEl.style.color = '#ef4444';
+      resEl.innerHTML = '<span class="bd bd-del" style="font-size:11px;padding:2px 6px;"><i class="fas fa-times"></i> 异常</span>';
+    }
+  }
 }
 
 async function saveCustomRoutesToServer() {

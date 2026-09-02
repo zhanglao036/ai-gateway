@@ -25,6 +25,7 @@ import {
   handleToggleDebugMode,
   handleGetCustomRoutes,
   handleSaveCustomRoutes,
+  handleTestCustomRoute,
   handleRunProbe,
   handleResetCooldowns,
   handleFetchUpstreamModels,
@@ -135,6 +136,7 @@ app.post('/admin/api/debug-mode', handleToggleDebugMode)
 // 自定义指定模型路由
 app.get('/admin/api/custom-routes', handleGetCustomRoutes)
 app.post('/admin/api/custom-routes', handleSaveCustomRoutes)
+app.post('/admin/api/custom-routes/test', handleTestCustomRoute)
 
 // ===== API 转发路由（需转发 Key 验证） =====
 app.use('/v1/*', proxyKeyAuthMiddleware)

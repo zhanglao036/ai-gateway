@@ -310,11 +310,15 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       return c.json({ error: { message: '缺少 model 参数', type: 'invalid_request_error' } }, 400)
     }
 
-    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型）
+    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型 或 auto/auto）
     const customRoutes = await getCustomModelRoutes(c.env)
     const matchedRoute = customRoutes.find((r) => r.enabled && r.sourceModel.trim().toLowerCase() === model.trim().toLowerCase())
     if (matchedRoute) {
-      model = `${matchedRoute.targetProviderId}/${matchedRoute.targetModelId}`
+      if (matchedRoute.targetProviderId === 'auto' || matchedRoute.targetModelId === 'auto') {
+        model = 'auto/auto'
+      } else {
+        model = `${matchedRoute.targetProviderId}/${matchedRoute.targetModelId}`
+      }
       requestedModel = `${rawModel} -> ${model}`
     }
 
@@ -571,18 +575,21 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           forwardHeaders['Authorization'] = `Bearer ${apiKey}`
         }
 
+        const isStream = !!forwardBody.stream
+        const fetchTimeoutMs = isStream ? 180000 : 90000
+
         const response = await fetch(forwardUrl, {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(fetchTimeoutMs),
         })
 
         if (response.ok) {
           let resText: string | null = null
           let isContentEmpty = false
 
-          if (!forwardBody.stream) {
+          if (!isStream) {
             try {
               resText = await response.text()
               const resJson = JSON.parse(resText)
@@ -627,8 +634,12 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           if (healthUpdated) await writeHealth(c.env, providerId, healthData)
 
           const responseHeaders: Record<string, string> = {
-            'Content-Type': response.headers.get('Content-Type') || 'application/json',
-            'Cache-Control': 'no-store',
+            'Content-Type': response.headers.get('Content-Type') || (isStream ? 'text/event-stream; charset=utf-8' : 'application/json'),
+            'Cache-Control': 'no-cache, no-transform',
+          }
+          if (isStream) {
+            responseHeaders['Connection'] = 'keep-alive'
+            responseHeaders['X-Accel-Buffering'] = 'no'
           }
           await recordLog(c.env, startTime, requestedModel, response.status, null, {
             keyMask: masked,
@@ -761,9 +772,10 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
   }
 }
 
-/** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀） */
+/** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀及后台指定模型路由） */
 export async function handleModels(c: Context<{ Bindings: Env }>) {
   const providers = await getProviders(c.env)
+  const customRoutes = await getCustomModelRoutes(c.env)
 
   const models: Array<{
     id: string
@@ -782,6 +794,23 @@ export async function handleModels(c: Context<{ Bindings: Env }>) {
       owned_by: 'gateway',
     },
   ]
+
+  // 将启用的自定义指定模型路由（例如 openclaw/auto）加入模型列表，供客户端探测发现
+  for (const cr of customRoutes) {
+    if (!cr.enabled || !cr.sourceModel) continue
+    if (cr.sourceModel.toLowerCase() === 'auto/auto') continue
+    const targetLabel = (cr.targetProviderId === 'auto' || cr.targetModelId === 'auto')
+      ? '第一梯队智能路由'
+      : `${cr.targetProviderId}/${cr.targetModelId}`
+    models.push({
+      id: cr.sourceModel,
+      provider: 'custom_route',
+      provider_name: `指定模型路由 -> ${targetLabel}`,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'gateway',
+    })
+  }
 
   for (const provider of providers) {
     if (!provider.enabled) continue
