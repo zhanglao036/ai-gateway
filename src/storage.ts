@@ -93,12 +93,20 @@ export async function saveLogConfig(
     flushIntervalSeconds: newInterval,
   }
 
-  await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
-  await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
+  try {
+    await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
+    await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
+  } catch (err) {
+    console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+  }
 
   // 切换配置或调试模式瞬间，未落地日志及缓存强制落盘
-  await flushPendingLogs(env)
-  await flushPendingWrites(env)
+  try {
+    await flushPendingLogs(env)
+    await flushPendingWrites(env)
+  } catch (err) {
+    console.warn('[storage] 强制落盘异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+  }
 }
 
 export async function setDebugMode(env: Env, enabled: boolean): Promise<void> {
@@ -127,7 +135,11 @@ export async function kvPut(env: Env, key: string, value: string, options?: { ex
 
   if (isDebugMode(env)) {
     // 调试模式：立即直接落盘 KV
-    await getKV(env).put(key, value, options)
+    try {
+      await getKV(env).put(key, value, options)
+    } catch (err) {
+      console.warn(`[storage] 调试模式写入 KV 异常 (key: ${key}, 已静默降级):`, err instanceof Error ? err.message : String(err))
+    }
     return
   }
 
@@ -389,26 +401,34 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 }
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
-  const config = await getLogConfig(env)
-  if (config.debugMode) {
-    // 调试模式开启：每条请求日志实时写入 KV
-    const currentLogs = await getLogs(env)
-    const updated = [log, ...currentLogs].slice(0, 100)
-    await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(updated))
-    return
-  }
+  try {
+    const config = await getLogConfig(env)
+    if (config.debugMode) {
+      // 调试模式开启：每条请求日志实时写入 KV
+      try {
+        const currentLogs = await getLogs(env)
+        const updated = [log, ...currentLogs].slice(0, 100)
+        await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(updated))
+      } catch (err) {
+        console.warn('[storage] 实时写入日志异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+      }
+      return
+    }
 
-  // 调试模式关闭：推入内存缓存队列
-  logQueue.unshift(log)
-  if (logQueue.length > 100) logQueue.length = 100
+    // 调试模式关闭：推入内存缓存队列
+    logQueue.unshift(log)
+    if (logQueue.length > 100) logQueue.length = 100
 
-  // 达到队列条数阈值：立即批量落盘
-  const maxCount = config.bufferMaxCount || LOG_BATCH_SIZE
-  if (logQueue.length >= maxCount) {
-    await flushPendingLogs(env)
-  } else {
-    // 定时器规则批量落盘
-    scheduleLogFlush(env, (config.flushIntervalSeconds || 30) * 1000)
+    // 达到队列条数阈值：立即批量落盘
+    const maxCount = config.bufferMaxCount || LOG_BATCH_SIZE
+    if (logQueue.length >= maxCount) {
+      await flushPendingLogs(env)
+    } else {
+      // 定时器规则批量落盘
+      scheduleLogFlush(env, (config.flushIntervalSeconds || 30) * 1000)
+    }
+  } catch (err) {
+    console.warn('[storage] addRequestLog 异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
 }
 

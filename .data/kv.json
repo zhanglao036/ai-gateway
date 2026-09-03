@@ -9,10 +9,25 @@
     "value": "[{\"id\":\"5dd62a68-3818-4e5f-ab6b-e10d0fa198b0\",\"key\":\"sk_cf_653eaea0d32f45f7\",\"name\":\"测试 Key\",\"enabled\":true,\"createdAt\":\"2026-08-08T11:44:09.043Z\"}]"
   },
   "gateway:tier_data": {
-    "value": "{\"tier1\":[],\"tier2\":[],\"probeStats\":{},\"businessStats\":{},\"updatedAt\":\"2026-08-08T12:16:27.044Z\",\"lastProbeDate\":\"2026-08-08\"}"
+    "value": "{\"tier1\":[],\"tier2\":[],\"probeStats\":{},\"businessStats\":{},\"updatedAt\":\"2026-09-03T00:33:09.334Z\",\"lastProbeDate\":\"2026-09-03\"}"
   },
   "admin:session:41e8a88d-f439-4973-b3b1-01be4af4908a": {
     "value": "{\"username\":\"admin\",\"expiresAt\":1786794525140}",
     "expiresAt": 1786794525140
+  },
+  "admin:session:00aa474e-cf05-4ff9-89aa-c72e2b10607c": {
+    "value": "{\"username\":\"admin\",\"expiresAt\":1788995574210}",
+    "expiresAt": 1788995574210
+  },
+  "config:custom_model_routes": {
+    "value": "[{\"id\":\"cr_1788394946941\",\"sourceModel\":\"openclaw/auto\",\"targetProviderId\":\"opencode\",\"targetModelId\":\"deepseek-v4-flash-free\",\"enabled\":true}]"
+  },
+  "admin:session:a36275aa-2e25-4dfd-ab37-e0bf0b7effbd": {
+    "value": "{\"username\":\"admin\",\"expiresAt\":1788999691295}",
+    "expiresAt": 1788999691295
+  },
+  "admin:session:1cd06a0c-db1b-4ce8-9210-80ff310b8b1f": {
+    "value": "{\"username\":\"admin\",\"expiresAt\":1789001499457}",
+    "expiresAt": 1789001499457
   }
 }

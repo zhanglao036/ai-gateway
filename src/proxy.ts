@@ -7,96 +7,100 @@ import { detectPermanentFailure } from './models'
 import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2 } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
-  const provider = await getProvider(env, providerId)
-  if (!provider) return
+  try {
+    const provider = await getProvider(env, providerId)
+    if (!provider) return
 
-  // HTTP 400 状态码通常是客户端请求参数不兼容问题（如 Unsupported parameter, Invalid JSON, thinking 参数等），不计入模型故障与冷却
-  const lowerMsg = (errorMsg || '').toLowerCase()
-  const isBadRequestParam = status === 400 && (
-    lowerMsg.includes('parameter') ||
-    lowerMsg.includes('validation') ||
-    lowerMsg.includes('invalid') ||
-    lowerMsg.includes('unsupported')
-  )
+    // HTTP 400 状态码通常是客户端请求参数不兼容问题（如 Unsupported parameter, Invalid JSON, thinking 参数等），不计入模型故障与冷却
+    const lowerMsg = (errorMsg || '').toLowerCase()
+    const isBadRequestParam = status === 400 && (
+      lowerMsg.includes('parameter') ||
+      lowerMsg.includes('validation') ||
+      lowerMsg.includes('invalid') ||
+      lowerMsg.includes('unsupported')
+    )
 
-  const permReason = detectPermanentFailure(status, errorMsg)
-  let updated = false
+    const permReason = detectPermanentFailure(status, errorMsg)
+    let updated = false
 
-  const updatedModels = provider.models.map((m) => {
-    if (m.id !== modelId) return m
-    updated = true
+    const updatedModels = provider.models.map((m) => {
+      if (m.id !== modelId) return m
+      updated = true
 
-    if (permReason) {
-      return {
-        ...m,
-        permanentlyDisabled: true,
-        disabledReason: permReason,
+      if (permReason) {
+        return {
+          ...m,
+          permanentlyDisabled: true,
+          disabledReason: permReason,
+        }
       }
-    }
 
-    if (isBadRequestParam) {
-      // 客户端传参问题不增加失败次数也不触发冷却
-      return m
-    }
+      if (isBadRequestParam) {
+        // 客户端传参问题不增加失败次数也不触发冷却
+        return m
+      }
 
-    const newFailures = (m.failureCount || 0) + 1
-    if (newFailures >= 3) {
+      const newFailures = (m.failureCount || 0) + 1
+      if (newFailures >= 3) {
+        return {
+          ...m,
+          failureCount: newFailures,
+          permanentlyDisabled: true,
+          disabledReason: '累计失败达到3次，已标记永久失效',
+        }
+      }
+
       return {
         ...m,
         failureCount: newFailures,
-        permanentlyDisabled: true,
-        disabledReason: '累计失败达到3次，已标记永久失效',
+        cooldownUntil: Date.now() + 5 * 60 * 1000,
+      }
+    })
+
+    if (updated) {
+      await updateProvider(env, providerId, { models: updatedModels })
+    }
+
+    const modelNowConfig = updatedModels.find((m) => m.id === modelId)
+    const isPermDisabled = modelNowConfig?.permanentlyDisabled === true
+    const actualDisabledReason = modelNowConfig?.disabledReason || ''
+
+    const fullId = `${providerId}/${modelId}`
+    let storage = await getTierStorage(env)
+
+    if (storage) {
+      let changed = false
+      const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
+
+      if (isPermDisabled) {
+        // 永久失效 (例如 402/余额不足、连续 3 次失败)：第一时间踢出第一、第二梯队
+        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+        storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
+        changed = true
+        console.log(`[proxy] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
+      } else if (inTier1) {
+        // 第一梯队模型调用出现明确故障（如 429 超限、5xx 崩溃、网络超时）：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
+        console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
+        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+        const ref = { providerId, modelId, fullId, addedAt: Date.now() }
+        if (!storage.tier2.some((m) => m.fullId === fullId)) {
+          storage.tier2.push(ref)
+        }
+        changed = true
+      }
+
+      if (changed) {
+        storage.probeStats[fullId] = {
+          success: false,
+          latency: 0,
+          lastTestedAt: Date.now(),
+          error: `HTTP ${status}: ${errorMsg}`,
+        }
+        await backfillTier1FromTier2(env, storage)
       }
     }
-
-    return {
-      ...m,
-      failureCount: newFailures,
-      cooldownUntil: Date.now() + 5 * 60 * 1000,
-    }
-  })
-
-  if (updated) {
-    await updateProvider(env, providerId, { models: updatedModels })
-  }
-
-  const modelNowConfig = updatedModels.find((m) => m.id === modelId)
-  const isPermDisabled = modelNowConfig?.permanentlyDisabled === true
-  const actualDisabledReason = modelNowConfig?.disabledReason || ''
-
-  const fullId = `${providerId}/${modelId}`
-  let storage = await getTierStorage(env)
-
-  if (storage) {
-    let changed = false
-    const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
-
-    if (isPermDisabled) {
-      // 永久失效 (例如 402/余额不足、连续 3 次失败)：第一时间踢出第一、第二梯队
-      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-      storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
-      changed = true
-      console.log(`[proxy] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
-    } else if (inTier1) {
-      // 第一梯队模型调用出现明确故障（如 429 超限、5xx 崩溃、网络超时）：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
-      console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
-      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-      const ref = { providerId, modelId, fullId, addedAt: Date.now() }
-      if (!storage.tier2.some((m) => m.fullId === fullId)) {
-        storage.tier2.push(ref)
-      }
-      changed = true
-    }
-
-    if (changed) {
-      storage.probeStats[fullId] = {
-        success: false,
-        latency: 0,
-        lastTestedAt: Date.now(),
-        error: `HTTP ${status}: ${errorMsg}`,
-      }
-      await backfillTier1FromTier2(env, storage)
-    }
+  } catch (err) {
+    console.warn('[proxy] 记录模型失败状态异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -121,21 +125,25 @@ async function recordLog(
     clientIp?: string | null
   }
 ) {
-  const latency = Date.now() - startTime
-  const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-  await addRequestLog(env, {
-    id: crypto.randomUUID(),
-    time,
-    model,
-    latency,
-    status,
-    error: error || null,
-    keyMask: extra?.keyMask || null,
-    attemptIndex: extra?.attemptIndex || 1,
-    routePath: extra?.routePath || null,
-    isStream: extra?.isStream || false,
-    clientIp: extra?.clientIp || null,
-  })
+  try {
+    const latency = Date.now() - startTime
+    const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+    await addRequestLog(env, {
+      id: crypto.randomUUID(),
+      time,
+      model,
+      latency,
+      status,
+      error: error || null,
+      keyMask: extra?.keyMask || null,
+      attemptIndex: extra?.attemptIndex || 1,
+      routePath: extra?.routePath || null,
+      isStream: extra?.isStream || false,
+      clientIp: extra?.clientIp || null,
+    })
+  } catch (err) {
+    console.warn('[proxy] 记录请求日志异常 (已安全降级):', err instanceof Error ? err.message : String(err))
+  }
 }
 
 // ===== Key 健康状态类型和辅助函数 =====
@@ -790,7 +798,11 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
   }, 500)
 } catch (err) {
     const error = err as Error
-    await recordLog(c.env, startTime, requestedModel, 500, error.message || '代理转发内部错误')
+    try {
+      await recordLog(c.env, startTime, requestedModel, 500, error.message || '代理转发内部错误')
+    } catch {
+      // ignore
+    }
     return c.json({
       error: { message: error.message || '代理转发内部错误', type: 'server_error' },
     }, 500)

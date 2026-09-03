@@ -24,9 +24,13 @@ export async function getTierStorage(env: Env): Promise<TierStorage | null> {
  * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)
  */
 export async function saveTierStorage(env: Env, data: TierStorage): Promise<void> {
-  data.updatedAt = new Date().toISOString()
-  await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
-  await flushPendingWrites(env)
+  try {
+    data.updatedAt = new Date().toISOString()
+    await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
+    await flushPendingWrites(env)
+  } catch (err) {
+    console.warn('[tiers] 保存梯队数据异常 (已安全降级):', err instanceof Error ? err.message : String(err))
+  }
 }
 
 /**
@@ -968,100 +972,104 @@ export async function recordBusinessLatency(
   success: boolean,
   isAutoRequest: boolean = false
 ): Promise<void> {
-  // 仅针对 auto/auto 业务流量生效
-  if (!isAutoRequest) return
+  try {
+    // 仅针对 auto/auto 业务流量生效
+    if (!isAutoRequest) return
 
-  let storage = await getTierStorage(env)
-  if (!storage) return
+    let storage = await getTierStorage(env)
+    if (!storage) return
 
-  const now = Date.now()
-  const bStat: BusinessMetric = storage.businessStats[fullId] || {
-    avgLatency: latency,
-    totalRequests: 0,
-    successCount: 0,
-    failureCount: 0,
-    lastUsedAt: now,
-  }
-
-  bStat.totalRequests++
-  bStat.lastUsedAt = now
-
-  if (success) {
-    bStat.successCount++
-    bStat.failureCount = 0 // 成功重置连续失败计数
-    // 滑动平均更新真实业务延迟
-    bStat.avgLatency = Math.round(bStat.avgLatency * 0.7 + latency * 0.3)
-  } else {
-    bStat.failureCount++
-  }
-
-  storage.businessStats[fullId] = bStat
-
-  const debugMode = await getDebugMode(env)
-  if (debugMode) {
-    // 调试模式：将最新请求延迟与结果实时同步更新至 probeStats，方便前端直接展示最新探测/调用延迟
-    storage.probeStats[fullId] = {
-      success,
-      latency: Math.round(latency),
-      lastTestedAt: now,
-      error: success ? undefined : '调用异常/失败',
+    const now = Date.now()
+    const bStat: BusinessMetric = storage.businessStats[fullId] || {
+      avgLatency: latency,
+      totalRequests: 0,
+      successCount: 0,
+      failureCount: 0,
+      lastUsedAt: now,
     }
-  }
 
-  // 检查该模型是否在第一梯队中
-  const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
-  if (!isInTier1) {
-    await saveTierStorage(env, storage)
-    return
-  }
+    bStat.totalRequests++
+    bStat.lastUsedAt = now
 
-  let shouldEliminate = false
-  let eliminationReason = ''
+    if (success) {
+      bStat.successCount++
+      bStat.failureCount = 0 // 成功重置连续失败计数
+      // 滑动平均更新真实业务延迟
+      bStat.avgLatency = Math.round(bStat.avgLatency * 0.7 + latency * 0.3)
+    } else {
+      bStat.failureCount++
+    }
 
-  if (!success) {
-    // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
-    shouldEliminate = true
-    eliminationReason = `业务请求失败 1 次`
-  }
+    storage.businessStats[fullId] = bStat
 
-  if (shouldEliminate) {
-    console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
-
-    // 模型标黄，移出第一梯队，冷却 10 分钟
-    // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
-    const parts = fullId.split('/')
-    const providerId = parts[0]
-    const modelId = parts.slice(1).join('/')
-    if (providerId && modelId) {
-      const provider = await getProvider(env, providerId)
-      if (provider) {
-        const updatedModels = provider.models.map((m: Model) => {
-          if (m.id === modelId) {
-            return {
-              ...m,
-              cooldownUntil: now + 10 * 60 * 1000, // 冷却 10 分钟
-            }
-          }
-          return m
-        })
-        await updateProvider(env, providerId, { models: updatedModels })
+    const debugMode = await getDebugMode(env)
+    if (debugMode) {
+      // 调试模式：将最新请求延迟与结果实时同步更新至 probeStats，方便前端直接展示最新探测/调用延迟
+      storage.probeStats[fullId] = {
+        success,
+        latency: Math.round(latency),
+        lastTestedAt: now,
+        error: success ? undefined : '调用异常/失败',
       }
     }
 
-    // 移出第一梯队，回到第二梯队候选池
-    storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-    const ref = { providerId, modelId, fullId, addedAt: now }
-    if (!storage.tier2.some((m) => m.fullId === fullId)) {
-      storage.tier2.push(ref)
+    // 检查该模型是否在第一梯队中
+    const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
+    if (!isInTier1) {
+      await saveTierStorage(env, storage)
+      return
     }
 
-    // 触发空位海选补位
-    storage = await backfillTier1FromTier2(env, storage)
-  } else {
-    if (storage.tier1.length < TIER_1_MAX_SLOTS) {
+    let shouldEliminate = false
+    let eliminationReason = ''
+
+    if (!success) {
+      // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
+      shouldEliminate = true
+      eliminationReason = `业务请求失败 1 次`
+    }
+
+    if (shouldEliminate) {
+      console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
+
+      // 模型标黄，移出第一梯队，冷却 10 分钟
+      // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
+      const parts = fullId.split('/')
+      const providerId = parts[0]
+      const modelId = parts.slice(1).join('/')
+      if (providerId && modelId) {
+        const provider = await getProvider(env, providerId)
+        if (provider) {
+          const updatedModels = provider.models.map((m: Model) => {
+            if (m.id === modelId) {
+              return {
+                ...m,
+                cooldownUntil: now + 10 * 60 * 1000, // 冷却 10 分钟
+              }
+            }
+            return m
+          })
+          await updateProvider(env, providerId, { models: updatedModels })
+        }
+      }
+
+      // 移出第一梯队，回到第二梯队候选池
+      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+      const ref = { providerId, modelId, fullId, addedAt: now }
+      if (!storage.tier2.some((m) => m.fullId === fullId)) {
+        storage.tier2.push(ref)
+      }
+
+      // 触发空位海选补位
       storage = await backfillTier1FromTier2(env, storage)
     } else {
-      await saveTierStorage(env, storage)
+      if (storage.tier1.length < TIER_1_MAX_SLOTS) {
+        storage = await backfillTier1FromTier2(env, storage)
+      } else {
+        await saveTierStorage(env, storage)
+      }
     }
+  } catch (err) {
+    console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
 }
