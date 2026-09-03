@@ -104,6 +104,39 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
   }
 }
 
+/**
+ * 当模型调用成功（特别是指定调用）时，自动重置其连续失败计数、冷却时间与封禁标记
+ */
+async function recordModelSuccess(env: Env, providerId: string, modelId: string) {
+  try {
+    const provider = await getProvider(env, providerId)
+    if (!provider) return
+
+    let needUpdate = false
+    const updatedModels = provider.models.map((m) => {
+      if (m.id !== modelId) return m
+      if (m.failureCount || m.cooldownUntil || m.permanentlyDisabled) {
+        needUpdate = true
+        return {
+          ...m,
+          failureCount: 0,
+          cooldownUntil: null,
+          permanentlyDisabled: false,
+          disabledReason: undefined,
+          permTestFailCount: 0,
+        }
+      }
+      return m
+    })
+
+    if (needUpdate) {
+      await updateProvider(env, providerId, { models: updatedModels })
+    }
+  } catch (err) {
+    console.warn('[proxy] 记录模型成功状态异常:', err instanceof Error ? err.message : String(err))
+  }
+}
+
 function maskKey(key: string): string {
   if (!key) return ''
   const trimmed = key.trim()
@@ -401,45 +434,39 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
 
       const modelConfig = provider.models.find((m) => m.id === modelId)
-      if (!modelConfig) {
-        if (isAutoRequest && attempts < maxAttempts) {
-          continue
+      // 如果是 auto 智能调度请求，需要严格检查模型配置与健康状态；
+      // 如果是用户指定具体模型（精准调用），无条件放行直连上游，不拦截冷却或封禁状态
+      if (isAutoRequest) {
+        if (!modelConfig) {
+          if (attempts < maxAttempts) continue
+          await recordLog(c.env, startTime, requestedModel, 404, `模型 "${modelId}" 未配置`)
+          return c.json({
+            error: { message: `模型 "${modelId}" 未在提供商 "${provider.name}" 中配置`, type: 'invalid_request_error' },
+          }, 404)
         }
-        await recordLog(c.env, startTime, requestedModel, 404, `模型 "${modelId}" 未配置`)
-        return c.json({
-          error: { message: `模型 "${modelId}" 未在提供商 "${provider.name}" 中配置`, type: 'invalid_request_error' },
-        }, 404)
-      }
-      if (!modelConfig.enabled) {
-        if (isAutoRequest && attempts < maxAttempts) {
-          continue
+        if (!modelConfig.enabled) {
+          if (attempts < maxAttempts) continue
+          await recordLog(c.env, startTime, requestedModel, 403, `模型 "${modelId}" 已禁用`)
+          return c.json({
+            error: { message: `模型 "${modelId}" 已禁用`, type: 'model_disabled' },
+          }, 403)
         }
-        await recordLog(c.env, startTime, requestedModel, 403, `模型 "${modelId}" 已禁用`)
-        return c.json({
-          error: { message: `模型 "${modelId}" 已禁用`, type: 'model_disabled' },
-        }, 403)
-      }
-
-      if (modelConfig.permanentlyDisabled) {
-        if (isAutoRequest && attempts < maxAttempts) {
-          continue
+        if (modelConfig.permanentlyDisabled) {
+          if (attempts < maxAttempts) continue
+          const reason = modelConfig.disabledReason || '受上游故障影响已标记永久失效'
+          await recordLog(c.env, startTime, requestedModel, 403, `模型已标记永久失效 (${reason})`)
+          return c.json({
+            error: { message: `模型 "${modelId}" 已标记永久失效: ${reason}。需管理员手动解封重置。`, type: 'model_permanently_disabled' },
+          }, 403)
         }
-        const reason = modelConfig.disabledReason || '受上游故障影响已标记永久失效'
-        await recordLog(c.env, startTime, requestedModel, 403, `模型已标记永久失效 (${reason})`)
-        return c.json({
-          error: { message: `模型 "${modelId}" 已标记永久失效: ${reason}。需管理员手动解封重置。`, type: 'model_permanently_disabled' },
-        }, 403)
-      }
-
-      if (modelConfig.cooldownUntil && Date.now() < modelConfig.cooldownUntil) {
-        if (isAutoRequest && attempts < maxAttempts) {
-          continue
+        if (modelConfig.cooldownUntil && Date.now() < modelConfig.cooldownUntil) {
+          if (attempts < maxAttempts) continue
+          const remainingSec = Math.ceil((modelConfig.cooldownUntil - Date.now()) / 1000)
+          await recordLog(c.env, startTime, requestedModel, 530, `模型处于冷却期 (${remainingSec}s)`)
+          return c.json({
+            error: { message: `模型 "${modelId}" 暂处于冷却期（剩余 ${remainingSec} 秒），已脱离所有梯队`, type: 'model_cooling_down' },
+          }, 530 as any)
         }
-        const remainingSec = Math.ceil((modelConfig.cooldownUntil - Date.now()) / 1000)
-        await recordLog(c.env, startTime, requestedModel, 530, `模型处于冷却期 (${remainingSec}s)`)
-        return c.json({
-          error: { message: `模型 "${modelId}" 暂处于冷却期（剩余 ${remainingSec} 秒），已脱离所有梯队`, type: 'model_cooling_down' },
-        }, 530 as any)
       }
 
       const enabledKeys = provider.apiKeys.filter(k => k.enabled)
@@ -518,6 +545,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
         await recordLog(c.env, startTime, requestedModel, response.status, null)
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
+        await recordModelSuccess(c.env, providerId, modelId)
         const opHeaders = new Headers(response.headers)
         if (isStreamReq) {
           opHeaders.set('X-Accel-Buffering', 'no')
@@ -682,6 +710,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             clientIp,
           })
           await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
+          await recordModelSuccess(c.env, providerId, modelId)
           return new Response(resText !== null ? resText : response.body, {
             status: response.status,
             headers: responseHeaders,
