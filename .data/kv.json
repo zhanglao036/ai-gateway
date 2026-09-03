@@ -9,7 +9,7 @@
     "value": "[{\"id\":\"5dd62a68-3818-4e5f-ab6b-e10d0fa198b0\",\"key\":\"sk_cf_653eaea0d32f45f7\",\"name\":\"测试 Key\",\"enabled\":true,\"createdAt\":\"2026-08-08T11:44:09.043Z\"}]"
   },
   "gateway:tier_data": {
-    "value": "{\"tier1\":[{\"providerId\":\"opencode\",\"modelId\":\"deepseek-v4-flash-free\",\"fullId\":\"opencode/deepseek-v4-flash-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"mimo-v2.5-free\",\"fullId\":\"opencode/mimo-v2.5-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"nemotron-3-ultra-free\",\"fullId\":\"opencode/nemotron-3-ultra-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"hy3-free\",\"fullId\":\"opencode/hy3-free\",\"addedAt\":1788398254568}],\"tier2\":[],\"probeStats\":{},\"businessStats\":{},\"updatedAt\":\"2026-09-03T01:17:34.568Z\",\"lastProbeDate\":\"2026-09-03\"}"
+    "value": "{\"tier1\":[{\"providerId\":\"opencode\",\"modelId\":\"deepseek-v4-flash-free\",\"fullId\":\"opencode/deepseek-v4-flash-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"mimo-v2.5-free\",\"fullId\":\"opencode/mimo-v2.5-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"nemotron-3-ultra-free\",\"fullId\":\"opencode/nemotron-3-ultra-free\",\"addedAt\":1788398254568},{\"providerId\":\"opencode\",\"modelId\":\"hy3-free\",\"fullId\":\"opencode/hy3-free\",\"addedAt\":1788398254568}],\"tier2\":[],\"probeStats\":{},\"businessStats\":{},\"updatedAt\":\"2026-09-03T02:09:20.642Z\",\"lastProbeDate\":\"2026-09-03\"}"
   },
   "admin:session:41e8a88d-f439-4973-b3b1-01be4af4908a": {
     "value": "{\"username\":\"admin\",\"expiresAt\":1786794525140}",

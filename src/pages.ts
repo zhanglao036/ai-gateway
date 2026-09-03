@@ -2424,7 +2424,7 @@ async function triggerProbe() {
 }
 
 async function resetAllModels() {
-  if (!(await cM('确定要一键重置所有模型到初始状态？\n\n所有模型的冷却状态、累计失败次数、永久失效/封禁标记都将被彻底清空，恢复至刚刚添加时的可用状态，并重新就绪动态梯队池。'))) return;
+  if (!(await cM('确定要一键重置所有模型到初始状态？\\n\\n所有模型的冷却状态、累计失败次数、永久失效/封禁标记都将被彻底清空，恢复至刚刚添加时的可用状态，并重新就绪动态梯队池。'))) return;
   try {
     toast('正在重置所有模型至初始状态...', 'info');
     var res = await fetch('/admin/api/reset-all-models', { method: 'POST' });
