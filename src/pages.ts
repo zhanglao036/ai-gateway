@@ -2594,23 +2594,33 @@ async function resetAllModelsInProvider(providerId) {
   }
 
   try {
-    toast('正在重置本提供商所有异常模型...', 'info');
-    for (var i = 0; i < abnormalModels.length; i++) {
-      var m = abnormalModels[i];
-      await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/models/' + encodeURIComponent(m.id), {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ unblockPermanent: true })
-      });
-      m.permanentlyDisabled = false;
-      m.disabledReason = null;
-      m.failureCount = 0;
-      m.cooldownUntil = null;
+    toast('正在一键重置本提供商所有异常模型...', 'info');
+    var res = await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/reset-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    var data = await res.json();
+    if (data && data.success) {
+      if (data.data && data.data.provider && Array.isArray(data.data.provider.models)) {
+        p.models = data.data.provider.models;
+      } else {
+        p.models.forEach(function(m) {
+          m.permanentlyDisabled = false;
+          m.disabledReason = null;
+          m.failureCount = 0;
+          m.cooldownUntil = null;
+          m.permTestFailCount = 0;
+          m.lastPermTestAt = undefined;
+          m.enabled = true;
+        });
+      }
+      renderProviderList();
+      toast(data.message || '已成功重置本提供商所有模型的异常状态！', 'success');
+    } else {
+      aM('重置异常：' + ((data && data.message) || '未知错误'), 'error');
     }
-    renderProviderList();
-    toast('已成功重置本提供商所有模型的异常状态！', 'success');
   } catch (err) {
-    aM('重置部分模型状态异常：' + ((err && err.message) || String(err)), 'error');
+    aM('重置模型网络请求异常：' + ((err && err.message) || String(err)), 'error');
   }
 }
 

@@ -1,5 +1,5 @@
 import type { Model, Env, Provider, TierStorage } from './types'
-import { getProviders, setProviders, kvPut, flushPendingWrites } from './storage'
+import { getProviders, setProviders, kvGet, kvPut, flushPendingWrites } from './storage'
 import { KV_KEYS } from './config'
 
 /**
@@ -215,6 +215,78 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
   }
 
   return { totalReset, providerCount }
+}
+
+/**
+ * 重置单个提供商下的所有异常模型至初始状态（单次写入 KV，杜绝前端循环多次请求）
+ */
+export async function resetProviderModelsToInitial(
+  env: Env,
+  providerId: string
+): Promise<{ totalReset: number; provider: Provider | null }> {
+  const providers = await getProviders(env)
+  const targetProvider = providers.find((p) => p.id === providerId)
+  if (!targetProvider) {
+    return { totalReset: 0, provider: null }
+  }
+
+  let totalReset = 0
+  const updatedModels = (targetProvider.models || []).map((m) => {
+    const isAbnormal =
+      m.permanentlyDisabled ||
+      (m.cooldownUntil && Date.now() < m.cooldownUntil) ||
+      (m.failureCount && m.failureCount > 0)
+
+    if (isAbnormal) {
+      totalReset++
+      return {
+        ...m,
+        failureCount: 0,
+        cooldownUntil: null,
+        permanentlyDisabled: false,
+        disabledReason: null,
+        permTestFailCount: 0,
+        lastPermTestAt: undefined,
+        enabled: true,
+      }
+    }
+    return m
+  })
+
+  const updatedProviders = providers.map((p) => {
+    if (p.id === providerId) {
+      return { ...p, models: updatedModels, updatedAt: new Date().toISOString() }
+    }
+    return p
+  })
+
+  // 1. 单次写入提供商配置
+  await setProviders(env, updatedProviders)
+
+  // 2. 单次重置该提供商在梯队池中的异常统计
+  try {
+    const tierRaw = await kvGet(env, KV_KEYS.TIER_DATA)
+    if (tierRaw) {
+      const tierStorage = JSON.parse(tierRaw)
+      if (tierStorage && typeof tierStorage === 'object') {
+        const probeStats = { ...(tierStorage.probeStats || {}) }
+        const businessStats = { ...(tierStorage.businessStats || {}) }
+        for (const m of targetProvider.models || []) {
+          const key = `${providerId}/${m.id}`
+          delete probeStats[key]
+          delete businessStats[key]
+        }
+        tierStorage.probeStats = probeStats
+        tierStorage.businessStats = businessStats
+        await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(tierStorage))
+      }
+    }
+  } catch {
+    // 忽略梯队池解析异常
+  }
+
+  await flushPendingWrites(env)
+  return { totalReset, provider: updatedProviders.find((p) => p.id === providerId) || null }
 }
 
 /**

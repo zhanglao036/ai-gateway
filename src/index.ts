@@ -29,6 +29,7 @@ import {
   handleRunProbe,
   handleResetCooldowns,
   handleResetAllModels,
+  handleResetProviderModels,
   handleFetchUpstreamModels,
   handleImportModels,
   handleClearProviderModels,
@@ -121,6 +122,7 @@ app.post('/admin/api/reset-all-models', handleResetAllModels)
 app.post('/admin/api/test-blocked-models', handleTestBlockedModels)
 
 // 提供商模型配套操作
+app.post('/admin/api/providers/:id/reset-models', handleResetProviderModels)
 app.post('/admin/api/providers/:id/fetch-models', handleFetchUpstreamModels)
 app.post('/admin/api/providers/:id/import-models', handleImportModels)
 app.delete('/admin/api/providers/:id/models', handleClearProviderModels)

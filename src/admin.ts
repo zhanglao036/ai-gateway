@@ -27,6 +27,7 @@ import {
   deduplicateAndClassifyModels,
   resetAllCooldowns,
   resetAllModelsToInitial,
+  resetProviderModelsToInitial,
   detectPermanentFailure,
   autoClassifyModel,
 } from './models'
@@ -691,6 +692,18 @@ export async function handleResetAllModels(c: Context<{ Bindings: Env }>) {
   })
 }
 
+// ===== 一键重置单个提供商所有模型异常至初始状态 =====
+export async function handleResetProviderModels(c: Context<{ Bindings: Env }>) {
+  const providerId = c.req.param('id')
+  if (!providerId) return c.json<ApiResponse>({ success: false, message: '缺少提供商 ID' }, 400)
+  const { totalReset, provider } = await resetProviderModelsToInitial(c.env, providerId)
+  return c.json<ApiResponse>({
+    success: true,
+    message: `已成功将该提供商下的 ${totalReset} 个模型重置至初始可用状态`,
+    data: { totalReset, provider },
+  })
+}
+
 // 保持历史兼容
 export const handleResetCooldowns = handleResetAllModels
 
@@ -913,11 +926,13 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
     let testedCount = 0
     let unblockedCount = 0
     const unblockedModelIds: string[] = []
+    const allProviders = await getProviders(c.env)
+    const now = Date.now()
 
     const BATCH_SIZE = 5
     for (let i = 0; i < roundOrder.length; i += BATCH_SIZE) {
       const chunk = roundOrder.slice(i, i + BATCH_SIZE)
-      await Promise.all(
+      const chunkResults = await Promise.all(
         chunk.map(async ({ provider, model }) => {
           testedCount++
           const enabledKeys = provider.apiKeys.filter((k) => k.enabled)
@@ -926,21 +941,41 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
             ? await testOpenCodeModel(provider.baseUrl, enabledKeys, model.id, resolveOpenCodeUrls(c.env))
             : await testModelConnection(provider.baseUrl, apiKey, model.id, provider.apiType)
 
-          await applyModelProbeResult(
-            c.env,
-            provider.id,
-            model.id,
-            testRes.success,
-            testRes.statusCode || (testRes.success ? 200 : 500),
-            testRes.message || ''
-          )
-
-          if (testRes.success) {
-            unblockedCount++
-            unblockedModelIds.push(`${provider.id}/${model.id}`)
+          return {
+            providerId: provider.id,
+            modelId: model.id,
+            success: testRes.success,
+            statusCode: testRes.statusCode || (testRes.success ? 200 : 500),
+            message: testRes.message || '',
           }
         })
       )
+
+      for (const res of chunkResults) {
+        const targetP = allProviders.find((p) => p.id === res.providerId)
+        if (!targetP) continue
+        const modelObj = (targetP.models || []).find((m) => m.id === res.modelId)
+        if (!modelObj) continue
+
+        if (res.success) {
+          unblockedCount++
+          unblockedModelIds.push(`${res.providerId}/${res.modelId}`)
+          modelObj.cooldownUntil = null
+          modelObj.failureCount = 0
+          modelObj.permanentlyDisabled = false
+          modelObj.permTestFailCount = 0
+          modelObj.lastPermTestAt = now
+          modelObj.disabledReason = undefined
+        } else {
+          modelObj.lastPermTestAt = now
+          modelObj.permTestFailCount = (modelObj.permTestFailCount || 0) + 1
+        }
+      }
+    }
+
+    // 批量测试结束后，一次性写入 KV
+    if (testedCount > 0) {
+      await setProviders(c.env, allProviders)
     }
 
     const unblockedDetail = unblockedCount > 0 ? `解封模型：[${unblockedModelIds.join(', ')}]` : '暂无模型解封'
