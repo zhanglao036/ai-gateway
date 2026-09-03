@@ -842,9 +842,16 @@ ${H('管理')}
         <div class="section-heading section-heading--admin">
           <div>
             <h2 id="routes-title">指定模型路由</h2>
-            <p>指定客户端请求特定模型名时，强制转发至特定提供商的指定模型（如客户端请求 <code>openclaw/auto</code> 时转发到指定的高性能模型）。</p>
+            <p>指定客户端请求特定模型名时，强制转发至特定提供商的指定模型（如客户端请求 <code>openclaw/auto</code> 时转发到指定的高性能模型）。支持按标签一键快速选模。</p>
           </div>
           <button type="button" class="btn btn-p" onclick="openAddCustomRouteModal()"><i class="fas fa-plus" aria-hidden="true"></i>添加指定规则</button>
+        </div>
+        <div class="route-tag-bar" id="custom-routes-filter-bar">
+          <button type="button" class="route-tag-chip is-active" data-route-filter="all" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-layer-group"></i> 全部规则</button>
+          <button type="button" class="route-tag-chip" data-route-filter="openclaw" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-robot"></i> OpenClaw 规则</button>
+          <button type="button" class="route-tag-chip" data-route-filter="tier1" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-bolt"></i> 第一梯队规则</button>
+          <button type="button" class="route-tag-chip" data-route-filter="text" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-comment-dots"></i> 文本规则</button>
+          <button type="button" class="route-tag-chip" data-route-filter="image" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-palette"></i> 绘图规则</button>
         </div>
         <div class="table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);">
           <table class="data-table" id="custom-routes-table" style="width:100%;text-align:left;border-collapse:collapse;">
@@ -1297,8 +1304,13 @@ function renderModelGrid(models, editId, providerId) {
   return '<div class="grid-2-gap6">' + h + '</div>'
 }
 
+function importAllEditModelsBtn(btn) {
+  var pid = btn.getAttribute('data-pid');
+  if (pid) importAllEditModels(pid);
+}
+
 function modelPanelHeading(panelId, pid) {
-  var importBtn = pid ? '<button class="btn btn-s btn-xs" onclick="importAllEditModels(\\\'' + escapeHtml(pid) + '\\\')" style="margin-right:8px;"><i class="fas fa-file-import" aria-hidden="true"></i> 一键导入</button>' : '';
+  var importBtn = pid ? '<button class="btn btn-s btn-xs" data-pid="' + escapeHtml(pid) + '" onclick="importAllEditModelsBtn(this)" style="margin-right:8px;"><i class="fas fa-file-import" aria-hidden="true"></i> 一键导入</button>' : '';
   return '<div class="panel-heading"><div>' +
     '<span class="panel-heading__mark"><i class="fas fa-cube" aria-hidden="true"></i></span>' +
     '<div><h3>可用模型</h3><p>点击“+”单条添加，或使用一键导入。</p></div></div>' +
@@ -2704,6 +2716,8 @@ async function updateModelCat(providerId, modelId, category) {
 /* ========== 自定义指定模型路由逻辑 ========== */
 var customRoutesData = [];
 var currentEditingRouteId = '';
+var customRoutesActiveFilter = 'all';
+var modalActiveTag = 'all';
 
 async function loadCustomRoutes() {
   try {
@@ -2720,6 +2734,22 @@ async function loadCustomRoutes() {
   }
 }
 
+function filterCustomRoutesTable(btn, filterType) {
+  customRoutesActiveFilter = filterType;
+  var bar = document.getElementById('custom-routes-filter-bar');
+  if (bar) {
+    var chips = bar.querySelectorAll('.route-tag-chip');
+    chips.forEach(function(c) { c.classList.remove('is-active'); });
+  }
+  if (btn) btn.classList.add('is-active');
+  renderCustomRoutesTable();
+}
+
+function filterCustomRoutesTableBtn(btn) {
+  var f = btn.getAttribute('data-route-filter');
+  if (f) filterCustomRoutesTable(btn, f);
+}
+
 function renderCustomRoutesTable() {
   var tbody = document.getElementById('custom-routes-tbody');
   if (!tbody) return;
@@ -2727,23 +2757,70 @@ function renderCustomRoutesTable() {
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型或第一梯队池。</td></tr>';
     return;
   }
-  tbody.innerHTML = customRoutesData.map(function(r) {
+
+  var filteredList = customRoutesData.filter(function(r) {
+    if (customRoutesActiveFilter === 'all') return true;
+    var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
+    if (customRoutesActiveFilter === 'tier1') return isTier1;
+
+    var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+    var mObj = pObj && pObj.models ? pObj.models.find(function(m) { return m.id === r.targetModelId; }) : null;
+
+    if (customRoutesActiveFilter === 'openclaw') {
+      return (r.sourceModel && r.sourceModel.toLowerCase().includes('openclaw')) ||
+        (mObj && mObj.openclawTested && mObj.openclawCompatible) ||
+        isTier1;
+    }
+    if (customRoutesActiveFilter === 'text') {
+      return mObj ? (mObj.category === '文本' || !mObj.category) : (!isTier1);
+    }
+    if (customRoutesActiveFilter === 'image') {
+      return mObj && mObj.category === '绘图';
+    }
+    return true;
+  });
+
+  if (filteredList.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:20px;">当前标签筛选下无匹配规则</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filteredList.map(function(r) {
     var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
     var pName = isTier1 ? '🌟 第一梯队自动调度池' : r.targetProviderId;
     var mName = isTier1 ? 'Tier 1 健康模型自动选优' : r.targetModelId;
+    var pObj = null;
+    var mObj = null;
     if (!isTier1) {
-      var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
-      if (pObj) pName = pObj.name + ' (' + pObj.id + ')';
+      pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+      if (pObj) {
+        pName = pObj.name + ' (' + pObj.id + ')';
+        if (pObj.models) mObj = pObj.models.find(function(m) { return m.id === r.targetModelId; });
+      }
     }
 
     var targetBadge = isTier1
-      ? '<span style="color:#0284c7;font-weight:600;"><i class="fas fa-bolt" style="color:#eab308;margin-right:4px;"></i>第一梯队池 (Tier 1)</span>'
-      : '<span style="color:#0f766e;font-weight:600;"><i class="fas fa-crosshairs" style="color:#0d9488;margin-right:4px;"></i>严格指定</span>';
+      ? '<span class="openclaw-badge openclaw-badge--ok" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;margin-left:4px;"><i class="fas fa-bolt"></i> 第一梯队池</span>'
+      : '<span style="color:#0f766e;font-weight:600;font-size:0.75rem;margin-left:4px;"><i class="fas fa-crosshairs"></i> 严格指定</span>';
+
+    var tagBadges = '';
+    if (mObj) {
+      if (mObj.openclawTested && mObj.openclawCompatible) {
+        tagBadges += '<span class="openclaw-badge openclaw-badge--ok" style="margin-left:4px;"><i class="fas fa-robot"></i> OpenClaw 适合</span>';
+      } else if (mObj.openclawTested && !mObj.openclawCompatible) {
+        tagBadges += '<span class="openclaw-badge openclaw-badge--no" style="margin-left:4px;"><i class="fas fa-ban"></i> 不适智能体</span>';
+      }
+      if (mObj.category === '绘图') {
+        tagBadges += '<span style="padding:1px 5px;font-size:10px;border-radius:3px;background:oklch(96% 0.04 60);border:1px solid oklch(88% 0.08 60);color:oklch(40% 0.12 60);margin-left:4px;"><i class="fas fa-palette"></i> 绘图</span>';
+      } else if (mObj.category === '文本') {
+        tagBadges += '<span style="padding:1px 5px;font-size:10px;border-radius:3px;background:var(--color-paper-2);border:1px solid var(--color-rule);color:var(--color-muted);margin-left:4px;"><i class="fas fa-comment-dots"></i> 文本</span>';
+      }
+    }
 
     return '<tr>' +
       '<td style="padding:10px 12px;"><code>' + escapeHtml(r.sourceModel) + '</code></td>' +
       '<td style="padding:10px 12px;color:var(--color-ink);">' + escapeHtml(pName) + '</td>' +
-      '<td style="padding:10px 12px;"><code>' + escapeHtml(mName) + '</code> <span style="font-size:0.75rem;margin-left:4px;">' + targetBadge + '</span></td>' +
+      '<td style="padding:10px 12px;"><code>' + escapeHtml(mName) + '</code>' + targetBadge + tagBadges + '</td>' +
       '<td style="padding:10px 12px;" id="cr-lat-' + escapeHtml(r.id) + '"><span style="color:var(--color-muted);font-size:0.8rem;">未测试</span></td>' +
       '<td style="padding:10px 12px;"><label class="tg"><input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' data-id="' + escapeHtml(r.id) + '" onchange="toggleCustomRouteBtn(this)"><span class="sl"></span></label></td>' +
       '<td style="padding:10px 12px;text-align:right;">' +
@@ -2755,20 +2832,174 @@ function renderCustomRoutesTable() {
   }).join('');
 }
 
+function getAllFlattenedModels() {
+  var list = [];
+  draftProviders.forEach(function(p) {
+    if (Array.isArray(p.models)) {
+      p.models.forEach(function(m) {
+        list.push({
+          providerId: p.id,
+          providerName: p.name,
+          modelId: m.id,
+          category: m.category || '文本',
+          openclawTested: !!m.openclawTested,
+          openclawCompatible: !!m.openclawCompatible,
+          openclawReason: m.openclawReason || '',
+          enabled: m.enabled !== false,
+          isBlocked: !!m.permanentlyDisabled || (m.cooldownUntil && Date.now() < m.cooldownUntil)
+        });
+      });
+    }
+  });
+  return list;
+}
+
+function renderCustomRouteQuickPicker(activeTag, selectedPid, selectedMid) {
+  var container = document.getElementById('cr-quick-picker');
+  if (!container) return;
+  var allModels = getAllFlattenedModels();
+  
+  var filtered = allModels.filter(function(item) {
+    if (activeTag === 'all') return true;
+    if (activeTag === 'openclaw') return item.openclawTested ? item.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId);
+    if (activeTag === 'text') return item.category === '文本';
+    if (activeTag === 'image') return item.category === '绘图';
+    if (activeTag === 'healthy') return item.enabled && !item.isBlocked;
+    return true;
+  });
+
+  var html = '';
+  // 如果处于全部或第一梯队池标签，首项提供第一梯队池选项
+  if (activeTag === 'all' || activeTag === 'tier1') {
+    var isTier1Selected = selectedPid === 'tier1' || selectedMid === 'auto';
+    html += '<div class="route-model-pick-card ' + (isTier1Selected ? 'is-selected' : '') + '" data-pid="tier1" data-mid="auto" onclick="onPickCardClick(this)">' +
+      '<div class="rm-title" style="color:#0284c7;"><i class="fas fa-bolt" style="color:#eab308;"></i> 🌟 第一梯队自动调度池</div>' +
+      '<div class="rm-meta"><span>动态选优</span><span class="openclaw-badge openclaw-badge--ok" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;padding:0 4px;font-size:10px;">Tier 1</span></div>' +
+    '</div>';
+  }
+
+  if (activeTag !== 'tier1') {
+    html += filtered.map(function(item) {
+      var isSel = (selectedPid === item.providerId && selectedMid === item.modelId);
+      var badge = '';
+      if (item.openclawTested && item.openclawCompatible) {
+        badge = '<span class="openclaw-badge openclaw-badge--ok" style="padding:0 4px;font-size:10px;"><i class="fas fa-robot"></i> OpenClaw</span>';
+      } else if (item.category === '绘图') {
+        badge = '<span style="padding:0 4px;font-size:10px;border-radius:3px;background:oklch(96% 0.04 60);border:1px solid oklch(88% 0.08 60);color:oklch(40% 0.12 60);"><i class="fas fa-palette"></i> 绘图</span>';
+      } else {
+        badge = '<span style="padding:0 4px;font-size:10px;border-radius:3px;background:var(--color-paper-2);border:1px solid var(--color-rule);color:var(--color-muted);">' + escapeHtml(item.category) + '</span>';
+      }
+      return '<div class="route-model-pick-card ' + (isSel ? 'is-selected' : '') + '" data-pid="' + escapeHtml(item.providerId) + '" data-mid="' + escapeHtml(item.modelId) + '" onclick="onPickCardClick(this)">' +
+        '<div class="rm-title" title="' + escapeHtml(item.modelId) + '"><i class="fas fa-cube" style="font-size:10px;color:var(--color-muted);margin-right:3px;"></i>' + escapeHtml(item.modelId) + '</div>' +
+        '<div class="rm-meta"><span title="' + escapeHtml(item.providerName) + '">' + escapeHtml(item.providerId) + '</span>' + badge + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  if (!html) {
+    html = '<div style="grid-column:1/-1;text-align:center;padding:16px;color:var(--color-muted);font-size:0.8rem;">该标签下暂无匹配模型</div>';
+  }
+
+  container.innerHTML = html;
+}
+
+function onPickCardClick(el) {
+  var pid = el.getAttribute('data-pid');
+  var mid = el.getAttribute('data-mid');
+  if (pid && mid) onSelectModelFromPicker(pid, mid);
+}
+
+function onModalRouteTagBtn(btn) {
+  var tag = btn.getAttribute('data-modal-tag');
+  if (tag) onCustomRouteTagClick(btn, tag);
+}
+
+function onCustomRouteTagClick(btn, tag) {
+  modalActiveTag = tag;
+  var bar = document.getElementById('modal-tag-bar');
+  if (bar) {
+    var chips = bar.querySelectorAll('.route-tag-chip');
+    chips.forEach(function(c) { c.classList.remove('is-active'); });
+  }
+  if (btn) btn.classList.add('is-active');
+
+  if (tag === 'tier1') {
+    onSelectModelFromPicker('tier1', 'auto');
+  } else {
+    var pSelect = document.getElementById('cr-provider');
+    var mSelect = document.getElementById('cr-model');
+    var currentPid = pSelect ? pSelect.value : '';
+    var currentMid = mSelect ? mSelect.value : '';
+    renderCustomRouteQuickPicker(tag, currentPid, currentMid);
+    updateCustomRouteModelOptions(currentMid);
+  }
+}
+
+function onSelectModelFromPicker(pid, mid) {
+  var pSelect = document.getElementById('cr-provider');
+  var mSelect = document.getElementById('cr-model');
+  var sourceInput = document.getElementById('cr-source');
+
+  if (pSelect) {
+    pSelect.value = pid;
+  }
+  updateCustomRouteModelOptions(mid);
+  if (mSelect) {
+    mSelect.value = mid;
+  }
+
+  renderCustomRouteQuickPicker(modalActiveTag, pid, mid);
+
+  // 自动贴心填充/建议请求模型名称
+  if (sourceInput && !sourceInput.value.trim()) {
+    if (pid === 'tier1' || mid === 'auto') {
+      sourceInput.value = 'openclaw/auto';
+    } else if (modalActiveTag === 'openclaw' || mid.toLowerCase().includes('openclaw')) {
+      sourceInput.value = 'openclaw/auto';
+    } else {
+      sourceInput.value = mid;
+    }
+  }
+
+  toast('已选定目标：' + (pid === 'tier1' ? '🌟 第一梯队调度池' : (pid + ' / ' + mid)), 'info');
+}
+
 function openAddCustomRouteModal() {
   currentEditingRouteId = '';
+  modalActiveTag = 'all';
+  var allModels = getAllFlattenedModels();
+  var openclawCount = allModels.filter(function(m) { return m.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(m.modelId); }).length;
+  var textCount = allModels.filter(function(m) { return m.category === '文本'; }).length;
+  var imgCount = allModels.filter(function(m) { return m.category === '绘图'; }).length;
+
   var modalHtml = '<h3><i class="fas fa-route c-p"></i> 添加指定模型路由</h3>' +
-    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 openclaw" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
-    '<div class="fg mb-3"><label for="cr-provider">目标类型 / 提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
-      '<option value="tier1" selected>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
-      '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
-      draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
-      '</optgroup>' +
-    '</select></div>' +
-    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="auto">🌟 第一梯队池自动选优 (9席健康模型智能调度)</option></select></div>' +
+    '<p class="form-helper" style="margin-bottom:12px;">可通过下方【标签分类】一键快速点选，或在下拉框中精确指定。</p>' +
+    '<div class="fg mb-2">' +
+      '<label style="font-weight:600;font-size:0.8125rem;"><i class="fas fa-tags" style="color:var(--color-focus);margin-right:4px;"></i> 按标签选择模型：</label>' +
+      '<div class="route-tag-bar" id="modal-tag-bar">' +
+        '<button type="button" class="route-tag-chip is-active" data-modal-tag="all" onclick="onModalRouteTagBtn(this)"><i class="fas fa-layer-group"></i> 全部 <span class="chip-count">' + allModels.length + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="openclaw" onclick="onModalRouteTagBtn(this)"><i class="fas fa-robot"></i> OpenClaw 适合 <span class="chip-count">' + openclawCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="tier1" onclick="onModalRouteTagBtn(this)"><i class="fas fa-bolt"></i> 第一梯队池</button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="text" onclick="onModalRouteTagBtn(this)"><i class="fas fa-comment-dots"></i> 文本模型 <span class="chip-count">' + textCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="image" onclick="onModalRouteTagBtn(this)"><i class="fas fa-palette"></i> 绘图模型 <span class="chip-count">' + imgCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="healthy" onclick="onModalRouteTagBtn(this)"><i class="fas fa-shield-halved"></i> 仅健康就绪</button>' +
+      '</div>' +
+      '<div id="cr-quick-picker" class="route-quick-picker"></div>' +
+    '</div>' +
+    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 (匹配项) *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 deepseek-chat" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
+    '<div class="grid-2-gap6" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
+        '<option value="tier1" selected>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+        '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
+        draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
+        '</optgroup>' +
+      '</select></div>' +
+      '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="auto">🌟 第一梯队池自动选优 (9席健康模型智能调度)</option></select></div>' +
+    '</div>' +
     '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存规则</button></div>';
   showM(modalHtml);
-  updateCustomRouteModelOptions();
+  renderCustomRouteQuickPicker('all', 'tier1', 'auto');
+  updateCustomRouteModelOptions('auto');
 }
 
 function updateCustomRouteModelOptions(selectedModelId) {
@@ -2777,7 +3008,7 @@ function updateCustomRouteModelOptions(selectedModelId) {
   if (!pSelect || !mSelect) return;
   var pid = pSelect.value;
   if (!pid) {
-    mSelect.innerHTML = '<option value="">请选择目标类型...</option>';
+    mSelect.innerHTML = '<option value="">请选择目标提供商...</option>';
     return;
   }
   if (pid === 'tier1') {
@@ -2789,9 +3020,31 @@ function updateCustomRouteModelOptions(selectedModelId) {
     mSelect.innerHTML = '<option value="">该提供商暂无可用模型</option>';
     return;
   }
-  mSelect.innerHTML = p.models.map(function(m) {
+
+  // 根据当前 modalActiveTag 过滤或打标
+  var models = p.models;
+  if (modalActiveTag === 'openclaw') {
+    var filtered = models.filter(function(m) {
+      return m.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(m.id);
+    });
+    if (filtered.length > 0) models = filtered;
+  } else if (modalActiveTag === 'text') {
+    var textFiltered = models.filter(function(m) { return m.category === '文本'; });
+    if (textFiltered.length > 0) models = textFiltered;
+  } else if (modalActiveTag === 'image') {
+    var imgFiltered = models.filter(function(m) { return m.category === '绘图'; });
+    if (imgFiltered.length > 0) models = imgFiltered;
+  }
+
+  mSelect.innerHTML = models.map(function(m) {
     var isSel = m.id === selectedModelId ? 'selected' : '';
-    return '<option value="' + escapeHtml(m.id) + '" ' + isSel + '>' + escapeHtml(m.name || m.id) + ' (' + escapeHtml(m.id) + ')</option>';
+    var tagInfo = '';
+    if (m.openclawTested && m.openclawCompatible) {
+      tagInfo = ' [OpenClaw适合]';
+    } else if (m.category) {
+      tagInfo = ' [' + m.category + ']';
+    }
+    return '<option value="' + escapeHtml(m.id) + '" ' + isSel + '>' + escapeHtml(m.id) + tagInfo + '</option>';
   }).join('');
 }
 
@@ -2801,21 +3054,43 @@ function editCustomRouteBtn(btn) {
   var r = customRoutesData.find(function(item) { return item.id === id; });
   if (!r) return;
   currentEditingRouteId = id;
+  modalActiveTag = 'all';
   var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
+  var allModels = getAllFlattenedModels();
+  var openclawCount = allModels.filter(function(m) { return m.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(m.modelId); }).length;
+  var textCount = allModels.filter(function(m) { return m.category === '文本'; }).length;
+  var imgCount = allModels.filter(function(m) { return m.category === '绘图'; }).length;
+
   var modalHtml = '<h3><i class="fas fa-edit c-p"></i> 编辑指定模型路由</h3>' +
-    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
-    '<div class="fg mb-3"><label for="cr-provider">目标类型 / 提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
-      '<option value="tier1" ' + (isTier1 ? 'selected' : '') + '>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
-      '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
-      draftProviders.map(function(p) {
-        var isSel = !isTier1 && p.id === r.targetProviderId ? 'selected' : '';
-        return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
-      }).join('') +
-      '</optgroup>' +
-    '</select></div>' +
-    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"></select></div>' +
+    '<p class="form-helper" style="margin-bottom:12px;">可通过下方【标签分类】一键切换模型，或在下拉框中精确选择。</p>' +
+    '<div class="fg mb-2">' +
+      '<label style="font-weight:600;font-size:0.8125rem;"><i class="fas fa-tags" style="color:var(--color-focus);margin-right:4px;"></i> 按标签选择模型：</label>' +
+      '<div class="route-tag-bar" id="modal-tag-bar">' +
+        '<button type="button" class="route-tag-chip is-active" data-modal-tag="all" onclick="onModalRouteTagBtn(this)"><i class="fas fa-layer-group"></i> 全部 <span class="chip-count">' + allModels.length + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="openclaw" onclick="onModalRouteTagBtn(this)"><i class="fas fa-robot"></i> OpenClaw 适合 <span class="chip-count">' + openclawCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="tier1" onclick="onModalRouteTagBtn(this)"><i class="fas fa-bolt"></i> 第一梯队池</button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="text" onclick="onModalRouteTagBtn(this)"><i class="fas fa-comment-dots"></i> 文本模型 <span class="chip-count">' + textCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="image" onclick="onModalRouteTagBtn(this)"><i class="fas fa-palette"></i> 绘图模型 <span class="chip-count">' + imgCount + '</span></button>' +
+        '<button type="button" class="route-tag-chip" data-modal-tag="healthy" onclick="onModalRouteTagBtn(this)"><i class="fas fa-shield-halved"></i> 仅健康就绪</button>' +
+      '</div>' +
+      '<div id="cr-quick-picker" class="route-quick-picker"></div>' +
+    '</div>' +
+    '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 (匹配项) *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
+    '<div class="grid-2-gap6" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
+      '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
+        '<option value="tier1" ' + (isTier1 ? 'selected' : '') + '>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+        '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
+        draftProviders.map(function(p) {
+          var isSel = !isTier1 && p.id === r.targetProviderId ? 'selected' : '';
+          return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
+        }).join('') +
+        '</optgroup>' +
+      '</select></div>' +
+      '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"></select></div>' +
+    '</div>' +
     '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存更改</button></div>';
   showM(modalHtml);
+  renderCustomRouteQuickPicker('all', isTier1 ? 'tier1' : r.targetProviderId, isTier1 ? 'auto' : r.targetModelId);
   updateCustomRouteModelOptions(isTier1 ? 'auto' : r.targetModelId);
 }
 

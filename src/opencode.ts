@@ -49,11 +49,17 @@ export function filterOpenCodeModels<T extends { id?: unknown }>(models: T[]): T
   ))
 }
 
+export const DEFAULT_OPENCODE_MIRRORS = [
+  'https://opencode.ai.cmliussss.net/zen/v1',
+  'https://opencode.fastly.cmliussss.net/zen/v1',
+  'https://opencode.gcore.cmliussss.net/zen/v1',
+]
+
 export function resolveOpenCodeUrls(env: Env): string[] {
   const raw = env.OPENCODE_MIRRORS_URL || ''
-  // 兼容换行符、逗号、空格分隔；过滤空白；全局去重
-  const parts = raw.split('\n').flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean)
-  return [...new Set(parts)]
+  // 兼容换行符、逗号、空格分隔；过滤空白；默认三镜像+用户自定义镜像，全局去重
+  const custom = raw.split('\n').flatMap(s => s.split(',')).map(s => s.trim()).filter(Boolean)
+  return [...new Set([...DEFAULT_OPENCODE_MIRRORS, ...custom])]
 }
 
 function getMirrorOrder(urls: string[], random: () => number): string[] {
@@ -147,14 +153,15 @@ export async function proxyOpenCodeRequest(options: OpenCodeRequestOptions): Pro
   let lastTransportError: unknown = null
 
   const enabledKeys = options.apiKeys.filter((entry) => entry.enabled && entry.key)
+  const officialKeys = enabledKeys.length > 0 ? enabledKeys.map((e) => e.key) : ['public']
   const officialUrl = buildUrl(options.baseUrl, options.subPath, options.search)
 
-  for (const entry of enabledKeys) {
+  for (const key of officialKeys) {
     try {
       const response = await requestUpstream(
         fetcher,
         officialUrl,
-        entry.key,
+        key,
         options,
         requestId,
         sessionId

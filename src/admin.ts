@@ -737,10 +737,13 @@ export async function handleFetchUpstreamModels(c: Context<{ Bindings: Env }>) {
 
   if (isOpenCodeProvider(provider.id)) {
     const opencodeRes = await fetchOpenCodeModels(provider.baseUrl, enabledKeys, resolveOpenCodeUrls(c.env))
-    if (!opencodeRes.success || !Array.isArray(opencodeRes.data)) {
+    if (!opencodeRes.success || !opencodeRes.data) {
       return c.json<ApiResponse>({ success: false, message: opencodeRes.message || '拉取 OpenCode 上游模型列表失败' }, 500)
     }
-    modelIds = opencodeRes.data
+    const rawList = Array.isArray(opencodeRes.data)
+      ? opencodeRes.data
+      : (Array.isArray((opencodeRes.data as any).data) ? (opencodeRes.data as any).data : [])
+    modelIds = rawList.map((m: any) => (typeof m === 'string' ? m : m?.id)).filter(Boolean)
   } else {
     const cleanBase = provider.baseUrl.replace(/\/$/, '')
     const apiKey = enabledKeys[0]?.key || ''
