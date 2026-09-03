@@ -790,6 +790,12 @@ ${H('管理')}
                       statusBadge = '<span class="bd bd-off" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-minus-circle"></i> 已禁用</span>';
                     }
 
+                    const openclawBadge = m.openclawTested
+                      ? (m.openclawCompatible
+                          ? `<span class="openclaw-badge openclaw-badge--ok" title="${escapePageHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)')}"><i class="fas fa-robot"></i> OpenClaw 适合</span>`
+                          : `<span class="openclaw-badge openclaw-badge--no" title="${escapePageHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)')}"><i class="fas fa-ban"></i> OpenClaw 不适合</span>`)
+                      : '';
+
                     const catSelect = `<select class="select-xs" style="padding:2px 6px;font-size:11px;border-radius:4px;" onchange="updateModelCatBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="修改智能分类">` +
                       `<option value="文本" ${mCat === '文本' ? 'selected' : ''}>文本</option>` +
                       `<option value="绘图" ${mCat === '绘图' ? 'selected' : ''}>绘图</option>` +
@@ -808,6 +814,7 @@ ${H('管理')}
                       `<div class="model-row-line-2">` +
                         catSelect +
                         statusBadge +
+                        openclawBadge +
                         `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>` +
                         unblockBtn +
                         `<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-idx="${mi}" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>` +
@@ -1810,6 +1817,46 @@ async function testMdl(id, mid, idx, btn) {
         if (tr) showResult(tr, false, d.data.message || '连接失败')
         toast(mid + ' 测试失败: ' + (d.data.message || '连接错误'), 'error')
       }
+
+      // 动态更新 OpenClaw 适合度标注
+      if (d.data.openclaw && d.data.openclaw.tested) {
+        var isCompat = d.data.openclaw.compatible;
+        var reason = d.data.openclaw.reason || (isCompat ? '适合 OpenClaw (支持 Tool 与智能体交互)' : '不适合 OpenClaw (不支持 Tool 或非代码模型)');
+        var badgeHtml = isCompat
+          ? '<span class="openclaw-badge openclaw-badge--ok" title="' + escapeHtml(reason) + '"><i class="fas fa-robot"></i> OpenClaw 适合</span>'
+          : '<span class="openclaw-badge openclaw-badge--no" title="' + escapeHtml(reason) + '"><i class="fas fa-ban"></i> OpenClaw 不适合</span>';
+
+        if (row) {
+          var existingBadge = row.querySelector('.openclaw-badge');
+          if (existingBadge) {
+            existingBadge.outerHTML = badgeHtml;
+          } else {
+            var line2 = row.querySelector('.model-row-line-2');
+            if (line2) {
+              var testBtn = line2.querySelector('.test-mdl-btn');
+              if (testBtn) {
+                testBtn.insertAdjacentHTML('beforebegin', badgeHtml);
+              } else {
+                line2.insertAdjacentHTML('beforeend', badgeHtml);
+              }
+            }
+          }
+        }
+
+        // 同步至内存 draftProviders
+        if (typeof draftProviders !== 'undefined' && Array.isArray(draftProviders)) {
+          var pObj = draftProviders.find(function(item) { return item.id === id; });
+          if (pObj && pObj.models) {
+            var mObj = pObj.models.find(function(m) { return m.id === mid; });
+            if (mObj) {
+              mObj.openclawTested = true;
+              mObj.openclawCompatible = isCompat;
+              mObj.openclawReason = reason;
+              mObj.openclawTestedAt = Date.now();
+            }
+          }
+        }
+      }
     } else {
       if (latEl) {
         latEl.className = 'latency-chip lat-err';
@@ -1834,7 +1881,7 @@ async function testAllModelsInProviderBtn(btn) {
   if (!pId) return;
   btn.disabled = true;
   btn.style.opacity = '0.6';
-  toast('开始批量测试模型延迟...', 'info');
+  toast('开始批量探测模型通信与 OpenClaw 适合度...', 'info');
   try {
     var c = document.getElementById('ml-' + pId);
     if (!c) return;
@@ -1846,9 +1893,13 @@ async function testAllModelsInProviderBtn(btn) {
       var mid = (inp && inp.value.trim()) ? inp.value.trim() : (b.getAttribute('data-mid') || b.dataset.mid || '');
       if (mid) {
         await testMdl(pId, mid, parseInt(idx, 10), b);
+        // 温和节流延时，防止触发 Cloudflare 1015 / 429 限流
+        if (i < testBtns.length - 1) {
+          await new Promise(function(r) { setTimeout(r, 260); });
+        }
       }
     }
-    toast('提供商 ' + pId + ' 模型测速已完成', 'success');
+    toast('提供商 ' + pId + ' 模型探测已完成', 'success');
   } finally {
     btn.disabled = false;
     btn.style.opacity = '1';
@@ -2093,6 +2144,12 @@ function renderProviderList() {
         statusBadge = '<span class="bd bd-off" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-minus-circle"></i> 已禁用</span>';
       }
 
+      var openclawBadge = m.openclawTested
+        ? (m.openclawCompatible
+            ? '<span class="openclaw-badge openclaw-badge--ok" title="' + escapeHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)') + '"><i class="fas fa-robot"></i> OpenClaw 适合</span>'
+            : '<span class="openclaw-badge openclaw-badge--no" title="' + escapeHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)') + '"><i class="fas fa-ban"></i> OpenClaw 不适合</span>')
+        : '';
+
       var catSelect = '<select class="select-xs" style="padding:2px 6px;font-size:11px;border-radius:4px;" onchange="updateModelCatBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" title="修改智能分类">' +
         '<option value="文本" ' + (mCat === '文本' ? 'selected' : '') + '>文本</option>' +
         '<option value="绘图" ' + (mCat === '绘图' ? 'selected' : '') + '>绘图</option>' +
@@ -2111,6 +2168,7 @@ function renderProviderList() {
         '<div class="model-row-line-2">' +
           catSelect +
           statusBadge +
+          openclawBadge +
           '<span id="lat-' + pId + '-' + mi + '" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>' +
           unblockBtn +
           '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-idx="' + mi + '" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>' +

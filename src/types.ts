@@ -8,6 +8,10 @@ export interface Model {
   disabledReason?: string | null
   lastPermTestAt?: number
   permTestFailCount?: number
+  openclawTested?: boolean
+  openclawCompatible?: boolean
+  openclawReason?: string | null
+  openclawTestedAt?: number
 }
 
 export interface ApiKeyEntry {

@@ -219,13 +219,27 @@ function parseModelId(model: string): { providerId: string; modelId: string } | 
   }
 }
 
-/** 测试模型连接，发送最小请求验证 */
+export interface OpenClawProbeResult {
+  tested: boolean
+  compatible: boolean
+  reason: string
+}
+
+/** 测试模型连接，发送最小请求验证，并同步探测 OpenClaw 兼容性（每个模型仅测试一次） */
 export async function testModelConnection(
   baseUrl: string,
   apiKey: string,
   modelId: string,
-  apiType?: 'openai' | 'anthropic'
-): Promise<{ success: boolean; message: string; statusCode?: number; latencyMs?: number }> {
+  apiType?: 'openai' | 'anthropic',
+  category?: string,
+  existingOpenClaw?: { openclawTested?: boolean; openclawCompatible?: boolean; openclawReason?: string | null }
+): Promise<{
+  success: boolean
+  message: string
+  statusCode?: number
+  latencyMs?: number
+  openclaw?: OpenClawProbeResult
+}> {
   const startTime = Date.now()
   try {
     const cleanBase = baseUrl.trim().replace(/\/+$/, '')
@@ -243,13 +257,14 @@ export async function testModelConnection(
       headers['Authorization'] = `Bearer ${apiKey}`
     }
 
+    // 1. 发送基础连通性探测请求 (放宽 max_tokens 至 16，避免思考模型首 token 为空导致误判)
     const response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         model: modelId,
         messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 1,
+        max_tokens: 16,
       }),
       signal: AbortSignal.timeout(15000),
     })
@@ -258,22 +273,132 @@ export async function testModelConnection(
     const rawText = await response.text().catch(() => '')
 
     if (response.ok) {
+      let isConnectOk = true
       try {
         const resData = JSON.parse(rawText) as any
+        // 兼容各类返回结构：只要是合法 choices / content / finish_reason 或 200 响应即算成功
         if (resData && Array.isArray(resData.choices) && resData.choices.length > 0) {
-          const msg = resData.choices[0]?.message
+          const choice = resData.choices[0]
+          const msg = choice?.message
           const hasToolCalls = (msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) || !!msg?.function_call
-          if (!hasToolCalls) {
-            const content = msg?.content
-            if (content === '' || content === null || content === undefined || (typeof content === 'string' && content.trim() === '')) {
-              return { success: false, message: '连接失败: 上游返回空内容', statusCode: response.status, latencyMs }
-            }
+          const hasReasoning = !!msg?.reasoning_content || !!msg?.thinking
+          const hasFinishReason = !!choice?.finish_reason
+          const content = msg?.content
+
+          // 仅在完全没有内容、没有思考链、没有 tool_call 且没有 finish_reason 的异常空对象时才警告
+          if (!hasToolCalls && !hasReasoning && !hasFinishReason && (content === null || content === undefined) && !resData.id) {
+            isConnectOk = false
           }
         }
       } catch {
-        // ignore JSON parse failure
+        // 非 JSON 格式只要 HTTP 200 仍算连通
       }
-      return { success: true, message: '连接成功', statusCode: response.status, latencyMs }
+
+      if (!isConnectOk) {
+        return { success: false, message: '连接失败: 上游返回空内容', statusCode: response.status, latencyMs }
+      }
+
+      // 2. OpenClaw 兼容性探测（通过探测一次性测试并记录）
+      let openclawResult: OpenClawProbeResult | undefined
+
+      if (existingOpenClaw && existingOpenClaw.openclawTested) {
+        // 已测试过，复用历史结果，不重复请求
+        openclawResult = {
+          tested: true,
+          compatible: !!existingOpenClaw.openclawCompatible,
+          reason: existingOpenClaw.openclawReason || (existingOpenClaw.openclawCompatible ? '适合 OpenClaw 智能体' : '未兼容 OpenClaw'),
+        }
+      } else {
+        // 尚未测试过，在本次探测中执行一次 OpenClaw 适合度评估
+        const lowerModel = modelId.toLowerCase()
+        const isDrawingOrMedia = category === '绘图' ||
+          /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|text-embedding|embedding|rerank|bge-|clip|voice)/i.test(modelId) ||
+          (lowerModel.includes('image') && !lowerModel.includes('vision') && !lowerModel.includes('gemini') && !lowerModel.includes('claude') && !lowerModel.includes('gpt')) ||
+          (lowerModel.includes('video') && !lowerModel.includes('gemini'))
+
+        if (isDrawingOrMedia) {
+          openclawResult = {
+            tested: true,
+            compatible: false,
+            reason: '非对话/智能体模型 (绘图/多媒体/嵌入)',
+          }
+        } else {
+          // 发送 Tool-Calling 探针请求验证 OpenClaw 关键工具调用能力
+          try {
+            const toolBody = apiType === 'anthropic'
+              ? {
+                  model: modelId,
+                  messages: [{ role: 'user', content: 'What is the weather in Paris? Call get_weather.' }],
+                  tools: [{
+                    name: 'get_weather',
+                    description: 'Get weather for a city',
+                    input_schema: {
+                      type: 'object',
+                      properties: { location: { type: 'string' } },
+                      required: ['location']
+                    }
+                  }],
+                  max_tokens: 30,
+                }
+              : {
+                  model: modelId,
+                  messages: [{ role: 'user', content: 'What is the weather in Paris? Call get_weather.' }],
+                  tools: [{
+                    type: 'function',
+                    function: {
+                      name: 'get_weather',
+                      description: 'Get weather for a city',
+                      parameters: {
+                        type: 'object',
+                        properties: { location: { type: 'string' } },
+                        required: ['location']
+                      }
+                    }
+                  }],
+                  max_tokens: 30,
+                }
+
+            const toolResp = await fetch(url, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify(toolBody),
+              signal: AbortSignal.timeout(8000),
+            })
+
+            if (toolResp.ok) {
+              openclawResult = {
+                tested: true,
+                compatible: true,
+                reason: '支持 Tool/函数调用与智能体交互',
+              }
+            } else if (toolResp.status === 400 || toolResp.status === 404 || toolResp.status === 422) {
+              const errTxt = await toolResp.text().catch(() => '')
+              openclawResult = {
+                tested: true,
+                compatible: false,
+                reason: errTxt.includes('tool') || errTxt.includes('function') ? '上游不支持 tools / 函数调用' : '未通过智能体 Tools 探针',
+              }
+            } else {
+              // 遇限流或网关异常时，根据智能体通用模型规则做保底匹配
+              const isCommonAgentModel = /claude-3|claude-2|gpt-4|gpt-3\.5|gpt-4o|o1|o3|gemini|deepseek|qwen.*coder|qwen2\.5|glm-4|kimi|minimax|codex/i.test(modelId)
+              openclawResult = {
+                tested: true,
+                compatible: isCommonAgentModel,
+                reason: isCommonAgentModel ? '主流智能体模型 (匹配通过)' : '未通过 Tool 调用测试',
+              }
+            }
+          } catch {
+            const isCommonAgentModel = /claude-3|claude-2|gpt-4|gpt-3\.5|gpt-4o|o1|o3|gemini|deepseek|qwen.*coder|qwen2\.5|glm-4|kimi|minimax|codex/i.test(modelId)
+            openclawResult = {
+              tested: true,
+              compatible: isCommonAgentModel,
+              reason: isCommonAgentModel ? '主流智能体模型 (匹配通过)' : '未通过 Tool 调用测试',
+            }
+          }
+        }
+      }
+
+      return { success: true, message: '连接成功', statusCode: response.status, latencyMs, openclaw: openclawResult }
     }
 
     let errorBody = ''

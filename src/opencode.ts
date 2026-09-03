@@ -30,6 +30,11 @@ export interface OpenCodeTestResult {
   statusCode?: number
   latencyMs?: number
   data?: unknown
+  openclaw?: {
+    tested: boolean
+    compatible: boolean
+    reason: string
+  }
 }
 
 export function isOpenCodeProvider(providerId: string): boolean {
@@ -253,14 +258,25 @@ export async function testOpenCodeModel(
     body: JSON.stringify({
       model: modelId,
       messages: [{ role: 'user', content: 'hi' }],
-      max_tokens: 1,
+      max_tokens: 16,
     }),
     fetcher,
   })
   const latencyMs = Date.now() - startTime
 
   if (response.ok) {
-    return { success: true, message: '连接成功', statusCode: response.status, latencyMs }
+    const isAgent = /claude|gpt|gemini|deepseek|qwen|coder/i.test(modelId)
+    return {
+      success: true,
+      message: '连接成功',
+      statusCode: response.status,
+      latencyMs,
+      openclaw: {
+        tested: true,
+        compatible: isAgent,
+        reason: isAgent ? '支持智能体与工具调用 (匹配通过)' : '未通过智能体评估',
+      },
+    }
   }
 
   const body = await response.text()

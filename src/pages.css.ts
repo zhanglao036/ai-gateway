@@ -731,6 +731,40 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
   border-color: var(--color-focus);
 }
 
+/* OpenClaw badge styling */
+.openclaw-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+  user-select: none;
+  cursor: help;
+  animation: fadeInOpenClaw 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes fadeInOpenClaw {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.openclaw-badge--ok {
+  background: oklch(95% 0.035 280);
+  color: oklch(42% 0.15 280);
+  border: 1px solid oklch(88% 0.05 280);
+}
+
+.openclaw-badge--no {
+  background: oklch(94% 0.008 250);
+  color: oklch(48% 0.015 250);
+  border: 1px solid oklch(86% 0.012 250);
+  opacity: 0.9;
+}
+
 @media (pointer: coarse) {
   .btn, .model-token, .password-toggle, input, select { min-height: var(--control-h); }
   .icon-btn, .password-toggle { width: var(--control-h); height: var(--control-h); flex-basis: var(--control-h); }

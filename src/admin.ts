@@ -186,7 +186,28 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
 
   const result = isOpenCodeProvider(provider.id)
     ? await testOpenCodeModel(provider.baseUrl, enabledKeys, modelId, resolveOpenCodeUrls(c.env))
-    : await testModelConnection(provider.baseUrl, enabledKeys[0].key, modelId, provider.apiType)
+    : await testModelConnection(
+        provider.baseUrl,
+        enabledKeys[0].key,
+        modelId,
+        provider.apiType,
+        modelConfig.category,
+        modelConfig.openclawTested
+          ? {
+              openclawTested: modelConfig.openclawTested,
+              openclawCompatible: modelConfig.openclawCompatible,
+              openclawReason: modelConfig.openclawReason,
+            }
+          : undefined
+      )
+
+  if (result.openclaw && result.openclaw.tested) {
+    modelConfig.openclawTested = true
+    modelConfig.openclawCompatible = result.openclaw.compatible
+    modelConfig.openclawReason = result.openclaw.reason
+    modelConfig.openclawTestedAt = Date.now()
+    await updateProvider(c.env, id, { models: provider.models })
+  }
 
   await applyModelProbeResult(
     c.env,
@@ -287,8 +308,6 @@ export async function handleTestModelNew(c: Context<{ Bindings: Env }>) {
     return c.json<ApiResponse>({ success: false, message: 'url、apiKey、model 为必填项' }, 400)
   }
 
-  const startTime = Date.now()
-
   if (providerId && isOpenCodeProvider(providerId)) {
     const apiKeys = apiKey ? [{ key: apiKey, enabled: true }] : []
     const result = await testOpenCodeModel(url, apiKeys, model, resolveOpenCodeUrls(c.env))
@@ -298,29 +317,17 @@ export async function handleTestModelNew(c: Context<{ Bindings: Env }>) {
     })
   }
 
-  const cleanBase = url.trim().replace(/\/+$/, '')
-  const endpoint = apiType === 'anthropic' ? 'messages' : 'chat/completions'
-
-  try {
-    const response = await fetch(`${cleanBase}/${endpoint}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...buildAuthHeaders(apiKey, apiType) },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 1 }),
-      signal: AbortSignal.timeout(15000),
-    })
-    const latencyMs = Date.now() - startTime
-
-    return c.json<ApiResponse>({
-      success: true,
-      data: { success: response.ok, statusCode: response.status, latencyMs },
-    })
-  } catch (err) {
-    const latencyMs = Date.now() - startTime
-    return c.json<ApiResponse>({
-      success: true,
-      data: { success: false, statusCode: 0, message: (err as Error).message || '连接失败', latencyMs },
-    })
-  }
+  const result = await testModelConnection(url, apiKey, model, apiType as any)
+  return c.json<ApiResponse>({
+    success: true,
+    data: {
+      success: result.success,
+      statusCode: result.statusCode || 0,
+      message: result.message,
+      latencyMs: result.latencyMs,
+      openclaw: result.openclaw,
+    },
+  })
 }
 
 // ===== 转发 Key 管理 =====
