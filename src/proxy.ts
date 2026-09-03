@@ -310,16 +310,22 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       return c.json({ error: { message: '缺少 model 参数', type: 'invalid_request_error' } }, 400)
     }
 
-    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型 或 auto/auto）
+    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型 或 第一梯队池）
     const customRoutes = await getCustomModelRoutes(c.env)
     const matchedRoute = customRoutes.find((r) => r.enabled && r.sourceModel.trim().toLowerCase() === model.trim().toLowerCase())
     if (matchedRoute) {
-      if (matchedRoute.targetProviderId === 'auto' || matchedRoute.targetModelId === 'auto') {
-        model = 'auto/auto'
+      if (matchedRoute.targetProviderId === 'tier1' || matchedRoute.targetModelId === 'auto') {
+        isAutoRequest = true
+        requestedModel = `${rawModel} -> [第一梯队池 (Tier 1)]`
       } else {
+        isAutoRequest = false
         model = `${matchedRoute.targetProviderId}/${matchedRoute.targetModelId}`
+        requestedModel = `${rawModel} -> ${model}`
       }
-      requestedModel = `${rawModel} -> ${model}`
+    } else if (model === 'openclaw/auto' || model === 'openclaw') {
+      // 客户端发送 openclaw/auto 且未配规则时，安全默认指向第一梯队池，避免 404
+      isAutoRequest = true
+      requestedModel = `${rawModel} -> [第一梯队池默认路由]`
     }
 
     if (model === 'auto' || model === 'auto/auto') {
@@ -329,7 +335,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     const triedProviders = new Set<string>()
     let currentModel = model
     let attempts = 0
-    const maxAttempts = 3
+    const maxAttempts = isAutoRequest ? 3 : 1 // 指定具体模型时严格只尝试 1 次，不切换不漂移
 
     while (attempts < maxAttempts) {
       attempts++
@@ -435,6 +441,22 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       delete (forwardBody as Record<string, unknown>).disable_think
       delete (forwardBody as Record<string, unknown>).no_chain_of_thought
       delete (forwardBody as Record<string, unknown>).do_sample
+
+      // OpenClaw / Agent 客户端参数平滑兼容处理：
+      // 1. 如果带有新版 max_completion_tokens 而缺少 max_tokens，平滑转换
+      const fBodyAny = forwardBody as Record<string, unknown>
+      if (fBodyAny.max_completion_tokens !== undefined && fBodyAny.max_tokens === undefined) {
+        fBodyAny.max_tokens = fBodyAny.max_completion_tokens
+        delete fBodyAny.max_completion_tokens
+      }
+      // 2. 如果 tools 为空数组，直接移除，避免部分严格上游报错 400
+      if (Array.isArray(fBodyAny.tools) && fBodyAny.tools.length === 0) {
+        delete fBodyAny.tools
+      }
+      // 3. 部分上游不支持 stream_options，如果不是必要可剥离非标嵌套
+      if (fBodyAny.stream_options && typeof fBodyAny.stream_options === 'object') {
+        // 保留或者清理非标准字段
+      }
       const url = new URL(c.req.url)
       const subPath = url.pathname.replace(/^\/v1\//, '') || 'chat/completions'
 
@@ -488,10 +510,16 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
         await recordLog(c.env, startTime, requestedModel, response.status, null)
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
+        const opHeaders = new Headers(response.headers)
+        if (isStreamReq) {
+          opHeaders.set('X-Accel-Buffering', 'no')
+          opHeaders.set('Cache-Control', 'no-cache, no-transform')
+          opHeaders.set('Connection', 'keep-alive')
+        }
         return new Response(resText !== null ? resText : response.body, {
           status: response.status,
           statusText: response.statusText,
-          headers: response.headers,
+          headers: opHeaders,
         })
       }
 
@@ -575,21 +603,18 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           forwardHeaders['Authorization'] = `Bearer ${apiKey}`
         }
 
-        const isStream = !!forwardBody.stream
-        const fetchTimeoutMs = isStream ? 180000 : 90000
-
         const response = await fetch(forwardUrl, {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(fetchTimeoutMs),
+          signal: AbortSignal.timeout(60000),
         })
 
         if (response.ok) {
           let resText: string | null = null
           let isContentEmpty = false
 
-          if (!isStream) {
+          if (!forwardBody.stream) {
             try {
               resText = await response.text()
               const resJson = JSON.parse(resText)
@@ -634,12 +659,12 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           if (healthUpdated) await writeHealth(c.env, providerId, healthData)
 
           const responseHeaders: Record<string, string> = {
-            'Content-Type': response.headers.get('Content-Type') || (isStream ? 'text/event-stream; charset=utf-8' : 'application/json'),
-            'Cache-Control': 'no-cache, no-transform',
+            'Content-Type': response.headers.get('Content-Type') || 'application/json',
+            'Cache-Control': isStreamReq ? 'no-cache, no-transform' : 'no-store',
           }
-          if (isStream) {
-            responseHeaders['Connection'] = 'keep-alive'
+          if (isStreamReq) {
             responseHeaders['X-Accel-Buffering'] = 'no'
+            responseHeaders['Connection'] = 'keep-alive'
           }
           await recordLog(c.env, startTime, requestedModel, response.status, null, {
             keyMask: masked,
@@ -772,7 +797,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
   }
 }
 
-/** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀及后台指定模型路由） */
+/** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀与自定义指定模型） */
 export async function handleModels(c: Context<{ Bindings: Env }>) {
   const providers = await getProviders(c.env)
   const customRoutes = await getCustomModelRoutes(c.env)
@@ -793,22 +818,29 @@ export async function handleModels(c: Context<{ Bindings: Env }>) {
       created: Math.floor(Date.now() / 1000),
       owned_by: 'gateway',
     },
-  ]
-
-  // 将启用的自定义指定模型路由（例如 openclaw/auto）加入模型列表，供客户端探测发现
-  for (const cr of customRoutes) {
-    if (!cr.enabled || !cr.sourceModel) continue
-    if (cr.sourceModel.toLowerCase() === 'auto/auto') continue
-    const targetLabel = (cr.targetProviderId === 'auto' || cr.targetModelId === 'auto')
-      ? '第一梯队智能路由'
-      : `${cr.targetProviderId}/${cr.targetModelId}`
-    models.push({
-      id: cr.sourceModel,
-      provider: 'custom_route',
-      provider_name: `指定模型路由 -> ${targetLabel}`,
+    {
+      id: 'openclaw/auto',
+      provider: 'openclaw',
+      provider_name: 'OpenClaw Agent 路由',
       object: 'model',
       created: Math.floor(Date.now() / 1000),
-      owned_by: 'gateway',
+      owned_by: 'openclaw',
+    },
+  ]
+
+  // 注入已启用的自定义路由别名
+  for (const cr of customRoutes) {
+    if (!cr.enabled || !cr.sourceModel) continue
+    const sm = cr.sourceModel.trim()
+    if (models.some((m) => m.id.toLowerCase() === sm.toLowerCase())) continue
+    const targetDesc = cr.targetProviderId === 'tier1' ? '第一梯队池' : `${cr.targetProviderId}/${cr.targetModelId}`
+    models.push({
+      id: sm,
+      provider: 'custom',
+      provider_name: `指定转发: ${targetDesc}`,
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'custom_route',
     })
   }
 

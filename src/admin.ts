@@ -475,84 +475,106 @@ export async function handleSaveCustomRoutes(c: Context<{ Bindings: Env }>) {
   })
 }
 
+/** 测试指定模型路由延迟（支持具体模型与第一梯队池） */
 export async function handleTestCustomRoute(c: Context<{ Bindings: Env }>) {
   const { targetProviderId, targetModelId } = await c.req.json<{
     targetProviderId: string
     targetModelId: string
-  }>().catch(() => ({ targetProviderId: '', targetModelId: '' }))
+  }>()
 
   if (!targetProviderId || !targetModelId) {
-    return c.json<ApiResponse>({ success: false, message: '目标提供商与目标模型为必填项' }, 400)
+    return c.json<ApiResponse>({ success: false, message: '缺少目标提供商或目标模型参数' }, 400)
   }
 
-  const startTime = Date.now()
+  // 分支 1：目标为第一梯队池 (Tier 1)
+  if (targetProviderId === 'tier1' || targetModelId === 'auto') {
+    const selected = await selectAutoModel(c.env)
+    if (!selected) {
+      return c.json<ApiResponse>({
+        success: true,
+        data: {
+          success: false,
+          targetInfo: '第一梯队池 (Tier 1)',
+          message: '第一梯队池暂无可用的健康模型',
+        },
+      })
+    }
+    const provider = await getProvider(c.env, selected.providerId)
+    if (!provider) {
+      return c.json<ApiResponse>({
+        success: true,
+        data: {
+          success: false,
+          targetInfo: `第一梯队最优模型: ${selected.fullId}`,
+          message: `提供商 ${selected.providerId} 不存在`,
+        },
+      })
+    }
+    const enabledKeys = provider.apiKeys.filter((k) => k.enabled)
+    if (!isOpenCodeProvider(provider.id) && enabledKeys.length === 0) {
+      return c.json<ApiResponse>({
+        success: true,
+        data: {
+          success: false,
+          targetInfo: `第一梯队最优模型: ${selected.fullId}`,
+          message: '该提供商无可用 API Key',
+        },
+      })
+    }
 
-  // 如果目标是第一梯队 auto/auto
-  if (targetProviderId === 'auto' || targetModelId === 'auto') {
-    const autoRes = await selectAutoModel(c.env, false, 'test_probe', new Set())
-    if (!autoRes) {
-      return c.json<ApiResponse>({
-        success: false,
-        message: '当前第一梯队中暂无可用的首选模型，请先检查提供商状态或运行梯队探测',
-        data: { latencyMs: Date.now() - startTime },
-      })
-    }
-    const [pId, mId] = autoRes.fullId.split('/')
-    const p = await getProvider(c.env, pId)
-    if (!p) {
-      return c.json<ApiResponse>({
-        success: false,
-        message: `选中的模型对应提供商 ${pId} 不存在`,
-        data: { latencyMs: Date.now() - startTime },
-      })
-    }
-    const enabledKeys = p.apiKeys.filter((k) => k.enabled)
-    const apiKey = enabledKeys[0]?.key || ''
-    const testRes = isOpenCodeProvider(p.id)
-      ? await testOpenCodeModel(p.baseUrl, enabledKeys, mId, resolveOpenCodeUrls(c.env))
-      : await testModelConnection(p.baseUrl, apiKey, mId, p.apiType)
-    const latency = Date.now() - startTime
+    const testRes = isOpenCodeProvider(provider.id)
+      ? await testOpenCodeModel(provider.baseUrl, enabledKeys, selected.modelId, resolveOpenCodeUrls(c.env))
+      : await testModelConnection(provider.baseUrl, enabledKeys[0]?.key || '', selected.modelId, provider.apiType)
+
     return c.json<ApiResponse>({
-      success: testRes.success,
-      message: testRes.success
-        ? `第一梯队连通正常！当前调度模型: ${autoRes.fullId} (${testRes.latencyMs || latency}ms)`
-        : `第一梯队调度模型 ${autoRes.fullId} 响应异常: ${testRes.message || '未知错误'}`,
+      success: true,
       data: {
         success: testRes.success,
-        statusCode: testRes.statusCode || (testRes.success ? 200 : 500),
-        latencyMs: testRes.latencyMs || latency,
-        resolvedModel: autoRes.fullId,
+        targetInfo: `第一梯队调度模型: ${selected.fullId}`,
+        latencyMs: testRes.latencyMs,
+        statusCode: testRes.statusCode,
+        message: testRes.message,
       },
     })
   }
 
-  // 正常提供商 + 模型测试
+  // 分支 2：目标为特定具体模型（严格直连测试，不切换其他模型）
   const provider = await getProvider(c.env, targetProviderId)
   if (!provider) {
-    return c.json<ApiResponse>({ success: false, message: `目标提供商 "${targetProviderId}" 不存在` }, 404)
+    return c.json<ApiResponse>({
+      success: true,
+      data: {
+        success: false,
+        targetInfo: `${targetProviderId}/${targetModelId}`,
+        message: `提供商 "${targetProviderId}" 不存在`,
+      },
+    })
   }
 
   const enabledKeys = provider.apiKeys.filter((k) => k.enabled)
   if (!isOpenCodeProvider(provider.id) && enabledKeys.length === 0) {
-    return c.json<ApiResponse>({ success: false, message: `目标提供商 "${provider.name}" 未启用任何有效的 API Key` }, 400)
+    return c.json<ApiResponse>({
+      success: true,
+      data: {
+        success: false,
+        targetInfo: `${targetProviderId}/${targetModelId}`,
+        message: '该提供商无可用 API Key',
+      },
+    })
   }
 
-  const apiKey = enabledKeys[0]?.key || ''
   const testRes = isOpenCodeProvider(provider.id)
     ? await testOpenCodeModel(provider.baseUrl, enabledKeys, targetModelId, resolveOpenCodeUrls(c.env))
-    : await testModelConnection(provider.baseUrl, apiKey, targetModelId, provider.apiType)
-
-  const latency = Date.now() - startTime
+    : await testModelConnection(provider.baseUrl, enabledKeys[0]?.key || '', targetModelId, provider.apiType)
 
   return c.json<ApiResponse>({
-    success: testRes.success,
-    message: testRes.success
-      ? `测试成功！目标模型响应正常 (${testRes.latencyMs || latency}ms)`
-      : `测试失败: ${testRes.message || '请求上游接口异常'}`,
+    success: true,
     data: {
       success: testRes.success,
-      statusCode: testRes.statusCode || (testRes.success ? 200 : 500),
-      latencyMs: testRes.latencyMs || latency,
+      targetInfo: `${targetProviderId}/${targetModelId}`,
+      latencyMs: testRes.latencyMs,
+      statusCode: testRes.statusCode,
+      message: testRes.message,
     },
   })
 }

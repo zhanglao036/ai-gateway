@@ -354,6 +354,20 @@ export async function seedInitialData(env: Env): Promise<void> {
       await addProxyKey(env, testKey)
     }
   }
+
+  // 首次运行时添加默认 openclaw/auto 指定规则（指向第一梯队池）
+  const customRoutes = await getCustomModelRoutes(env)
+  if (customRoutes.length === 0) {
+    await saveCustomModelRoutes(env, [
+      {
+        id: 'cr_openclaw_default',
+        sourceModel: 'openclaw/auto',
+        targetProviderId: 'tier1',
+        targetModelId: 'auto',
+        enabled: true,
+      },
+    ])
+  }
 }
 
 // ===== 网关请求日志管理 =====

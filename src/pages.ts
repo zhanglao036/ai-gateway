@@ -122,9 +122,9 @@ ${H('首页')}
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
         <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#0f172a;">
-          <i class="fas fa-bolt" style="color:#eab308;"></i> 极简 Auto 智能路由：指定 model: "auto/auto" 或 "auto"
+          <i class="fas fa-bolt" style="color:#eab308;"></i> 极简 Auto 智能路由：指定 model: "auto/auto" 或 "openclaw/auto"
         </span>
-        <span style="font-size:0.75rem;color:#64748b;">支持动态淘汰与独立轻量海选补位</span>
+        <span style="font-size:0.75rem;color:#64748b;">支持动态淘汰与独立轻量海选补位 · 严格指定模型时不漂移</span>
       </div>
       <pre style="background:#0f172a;color:#f8fafc;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/chat/completions \\
   -H "Authorization: Bearer sk_cf_••••" \\
@@ -846,12 +846,13 @@ ${H('管理')}
                 <th style="padding:10px 12px;">请求模型名称 (匹配项)</th>
                 <th style="padding:10px 12px;">目标提供商</th>
                 <th style="padding:10px 12px;">目标模型</th>
+                <th style="padding:10px 12px;">实时延迟</th>
                 <th style="padding:10px 12px;">启用状态</th>
                 <th style="padding:10px 12px;text-align:right;">操作</th>
               </tr>
             </thead>
             <tbody id="custom-routes-tbody">
-              ${customRoutes.length === 0 ? '<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型。</td></tr>' : ''}
+              ${customRoutes.length === 0 ? '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型或第一梯队池。</td></tr>' : ''}
             </tbody>
           </table>
         </div>
@@ -2647,27 +2648,30 @@ function renderCustomRoutesTable() {
   var tbody = document.getElementById('custom-routes-tbody');
   if (!tbody) return;
   if (!customRoutesData || customRoutesData.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型。</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型或第一梯队池。</td></tr>';
     return;
   }
   tbody.innerHTML = customRoutesData.map(function(r) {
-    var pName = r.targetProviderId;
-    if (r.targetProviderId === 'auto' || r.targetModelId === 'auto') {
-      pName = '⭐ 第一梯队智能路由';
-    } else {
+    var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
+    var pName = isTier1 ? '🌟 第一梯队自动调度池' : r.targetProviderId;
+    var mName = isTier1 ? 'Tier 1 健康模型自动选优' : r.targetModelId;
+    if (!isTier1) {
       var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
       if (pObj) pName = pObj.name + ' (' + pObj.id + ')';
     }
 
+    var targetBadge = isTier1
+      ? '<span style="color:#0284c7;font-weight:600;"><i class="fas fa-bolt" style="color:#eab308;margin-right:4px;"></i>第一梯队池 (Tier 1)</span>'
+      : '<span style="color:#0f766e;font-weight:600;"><i class="fas fa-crosshairs" style="color:#0d9488;margin-right:4px;"></i>严格指定</span>';
+
     return '<tr>' +
       '<td style="padding:10px 12px;"><code>' + escapeHtml(r.sourceModel) + '</code></td>' +
       '<td style="padding:10px 12px;color:var(--color-ink);">' + escapeHtml(pName) + '</td>' +
-      '<td style="padding:10px 12px;"><code>' + escapeHtml(r.targetModelId) + '</code>' +
-        '<span id="cr-test-res-' + escapeHtml(r.id) + '" style="margin-left:8px;font-size:12px;display:none;"></span>' +
-      '</td>' +
+      '<td style="padding:10px 12px;"><code>' + escapeHtml(mName) + '</code> <span style="font-size:0.75rem;margin-left:4px;">' + targetBadge + '</span></td>' +
+      '<td style="padding:10px 12px;" id="cr-lat-' + escapeHtml(r.id) + '"><span style="color:var(--color-muted);font-size:0.8rem;">未测试</span></td>' +
       '<td style="padding:10px 12px;"><label class="tg"><input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' data-id="' + escapeHtml(r.id) + '" onchange="toggleCustomRouteBtn(this)"><span class="sl"></span></label></td>' +
       '<td style="padding:10px 12px;text-align:right;">' +
-        '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="testCustomRouteBtn(this)"><i class="fas fa-bolt"></i> 测延迟</button>' +
+        '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="testCustomRouteLatencyBtn(this)"><i class="fas fa-gauge-high"></i> 测延迟</button>' +
         '<button type="button" class="btn btn-s btn-xs" style="margin-right:6px;" data-id="' + escapeHtml(r.id) + '" onclick="editCustomRouteBtn(this)"><i class="fas fa-edit"></i> 编辑</button>' +
         '<button type="button" class="btn btn-d btn-xs" data-id="' + escapeHtml(r.id) + '" onclick="deleteCustomRouteBtn(this)"><i class="fas fa-trash"></i> 删除</button>' +
       '</td>' +
@@ -2679,13 +2683,16 @@ function openAddCustomRouteModal() {
   currentEditingRouteId = '';
   var modalHtml = '<h3><i class="fas fa-route c-p"></i> 添加指定模型路由</h3>' +
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 openclaw" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
-    '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
-      '<option value="auto">⭐ 智能路由 (第一梯队池 auto/auto)</option>' +
+    '<div class="fg mb-3"><label for="cr-provider">目标类型 / 提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
+      '<option value="tier1" selected>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+      '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
       draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
+      '</optgroup>' +
     '</select></div>' +
-    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="">请先选择提供商...</option></select></div>' +
+    '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"><option value="auto">🌟 第一梯队池自动选优 (9席健康模型智能调度)</option></select></div>' +
     '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存规则</button></div>';
   showM(modalHtml);
+  updateCustomRouteModelOptions();
 }
 
 function updateCustomRouteModelOptions(selectedModelId) {
@@ -2694,11 +2701,11 @@ function updateCustomRouteModelOptions(selectedModelId) {
   if (!pSelect || !mSelect) return;
   var pid = pSelect.value;
   if (!pid) {
-    mSelect.innerHTML = '<option value="">请先选择提供商...</option>';
+    mSelect.innerHTML = '<option value="">请选择目标类型...</option>';
     return;
   }
-  if (pid === 'auto') {
-    mSelect.innerHTML = '<option value="auto" selected>auto (全自动毫秒选拔与容灾)</option>';
+  if (pid === 'tier1') {
+    mSelect.innerHTML = '<option value="auto" selected>🌟 第一梯队池自动选优 (9席健康模型智能调度)</option>';
     return;
   }
   var p = draftProviders.find(function(item) { return item.id === pid; });
@@ -2718,20 +2725,65 @@ function editCustomRouteBtn(btn) {
   var r = customRoutesData.find(function(item) { return item.id === id; });
   if (!r) return;
   currentEditingRouteId = id;
-  var isAuto = r.targetProviderId === 'auto' || r.targetModelId === 'auto';
+  var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
   var modalHtml = '<h3><i class="fas fa-edit c-p"></i> 编辑指定模型路由</h3>' +
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
-    '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;"><option value="">选择提供商...</option>' +
-      '<option value="auto" ' + (isAuto ? 'selected' : '') + '>⭐ 智能路由 (第一梯队池 auto/auto)</option>' +
+    '<div class="fg mb-3"><label for="cr-provider">目标类型 / 提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
+      '<option value="tier1" ' + (isTier1 ? 'selected' : '') + '>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+      '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
       draftProviders.map(function(p) {
-        var isSel = (!isAuto && p.id === r.targetProviderId) ? 'selected' : '';
+        var isSel = !isTier1 && p.id === r.targetProviderId ? 'selected' : '';
         return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
       }).join('') +
+      '</optgroup>' +
     '</select></div>' +
     '<div class="fg mb-3"><label for="cr-model">目标模型 *</label><select id="cr-model" class="select-sm" style="width:100%;"></select></div>' +
     '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存更改</button></div>';
   showM(modalHtml);
-  updateCustomRouteModelOptions(r.targetModelId);
+  updateCustomRouteModelOptions(isTier1 ? 'auto' : r.targetModelId);
+}
+
+async function testCustomRouteLatencyBtn(btn) {
+  var id = btn.getAttribute('data-id');
+  if (!id) return;
+  var r = customRoutesData.find(function(item) { return item.id === id; });
+  if (!r) return;
+  var cell = document.getElementById('cr-lat-' + r.id);
+  if (cell) cell.innerHTML = '<span style="color:#0284c7;font-size:0.8rem;"><i class="fas fa-spinner fa-spin"></i> 测试中...</span>';
+  btn.disabled = true;
+  try {
+    var res = await fetch('/admin/api/custom-routes/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetProviderId: r.targetProviderId,
+        targetModelId: r.targetModelId
+      })
+    });
+    var json = await res.json();
+    if (json.success && json.data) {
+      var d = json.data;
+      if (d.success) {
+        if (cell) {
+          cell.innerHTML = '<span style="color:#15803d;font-weight:600;font-size:0.85rem;" title="' + escapeHtml(d.targetInfo || '') + '"><i class="fas fa-check-circle"></i> ' + (d.latencyMs !== undefined ? d.latencyMs + ' ms' : '连通') + '</span>';
+        }
+        toast('连通测试成功 (' + (d.latencyMs || 0) + 'ms)', 'success');
+      } else {
+        if (cell) {
+          cell.innerHTML = '<span style="color:#b91c1c;font-size:0.8rem;" title="' + escapeHtml(d.message || '') + '"><i class="fas fa-times-circle"></i> 失败</span>';
+        }
+        toast('测试失败: ' + (d.message || '无法连通'), 'error');
+      }
+    } else {
+      if (cell) cell.innerHTML = '<span style="color:#b91c1c;font-size:0.8rem;">错误</span>';
+      toast('测试失败: ' + (json.message || '请求错误'), 'error');
+    }
+  } catch (err) {
+    if (cell) cell.innerHTML = '<span style="color:#b91c1c;font-size:0.8rem;">异常</span>';
+    toast('测延迟异常: ' + ((err && err.message) || String(err)), 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function saveCustomRouteFromModal() {
@@ -2775,61 +2827,6 @@ async function deleteCustomRouteBtn(btn) {
   if (!(await cM('确定删除该条指定路由规则？'))) return;
   customRoutesData = customRoutesData.filter(function(r) { return r.id !== id; });
   await saveCustomRoutesToServer();
-}
-
-async function testCustomRouteBtn(btn) {
-  var id = btn.getAttribute('data-id');
-  if (!id) return;
-  var r = customRoutesData.find(function(item) { return item.id === id; });
-  if (!r) return;
-
-  var resEl = document.getElementById('cr-test-res-' + id);
-  var origHtml = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 测速中...';
-  if (resEl) {
-    resEl.style.display = 'inline-block';
-    resEl.style.color = 'var(--color-muted)';
-    resEl.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 探测中...';
-  }
-
-  try {
-    var res = await fetch('/admin/api/custom-routes/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        targetProviderId: r.targetProviderId,
-        targetModelId: r.targetModelId
-      })
-    });
-    var json = await res.json();
-    btn.disabled = false;
-    btn.innerHTML = origHtml;
-
-    if (json.success) {
-      toast(json.message || '目标模型连通良好', 'success');
-      if (resEl) {
-        var lat = json.data && json.data.latencyMs ? json.data.latencyMs + 'ms' : 'OK';
-        resEl.style.color = '#10b981';
-        resEl.innerHTML = '<span class="bd bd-on" style="font-size:11px;padding:2px 6px;"><i class="fas fa-check"></i> ' + escapeHtml(lat) + '</span>';
-      }
-    } else {
-      toast(json.message || '测试失败', 'error');
-      if (resEl) {
-        resEl.style.color = '#ef4444';
-        resEl.innerHTML = '<span class="bd bd-del" style="font-size:11px;padding:2px 6px;" title="' + escapeHtml(json.message || '异常') + '"><i class="fas fa-times"></i> 失败</span>';
-      }
-    }
-  } catch (err) {
-    btn.disabled = false;
-    btn.innerHTML = origHtml;
-    var errMsg = (err && err.message) || String(err);
-    toast('网络异常: ' + errMsg, 'error');
-    if (resEl) {
-      resEl.style.color = '#ef4444';
-      resEl.innerHTML = '<span class="bd bd-del" style="font-size:11px;padding:2px 6px;"><i class="fas fa-times"></i> 异常</span>';
-    }
-  }
 }
 
 async function saveCustomRoutesToServer() {
