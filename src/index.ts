@@ -28,6 +28,7 @@ import {
   handleTestCustomRoute,
   handleRunProbe,
   handleResetCooldowns,
+  handleResetAllModels,
   handleFetchUpstreamModels,
   handleImportModels,
   handleClearProviderModels,
@@ -116,6 +117,7 @@ app.patch('/admin/api/proxy-keys/:id', handleUpdateProxyKey)
 app.get('/admin/api/tiers', handleGetTiers)
 app.post('/admin/api/probe', handleRunProbe)
 app.post('/admin/api/reset-cooldowns', handleResetCooldowns)
+app.post('/admin/api/reset-all-models', handleResetAllModels)
 app.post('/admin/api/test-blocked-models', handleTestBlockedModels)
 
 // 提供商模型配套操作

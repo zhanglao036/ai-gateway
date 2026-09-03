@@ -26,6 +26,7 @@ import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL } from './config
 import {
   deduplicateAndClassifyModels,
   resetAllCooldowns,
+  resetAllModelsToInitial,
   detectPermanentFailure,
   autoClassifyModel,
 } from './models'
@@ -680,15 +681,18 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
   }
 }
 
-// ===== 一键重置冷却模型 =====
-export async function handleResetCooldowns(c: Context<{ Bindings: Env }>) {
-  const { resetCount } = await resetAllCooldowns(c.env)
+// ===== 一键重置所有模型至刚刚添加的初始状态 =====
+export async function handleResetAllModels(c: Context<{ Bindings: Env }>) {
+  const { totalReset, providerCount } = await resetAllModelsToInitial(c.env)
   return c.json<ApiResponse>({
     success: true,
-    message: `已成功重置 ${resetCount} 个处于冷却状态的模型（永久失效标记与失败计数器保持不变）。`,
-    data: { resetCount },
+    message: `已成功将 ${providerCount} 个提供商下的全部 ${totalReset} 个模型重置至刚添加的初始状态（已清空所有失败计数、解除冷却与永久失效，梯队池已重新就绪）。`,
+    data: { totalReset, providerCount },
   })
 }
+
+// 保持历史兼容
+export const handleResetCooldowns = handleResetAllModels
 
 // ===== 一键拉取上游模型 =====
 export async function handleFetchUpstreamModels(c: Context<{ Bindings: Env }>) {

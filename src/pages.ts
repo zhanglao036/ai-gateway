@@ -647,7 +647,7 @@ ${H('管理')}
           <div class="admin-heading__actions">
             <button id="btn-probe" class="btn btn-p btn-s" onclick="triggerProbe()"><i class="fas fa-radar" aria-hidden="true"></i>触发探测任务</button>
             <button class="btn btn-s" onclick="testAllBlockedModels()"><i class="fas fa-unlock-alt" aria-hidden="true"></i>批量复测封禁</button>
-            <button class="btn btn-s" onclick="resetCooldowns()"><i class="fas fa-undo" aria-hidden="true"></i>重置冷却模型</button>
+            <button class="btn btn-s" onclick="resetAllModels()"><i class="fas fa-sync-alt" aria-hidden="true"></i>一键重置所有模型</button>
             <a href="/" class="btn btn-gh btn-s"><i class="fas fa-external-link-alt" aria-hidden="true"></i>查看模型列表</a>
           </div>
         </div>
@@ -2423,20 +2423,24 @@ async function triggerProbe() {
   }
 }
 
-async function resetCooldowns() {
-  if (!(await cM('确定要重置全局所有处于冷却状态的模型？（注意：永久失效标记与失败计数器保持不变）'))) return;
+async function resetAllModels() {
+  if (!(await cM('确定要一键重置所有模型到初始状态？\n\n所有模型的冷却状态、累计失败次数、永久失效/封禁标记都将被彻底清空，恢复至刚刚添加时的可用状态，并重新就绪动态梯队池。'))) return;
   try {
-    var res = await fetch('/admin/api/reset-cooldowns', { method: 'POST' });
+    toast('正在重置所有模型至初始状态...', 'info');
+    var res = await fetch('/admin/api/reset-all-models', { method: 'POST' });
     var data = await res.json();
     if (data.success) {
-      toast(data.message || '已成功重置冷却模型', 'success');
+      toast(data.message || '已成功将所有模型重置到初始状态！', 'success');
       if (Array.isArray(draftProviders)) {
         draftProviders.forEach(function(p) {
           if (Array.isArray(p.models)) {
             p.models.forEach(function(m) {
-              if (m.cooldownUntil) {
-                m.cooldownUntil = null;
-              }
+              m.cooldownUntil = null;
+              m.failureCount = 0;
+              m.permanentlyDisabled = false;
+              m.disabledReason = null;
+              m.permTestFailCount = 0;
+              m.enabled = true;
             });
           }
         });
@@ -2447,13 +2451,17 @@ async function resetCooldowns() {
         draftProviders = pData.data;
       }
       renderProviderList();
+      if (typeof loadTierData === 'function') {
+        loadTierData();
+      }
     } else {
-      aM('重置冷却失败：' + (data.message || '未知错误'), 'error');
+      aM('重置所有模型失败：' + (data.message || '未知错误'), 'error');
     }
   } catch (err) {
     aM('请求网络异常：' + ((err && err.message) || String(err)), 'error');
   }
 }
+var resetCooldowns = resetAllModels;
 
 async function testAllBlockedModels() {
   if (!(await cM('确定要对所有处于【永久封禁】状态的模型执行批量交叉复测？系统将按提供商交替轮抽并发探针测试，若测试响应连通，模型将自动解封恢复可用。'))) return;

@@ -1,5 +1,6 @@
-import type { Model, Env, Provider } from './types'
-import { getProviders, setProviders } from './storage'
+import type { Model, Env, Provider, TierStorage } from './types'
+import { getProviders, setProviders, kvPut, flushPendingWrites } from './storage'
+import { KV_KEYS } from './config'
 
 /**
  * 模型智能自动分类
@@ -138,7 +139,86 @@ export function deduplicateAndClassifyModels(modelsInput: unknown): Model[] {
 }
 
 /**
- * 一键重置全局冷却模型
+ * 一键重置全局所有模型至刚添加时的初始状态：
+ * 1. 清空所有累计失败计数 (failureCount = 0)
+ * 2. 清除冷却状态 (cooldownUntil = null)
+ * 3. 清除永久失效与封禁标记 (permanentlyDisabled = false, disabledReason = null)
+ * 4. 清除探针复测失败标记 (permTestFailCount = 0, lastPermTestAt = null)
+ * 5. 确保模型标记为启用状态 (enabled = true)
+ * 6. 同步重置梯队监控数据，清空历史异常统计，使全系统梯队重新就绪
+ */
+export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: number; providerCount: number }> {
+  const providers = await getProviders(env)
+  let totalReset = 0
+  let providerCount = 0
+
+  const updatedProviders = providers.map((provider) => {
+    let providerChanged = false
+    const updatedModels = provider.models.map((model) => {
+      totalReset++
+      providerChanged = true
+      return {
+        ...model,
+        enabled: true,
+        failureCount: 0,
+        cooldownUntil: null,
+        permanentlyDisabled: false,
+        disabledReason: null,
+        permTestFailCount: 0,
+        lastPermTestAt: undefined,
+      }
+    })
+
+    if (providerChanged) {
+      providerCount++
+      return {
+        ...provider,
+        models: updatedModels,
+        updatedAt: new Date().toISOString(),
+      }
+    }
+    return provider
+  })
+
+  await setProviders(env, updatedProviders)
+
+  // 同步重置梯队监控数据到初始状态
+  try {
+    const now = Date.now()
+    const today = new Date().toISOString().split('T')[0]
+
+    const allAvailable = updatedProviders
+      .filter((p) => p.enabled)
+      .flatMap((p) =>
+        p.models
+          .filter((m) => m.enabled)
+          .map((m) => ({
+            providerId: p.id,
+            modelId: m.id,
+            fullId: `${p.id}/${m.id}`,
+            addedAt: now,
+          }))
+      )
+
+    const cleanTierStorage: TierStorage = {
+      tier1: allAvailable.slice(0, 9),
+      tier2: allAvailable.slice(9),
+      probeStats: {},
+      businessStats: {},
+      updatedAt: new Date().toISOString(),
+      lastProbeDate: today,
+    }
+    await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(cleanTierStorage))
+    await flushPendingWrites(env)
+  } catch (err) {
+    console.warn('[models] 重置梯队数据异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+  }
+
+  return { totalReset, providerCount }
+}
+
+/**
+ * 一键重置全局冷却模型 (兼容历史调用)
  * 只清除冷却状态 (cooldownUntil = null)，不修改永久失效标记 (permanentlyDisabled)，不清空失败计数 (failureCount)
  */
 export async function resetAllCooldowns(env: Env): Promise<{ resetCount: number }> {
