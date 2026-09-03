@@ -228,12 +228,13 @@ export async function testModelConnection(
 ): Promise<{ success: boolean; message: string; statusCode?: number; latencyMs?: number }> {
   const startTime = Date.now()
   try {
-    const cleanBase = baseUrl.replace(/\/$/, '')
+    const cleanBase = baseUrl.trim().replace(/\/+$/, '')
     const endpoint = apiType === 'anthropic' ? 'messages' : 'chat/completions'
     const url = `${cleanBase}/${endpoint}`
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     if (apiType === 'anthropic') {
       headers['x-api-key'] = apiKey
@@ -254,10 +255,11 @@ export async function testModelConnection(
     })
 
     const latencyMs = Date.now() - startTime
+    const rawText = await response.text().catch(() => '')
 
     if (response.ok) {
       try {
-        const resData = await response.json() as any
+        const resData = JSON.parse(rawText) as any
         if (resData && Array.isArray(resData.choices) && resData.choices.length > 0) {
           const msg = resData.choices[0]?.message
           const hasToolCalls = (msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) || !!msg?.function_call
@@ -276,10 +278,10 @@ export async function testModelConnection(
 
     let errorBody = ''
     try {
-      const errorData = await response.json() as { error?: { message?: string } }
-      errorBody = errorData?.error?.message || JSON.stringify(errorData)
+      const errorData = JSON.parse(rawText) as { error?: { message?: string } }
+      errorBody = errorData?.error?.message || (typeof errorData === 'object' ? JSON.stringify(errorData) : rawText)
     } catch {
-      errorBody = await response.text()
+      errorBody = rawText
     }
 
     return {

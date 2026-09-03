@@ -206,10 +206,16 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
 // ===== Key / 模型连通性测试（通过服务端代理，避免 CORS） =====
 
 function buildAuthHeaders(apiKey: string, apiType?: string): Record<string, string> {
-  if (apiType === 'anthropic') {
-    return { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+  const headers: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   }
-  return { 'Authorization': `Bearer ${apiKey}` }
+  if (apiType === 'anthropic') {
+    headers['x-api-key'] = apiKey
+    headers['anthropic-version'] = '2023-06-01'
+    return headers
+  }
+  headers['Authorization'] = `Bearer ${apiKey}`
+  return headers
 }
 
 export async function handleTestKeyNew(c: Context<{ Bindings: Env }>) {
@@ -246,7 +252,7 @@ export async function handleTestKeyNew(c: Context<{ Bindings: Env }>) {
     })
   }
 
-  const cleanBase = url.replace(/\/$/, '')
+  const cleanBase = url.trim().replace(/\/+$/, '')
   try {
     const response = await fetch(`${cleanBase}/models`, {
       method: 'GET', headers: buildAuthHeaders(apiKey, apiType), signal: AbortSignal.timeout(15000),
@@ -292,7 +298,7 @@ export async function handleTestModelNew(c: Context<{ Bindings: Env }>) {
     })
   }
 
-  const cleanBase = url.replace(/\/$/, '')
+  const cleanBase = url.trim().replace(/\/+$/, '')
   const endpoint = apiType === 'anthropic' ? 'messages' : 'chat/completions'
 
   try {
