@@ -31,7 +31,16 @@ import {
   detectPermanentFailure,
   autoClassifyModel,
 } from './models'
-import { ensureTierStorage, runInitCrossProbe, applyModelProbeResult, selectAutoModel } from './tiers'
+import {
+  ensureTierStorage,
+  getTierStorage,
+  saveTierStorage,
+  runSingleModelProbe,
+  backfillTier1FromTier2,
+  runInitCrossProbe,
+  applyModelProbeResult,
+  selectAutoModel,
+} from './tiers'
 import type {
   Env,
   ApiResponse,
@@ -618,77 +627,112 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
   isProbeRunning = true
   try {
     const providers = await getProviders(c.env)
+    const tierStorage = (await getTierStorage(c.env)) || (await ensureTierStorage(c.env))
+    const cursors: Record<string, number> = { ...(tierStorage.modelCursors || {}) }
+
+    // 筛选出启用的、配置了有效 Key 的活跃提供商
+    const activeProviders = providers.filter((p) => {
+      if (!p.enabled) return false
+      const keys = p.apiKeys.filter((k) => k.enabled)
+      if (!isOpenCodeProvider(p.id) && keys.length === 0) return false
+      return true
+    })
+
+    if (activeProviders.length === 0) {
+      return c.json<ApiResponse>({
+        success: false,
+        message: '未找到已启用且配置了有效 Key 的提供商',
+      }, 400)
+    }
+
+    // 1. 基于游标为每个活跃提供商抽取 1~2 个代表模型，避免全量扫描触发上游风控
+    const providerSamples: Array<{
+      provider: Provider
+      models: Model[]
+    }> = []
+
+    for (const provider of activeProviders) {
+      // 优先从已启用且非永久失效的模型中轮转抽取
+      const candidateModels = provider.models.filter((m) => m.enabled !== false && !m.permanentlyDisabled)
+      if (candidateModels.length === 0) continue
+
+      let currentCursor = cursors[provider.id] || 0
+      if (currentCursor >= candidateModels.length) {
+        currentCursor = 0
+      }
+
+      // 单个提供商严格限制每次探测最多 2 个模型
+      const countToPick = Math.min(2, candidateModels.length)
+      const picked: Model[] = []
+      for (let i = 0; i < countToPick; i++) {
+        const idx = (currentCursor + i) % candidateModels.length
+        picked.push(candidateModels[idx])
+      }
+
+      // 递增推进游标并存盘，下次自动轮换到下一批模型
+      cursors[provider.id] = (currentCursor + countToPick) % candidateModels.length
+
+      providerSamples.push({
+        provider,
+        models: picked,
+      })
+    }
+
+    if (providerSamples.length === 0) {
+      return c.json<ApiResponse>({
+        success: false,
+        message: '所有可用提供商名下均无可探测的有效模型',
+      }, 400)
+    }
+
+    // 2. 交叉交替编排探测队列（Round-robin interleaved），避免对单个提供商短时间连续高频测试
+    let maxModelsPerProvider = 0
+    for (const item of providerSamples) {
+      if (item.models.length > maxModelsPerProvider) {
+        maxModelsPerProvider = item.models.length
+      }
+    }
+
     let testedCount = 0
     let successCount = 0
     let failedCount = 0
 
-    const updatedProviders = await Promise.all(providers.map(async (provider) => {
-      if (!provider.enabled) return provider
-      const enabledKeys = provider.apiKeys.filter((k) => k.enabled)
-      if (!isOpenCodeProvider(provider.id) && enabledKeys.length === 0) return provider
+    for (let round = 0; round < maxModelsPerProvider; round++) {
+      if (round > 0) {
+        // 轮次之间微小休止 200ms，平滑流量
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      }
 
-      let changed = false
-      const updatedModels = await Promise.all(provider.models.map(async (model) => {
-        // 忽略已禁用、标记永久失效的模型（手动触发探测任务时，忽略冷却期以确保测试所有模型）
-        if (!model.enabled || model.permanentlyDisabled) return model
+      for (const item of providerSamples) {
+        if (round < item.models.length) {
+          const modelToTest = item.models[round]
+          testedCount++
 
-        testedCount++
-        const apiKey = enabledKeys[0]?.key || ''
-        const testRes = isOpenCodeProvider(provider.id)
-          ? await testOpenCodeModel(provider.baseUrl, enabledKeys, model.id, resolveOpenCodeUrls(c.env))
-          : await testModelConnection(provider.baseUrl, apiKey, model.id, provider.apiType)
+          // 极低 Token 简短 Prompt 握手探针，内部已自动调用 applyModelProbeResult 维护模型健康与冷却状态
+          const metric = await runSingleModelProbe(c.env, item.provider, modelToTest.id)
+          tierStorage.probeStats[`${item.provider.id}/${modelToTest.id}`] = metric
 
-        changed = true
-        if (testRes.success) {
-          successCount++
-          return {
-            ...model,
-            cooldownUntil: null,
+          if (metric.success) {
+            successCount++
+          } else {
+            failedCount++
           }
-        } else {
-          failedCount++
-          const permReason = detectPermanentFailure(testRes.statusCode || 500, testRes.message)
-          if (permReason) {
-            return {
-              ...model,
-              permanentlyDisabled: true,
-              disabledReason: permReason,
-            }
-          }
-          const newFailCount = (model.failureCount || 0) + 1
-          if (newFailCount >= 3) {
-            return {
-              ...model,
-              failureCount: newFailCount,
-              permanentlyDisabled: true,
-              disabledReason: '探测连续失败达到3次，已标记永久失效',
-            }
-          }
-          return {
-            ...model,
-            failureCount: newFailCount,
-            cooldownUntil: Date.now() + 5 * 60 * 1000,
-          }
-        }
-      }))
-
-      if (changed) {
-        return {
-          ...provider,
-          models: updatedModels,
-          updatedAt: new Date().toISOString(),
         }
       }
-      return provider
-    }))
+    }
 
-    await setProviders(c.env, updatedProviders)
-    const tierData = await runInitCrossProbe(c.env)
+    // 3. 持久化游标与本次探测日期
+    tierStorage.modelCursors = cursors
+    tierStorage.lastProbeDate = new Date().toISOString().split('T')[0]
+
+    // 4. 释放互斥锁并平滑补齐第一梯队（按各家均匀配额补足）
+    isProbeRunning = false
+    const finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
 
     return c.json<ApiResponse>({
       success: true,
-      message: `探测任务完成！共探测 ${testedCount} 个模型：${successCount} 个可用，${failedCount} 个异常。已更新第一梯队（${tierData.tier1.length} 席）和第二梯队候选池（${tierData.tier2.length} 个）。`,
-      data: { testedCount, successCount, failedCount, tierData },
+      message: `探测任务完成！已基于游标轮转抽测各提供商 1~2 个代表模型（本次共抽测 ${testedCount} 个模型：${successCount} 可用，${failedCount} 异常），下次将自动轮转下一批模型，第一梯队已同步就绪。`,
+      data: { testedCount, successCount, failedCount, tierData: finalTierData },
     })
   } finally {
     isProbeRunning = false

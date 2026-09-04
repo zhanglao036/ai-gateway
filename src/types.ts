@@ -140,6 +140,7 @@ export interface TierStorage {
   updatedAt: string
   lastProbeDate?: string
   lastCursorProviderId?: string
+  modelCursors?: Record<string, number>
 }
 
 export interface ApiResponse<T = unknown> {

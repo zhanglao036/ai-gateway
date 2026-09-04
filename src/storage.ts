@@ -59,8 +59,8 @@ export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; buff
     const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
     debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
   }
-  if (maxCount === null) maxCount = 50 // 默认 50 条
-  if (intervalSec === null) intervalSec = 30 // 默认 30 秒
+  if (maxCount === null) maxCount = 5 // 默认 5 条批量落盘，节约 80% 写入
+  if (intervalSec === null) intervalSec = 15 // 默认 15 秒定时合并
 
   dynamicDebugMode = debug
   dynamicBufferMaxCount = maxCount
@@ -403,29 +403,24 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
     const config = await getLogConfig(env)
-    if (config.debugMode) {
-      // 调试模式开启：每条请求日志实时写入 KV
-      try {
-        const currentLogs = await getLogs(env)
-        const updated = [log, ...currentLogs].slice(0, 100)
-        await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(updated))
-      } catch (err) {
-        console.warn('[storage] 实时写入日志异常 (已静默降级):', err instanceof Error ? err.message : String(err))
-      }
-      return
-    }
 
-    // 调试模式关闭：推入内存缓存队列
+    // 所有日志均完整推入内存队列（前台 getLogs 随时读取，一条不漏）
     logQueue.unshift(log)
     if (logQueue.length > 100) logQueue.length = 100
 
-    // 达到队列条数阈值：立即批量落盘
-    const maxCount = config.bufferMaxCount || LOG_BATCH_SIZE
+    // 如果是异常失败日志（状态码>=400或包含错误原因），立即持久化落盘，确保关键故障日志永久保存
+    const isError = log.status >= 400 || !!log.error
+    if (isError) {
+      await flushPendingLogs(env)
+      return
+    }
+
+    // 正常调用日志：达到批量阈值（如5条）立即落盘，未达阈值则定时落盘，避免高频穿透写 KV
+    const maxCount = config.bufferMaxCount || 5
     if (logQueue.length >= maxCount) {
       await flushPendingLogs(env)
     } else {
-      // 定时器规则批量落盘
-      scheduleLogFlush(env, (config.flushIntervalSeconds || 30) * 1000)
+      scheduleLogFlush(env, (config.flushIntervalSeconds || 15) * 1000)
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常 (已静默降级):', err instanceof Error ? err.message : String(err))

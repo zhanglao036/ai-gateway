@@ -27,7 +27,6 @@ export async function saveTierStorage(env: Env, data: TierStorage): Promise<void
   try {
     data.updatedAt = new Date().toISOString()
     await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
-    await flushPendingWrites(env)
   } catch (err) {
     console.warn('[tiers] 保存梯队数据异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
@@ -59,9 +58,14 @@ export async function applyModelProbeResult(
   let updated = false
   const updatedModels = provider.models.map((m) => {
     if (m.id !== modelId) return m
-    updated = true
 
     if (success) {
+      // 仅当该模型之前处于异常状态（有失败计数、冷却或禁用）时才需要更新落盘
+      const hadAnomaly = (m.failureCount && m.failureCount > 0) || m.cooldownUntil || m.permanentlyDisabled
+      if (!hadAnomaly) {
+        return m
+      }
+      updated = true
       return {
         ...m,
         cooldownUntil: null,
@@ -72,6 +76,7 @@ export async function applyModelProbeResult(
         disabledReason: undefined,
       }
     } else {
+      updated = true
       if (m.permanentlyDisabled) {
         return {
           ...m,
@@ -1016,7 +1021,7 @@ export async function recordBusinessLatency(
     // 检查该模型是否在第一梯队中
     const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
     if (!isInTier1) {
-      await saveTierStorage(env, storage)
+      // 非第一梯队的正常调用，仅内存累加指标，避免频繁刷写 KV
       return
     }
 
@@ -1065,9 +1070,8 @@ export async function recordBusinessLatency(
     } else {
       if (storage.tier1.length < TIER_1_MAX_SLOTS) {
         storage = await backfillTier1FromTier2(env, storage)
-      } else {
-        await saveTierStorage(env, storage)
       }
+      // 成功且席位完备时，不写 KV，极大节约免费额度
     }
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
