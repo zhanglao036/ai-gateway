@@ -137,6 +137,20 @@ async function recordModelSuccess(env: Env, providerId: string, modelId: string)
   }
 }
 
+function getClientIp(c: Context<{ Bindings: Env }>): string | null {
+  const cfIp = c.req.header('cf-connecting-ip')
+  if (cfIp) return cfIp.trim()
+  const xRealIp = c.req.header('x-real-ip')
+  if (xRealIp) return xRealIp.trim()
+  const xForwardedFor = c.req.header('x-forwarded-for')
+  if (xForwardedFor) {
+    // x-forwarded-for 可以包含多个 IP: client, proxy1, proxy2
+    const first = xForwardedFor.split(',')[0]
+    if (first) return first.trim()
+  }
+  return null
+}
+
 function maskKey(key: string): string {
   if (!key) return ''
   const trimmed = key.trim()
@@ -463,8 +477,9 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     }
 
     let model = rawModel
-    requestedModel = model || 'unknown'
-    const clientIp = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || c.req.header('x-real-ip') || null
+    const clientRequested = rawModel || 'unknown'
+    requestedModel = clientRequested
+    const clientIp = getClientIp(c)
     const routeUrl = new URL(c.req.url)
     const routePath = routeUrl.pathname
     const isStreamReq = !!body.stream
@@ -478,26 +493,33 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       return c.json({ error: { message: '缺少 model 参数', type: 'invalid_request_error' } }, 400)
     }
 
+    let routeDesc = ''
+
     // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型 或 第一梯队池）
     const customRoutes = await getCustomModelRoutes(c.env)
     const matchedRoute = customRoutes.find((r) => r.enabled && r.sourceModel.trim().toLowerCase() === model.trim().toLowerCase())
     if (matchedRoute) {
       if (matchedRoute.targetProviderId === 'tier1' || matchedRoute.targetModelId === 'auto') {
         isAutoRequest = true
-        requestedModel = `${rawModel} -> [第一梯队池 (Tier 1)]`
+        routeDesc = '🔀 自定义规则 -> ⚡ 第一梯队池'
+        requestedModel = `${clientRequested} (规则: ⚡第一梯队池)`
       } else {
         isAutoRequest = false
         model = `${matchedRoute.targetProviderId}/${matchedRoute.targetModelId}`
-        requestedModel = `${rawModel} -> ${model}`
+        routeDesc = `🔀 自定义规则 -> ${model}`
+        requestedModel = `${clientRequested} ➔ ${model}`
       }
     } else if (model === 'openclaw/auto' || model === 'openclaw') {
       // 客户端发送 openclaw/auto 且未配规则时，安全默认指向第一梯队池，避免 404
       isAutoRequest = true
-      requestedModel = `${rawModel} -> [第一梯队池默认路由]`
+      routeDesc = '⚡ 第一梯队优选池 (默认)'
+      requestedModel = `${clientRequested} (⚡第一梯队优选池)`
     }
 
     if (model === 'auto' || model === 'auto/auto') {
       isAutoRequest = true
+      routeDesc = '⚡ 第一梯队优选池 (自动调度)'
+      requestedModel = `${clientRequested} (⚡第一梯队优选池)`
     }
 
     const triedProviders = new Set<string>()
@@ -514,19 +536,27 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           // 如果尝试了所有提供商，重置重新选，避免死循环
           const fallbackRes = await selectAutoModel(c.env, isLongText, sessionId, new Set())
           if (!fallbackRes) {
-            await recordLog(c.env, startTime, requestedModel, 503, '第一梯队无可用的模型')
+            await recordLog(c.env, startTime, requestedModel, 503, '第一梯队无可用的模型', {
+              routePath,
+              isStream: isStreamReq,
+              clientIp,
+            })
             return c.json({ error: { message: '第一梯队池暂无可用的模型，请先配置模型或进行初始化探测', type: 'service_unavailable' } }, 503)
           }
           currentModel = fallbackRes.fullId
         } else {
           currentModel = autoRes.fullId
         }
-        requestedModel = `auto (${currentModel})`
+        requestedModel = `${clientRequested} ⚡➔ ${currentModel}`
       }
 
       const parsed = parseModelId(currentModel)
       if (!parsed) {
-        await recordLog(c.env, startTime, requestedModel, 400, `模型格式错误 "${currentModel}"`)
+        await recordLog(c.env, startTime, requestedModel, 400, `模型格式错误 "${currentModel}"`, {
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+        })
         return c.json({
           error: {
             message: `模型格式错误 "${currentModel}"，请使用 提供商ID/模型ID 格式`,

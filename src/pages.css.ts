@@ -1111,5 +1111,104 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
     font-size: 0.75rem !important;
     padding: 1px 4px !important;
   }
+
+  /* 移动端日志卡片流优化 */
+  .logs-desktop-view {
+    display: none !important;
+  }
+  .logs-mobile-view {
+    display: flex !important;
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* 桌面端与通用日志样式 */
+@media (min-width: 769px) {
+  .logs-mobile-view {
+    display: none !important;
+  }
+  .logs-desktop-view {
+    display: block !important;
+  }
+}
+
+.log-ip-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  color: var(--color-ink-2);
+}
+
+.log-mobile-card {
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-card);
+  padding: 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+.log-mobile-card.is-err {
+  border-left: 3px solid var(--color-danger);
+}
+
+.log-mobile-card.is-ok {
+  border-left: 3px solid var(--color-success);
+}
+
+.log-mobile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.log-mobile-route {
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.log-mobile-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+
+/* 移动端与桌面端体验细节微调 */
+@media (max-width: 48rem) {
+  .admin-topbar nav a {
+    padding: 6px 8px;
+    font-size: 13px;
+    border-radius: 6px;
+  }
+  .admin-heading__actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  .admin-heading__actions .btn {
+    width: 100%;
+    justify-content: center;
+    font-size: 12px;
+  }
+  .modal-dialog {
+    width: 96% !important;
+    max-width: 96% !important;
+    margin: 10px auto !important;
+    padding: 16px !important;
+  }
 }
 `

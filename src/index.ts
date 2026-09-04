@@ -3,7 +3,7 @@ import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import type { Env } from './types'
 import { createLocalKV } from './localKv'
-import { adminAuthMiddleware, proxyKeyAuthMiddleware, handleLogin, handleLogout } from './auth'
+import { adminAuthMiddleware, proxyKeyAuthMiddleware, handleLogin, handleLogout, handleCheckAuth } from './auth'
 import { handleProxy, handleModels } from './proxy'
 import {
   handleStatus,
@@ -90,6 +90,7 @@ const session = await getSession(c.env, sessionId)
 app.get('/admin/login', async (c) => renderLoginPage(c))
 app.post('/admin/login', handleLogin)
 app.get('/admin/logout', handleLogout)
+app.get('/admin/api/auth-check', handleCheckAuth)
 
 // ===== 管理后台（需 Session 验证） =====
 app.use('/admin/*', adminAuthMiddleware)

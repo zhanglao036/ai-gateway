@@ -36,7 +36,21 @@ export const SHARED_JS = `
         if (!opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer ' + t;
       }
     }
-    return origFetch(url, opts);
+    return origFetch(url, opts).then(function(resp) {
+      if (resp && resp.status === 401 && typeof url === 'string' && url.indexOf('/admin/api/') !== -1 && url.indexOf('/admin/api/auth-check') === -1) {
+        localStorage.removeItem('admin_token');
+        document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
+        if (typeof toast === 'function') {
+          toast('登录已过期，请重新登录', 'error');
+        }
+        setTimeout(function() {
+          if (window.location.pathname.indexOf('/admin') !== -1 && window.location.pathname !== '/admin/login') {
+            window.location.href = '/admin/login';
+          }
+        }, 800);
+      }
+      return resp;
+    });
   };
 })();
 

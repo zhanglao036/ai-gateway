@@ -316,17 +316,32 @@ ${renderSiteFooter(SITE_CONFIG.title)}
 
 <script>
 (function () {
-  // 自动从 localStorage 恢复会话 Cookie 并同步导航按钮状态
+  // 自动从 localStorage 恢复会话并向后端轻量校验有效性，杜绝“假登录”
   var savedToken = localStorage.getItem('admin_token');
   if (savedToken) {
     if (!document.cookie.includes('session_id=')) {
       document.cookie = "session_id=" + savedToken + "; path=/; max-age=86400; SameSite=None; Secure";
     }
-    var nav = document.getElementById('topbar-actions');
-    if (nav && !nav.innerHTML.includes('admin')) {
-      nav.innerHTML = '<a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a>' +
-                      '<a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem(&quot;admin_token&quot;)"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>';
-    }
+    // 异步探测是否真正有效
+    fetch('/admin/api/auth-check')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        var nav = document.getElementById('topbar-actions');
+        if (data && data.loggedIn) {
+          if (nav && !nav.innerHTML.includes('管理控制台')) {
+            nav.innerHTML = '<a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a>' +
+                            '<a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem(&quot;admin_token&quot;)"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>';
+          }
+        } else {
+          // Token 实际已失效，自动清除残留，还原登录按钮
+          localStorage.removeItem('admin_token');
+          document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
+          if (nav && nav.innerHTML.includes('管理控制台')) {
+            nav.innerHTML = '<a href="/admin/login" class="btn btn-p"><i class="fas fa-sign-in-alt" aria-hidden="true"></i>管理员登录</a>';
+          }
+        }
+      })
+      .catch(function() {});
   }
 
   // 复制控制
@@ -2429,6 +2444,7 @@ function renderLogsTable(logs) {
     return;
   }
 
+  // 桌面端表格行
   var rowsHtml = logs.map(function(item) {
     var isSuccess = item.status >= 200 && item.status < 300;
     var statusBadgeClass = isSuccess ? 'bd-on' : 'bd-off';
@@ -2436,14 +2452,18 @@ function renderLogsTable(logs) {
     var errText = item.error ? escapeHtml(item.error) : '-';
     var timeStr = escapeHtml(item.time || '-');
     var modelStr = escapeHtml(item.model || 'unknown');
-    var latencyStr = (item.latency || 0) + ' ms';
+    var latency = item.latency || 0;
+    var latencyColor = latency < 1500 ? 'var(--color-success)' : (latency < 4000 ? '#eab308' : 'var(--color-danger)');
+    var latencyStr = '<span style="color:' + latencyColor + ';font-weight:600;">' + latency + ' ms</span>';
     var keyMaskStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '<span style="color:var(--color-muted);">-</span>';
     var attemptStr = item.attemptIndex ? ('第 ' + item.attemptIndex + ' 次') : '-';
     var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
+    var ipBadge = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;color:var(--color-muted);"></i>' + escapeHtml(item.clientIp) + '</span>' : '<span style="color:var(--color-muted);font-size:11px;">-</span>';
 
     return '<tr>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
-      '<td style="padding:8px 10px;"><code>' + modelStr + '</code></td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;">' + ipBadge + '</td>' +
+      '<td style="padding:8px 10px;"><code style="font-size:11.5px;">' + modelStr + '</code></td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + keyMaskStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
@@ -2452,10 +2472,41 @@ function renderLogsTable(logs) {
     '</tr>';
   }).join('');
 
-  container.innerHTML = '<div class="table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);"><table class="data-table" style="width:100%;text-align:left;border-collapse:collapse;">' +
+  // 移动端卡片流
+  var mobileCardsHtml = logs.map(function(item) {
+    var isSuccess = item.status >= 200 && item.status < 300;
+    var statusBadgeClass = isSuccess ? 'bd-on' : 'bd-off';
+    var statusText = item.status || 500;
+    var timeStr = escapeHtml(item.time || '-');
+    var modelStr = escapeHtml(item.model || 'unknown');
+    var latency = item.latency || 0;
+    var latencyColor = latency < 1500 ? 'var(--color-success)' : (latency < 4000 ? '#ca8a04' : 'var(--color-danger)');
+    var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
+    var ipStr = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;"></i>' + escapeHtml(item.clientIp) + '</span>' : '';
+    var keyStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '';
+    var errBox = (!isSuccess && item.error) ? '<div style="margin-top:6px;padding:4px 8px;background:#fef2f2;border-radius:4px;color:var(--color-danger);font-size:11px;word-break:break-all;">' + escapeHtml(item.error) + '</div>' : '';
+
+    return '<div class="log-mobile-card ' + (isSuccess ? 'is-ok' : 'is-err') + '">' +
+      '<div class="log-mobile-header">' +
+        '<span style="color:var(--color-muted);font-family:var(--font-mono);font-size:11px;"><i class="far fa-clock"></i> ' + timeStr + '</span>' +
+        '<div><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + '</div>' +
+      '</div>' +
+      '<div class="log-mobile-route"><code>' + modelStr + '</code></div>' +
+      '<div class="log-mobile-meta">' +
+        ipStr +
+        '<span style="color:' + latencyColor + ';font-weight:600;font-family:var(--font-mono);"><i class="fas fa-stopwatch"></i> ' + latency + ' ms</span>' +
+        (item.attemptIndex ? '<span>第 ' + item.attemptIndex + ' 次</span>' : '') +
+        keyStr +
+      '</div>' +
+      errBox +
+    '</div>';
+  }).join('');
+
+  container.innerHTML = '<div class="logs-desktop-view table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);"><table class="data-table" style="width:100%;text-align:left;border-collapse:collapse;">' +
     '<thead><tr style="border-bottom:1px solid var(--color-rule);font-size:var(--text-xs);color:var(--color-muted);background:var(--color-paper-2);">' +
       '<th style="padding:10px 10px;">请求时间</th>' +
-      '<th style="padding:10px 10px;">选中模型</th>' +
+      '<th style="padding:10px 10px;">客户端 IP</th>' +
+      '<th style="padding:10px 10px;">调度链路与模型</th>' +
       '<th style="padding:10px 10px;">API Key</th>' +
       '<th style="padding:10px 10px;">状态码</th>' +
       '<th style="padding:10px 10px;">响应耗时</th>' +
@@ -2463,7 +2514,8 @@ function renderLogsTable(logs) {
       '<th style="padding:10px 10px;">失败原因</th>' +
     '</tr></thead>' +
     '<tbody style="divide-y:1px solid var(--color-rule);">' + rowsHtml + '</tbody>' +
-  '</table></div>';
+  '</table></div>' +
+  '<div class="logs-mobile-view">' + mobileCardsHtml + '</div>';
 }
 
 // ===== 模型配套功能与探测任务客户端交互 =====

@@ -114,6 +114,26 @@ export async function handleLogin(c: Context<{ Bindings: Env }>) {
   })
 }
 
+/** 检查当前登录凭证是否有效 */
+export async function handleCheckAuth(c: Context<{ Bindings: Env }>) {
+  let sessionId = getCookie(c, 'session_id')
+  if (!sessionId) {
+    const authHeader = c.req.header('Authorization')
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      sessionId = authHeader.slice(7)
+    }
+  }
+  if (!sessionId) {
+    return c.json({ loggedIn: false }, 200)
+  }
+  const session = await getSession(c.env, sessionId)
+  if (!session) {
+    deleteCookie(c, 'session_id')
+    return c.json({ loggedIn: false }, 200)
+  }
+  return c.json({ loggedIn: true, username: session.username }, 200)
+}
+
 /** 退出登录 */
 export async function handleLogout(c: Context<{ Bindings: Env }>) {
   const sessionId = getCookie(c, 'session_id')
