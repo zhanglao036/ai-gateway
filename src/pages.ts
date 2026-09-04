@@ -154,8 +154,17 @@ ${H('首页')}
                 <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 第一梯队
               </span>
             </div>
-            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.5rem;font-family:monospace;">
+            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
               ${escapePageHtml(item.fullId)}
+            </div>
+            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+              <span style="font-size:0.65rem;background:#eff6ff;color:#1d4ed8;padding:0.1rem 0.35rem;border-radius:0.25rem;">
+                ${escapePageHtml(probeStat?.category || '文本')}
+              </span>
+              ${probeStat?.openclawCompatible ? `
+              <span style="font-size:0.65rem;background:#dcfce7;color:#15803d;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;" title="${escapePageHtml(probeStat.openclawReason || '适合 OpenClaw 智能体')}">
+                <i class="fas fa-bolt"></i> 适合 OpenClaw
+              </span>` : ''}
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#f8fafc;padding:0.375rem 0.5rem;border-radius:0.375rem;">
               <div>
@@ -272,6 +281,25 @@ ${H('首页')}
                     statusBadgeHtml = `<span class="m-badge m-badge--ok"><i class="fas fa-check-circle" aria-hidden="true"></i>正常</span>`
                   }
 
+                  let categoryBadgeHtml = ''
+                  const cat = model.category || '文本'
+                  if (cat === '绘图') {
+                    categoryBadgeHtml = `<span class="m-badge" style="background:#fef3c7;color:#b45309;font-size:0.65rem;border:none;"><i class="fas fa-image"></i> 绘图</span>`
+                  } else if (cat === '嵌入') {
+                    categoryBadgeHtml = `<span class="m-badge" style="background:#f3e8ff;color:#7e22ce;font-size:0.65rem;border:none;"><i class="fas fa-cube"></i> 嵌入</span>`
+                  } else {
+                    categoryBadgeHtml = `<span class="m-badge" style="background:#eff6ff;color:#1d4ed8;font-size:0.65rem;border:none;"><i class="fas fa-comment-alt"></i> 文本</span>`
+                  }
+
+                  let openclawBadgeHtml = ''
+                  if (model.openclawTested) {
+                    if (model.openclawCompatible) {
+                      openclawBadgeHtml = `<span class="m-badge" style="background:#dcfce7;color:#15803d;font-size:0.65rem;border:none;" title="${escapePageHtml(model.openclawReason || '适合 OpenClaw 智能体')}"><i class="fas fa-bolt"></i> OpenClaw</span>`
+                    } else {
+                      openclawBadgeHtml = `<span class="m-badge" style="background:#f1f5f9;color:#64748b;font-size:0.65rem;border:none;" title="${escapePageHtml(model.openclawReason || '不兼容 OpenClaw 工具调用')}"><i class="fas fa-ban"></i> 非OpenClaw</span>`
+                    }
+                  }
+
                   const isHiddenInitially = idx >= INITIAL_LIMIT ? 'is-collapsed' : ''
 
                   return `<div class="model-card copy-control ${isHiddenInitially}" 
@@ -282,7 +310,11 @@ ${H('首页')}
                                data-index="${idx}">
                     <div class="model-card__info">
                       <code class="model-card__name" title="点击复制完整ID: ${escapePageHtml(fullModel)}">${escapePageHtml(model.id)}</code>
-                      ${statusBadgeHtml}
+                      <div style="display:flex;align-items:center;gap:0.25rem;flex-wrap:wrap;margin-top:0.25rem;">
+                        ${categoryBadgeHtml}
+                        ${openclawBadgeHtml}
+                        ${statusBadgeHtml}
+                      </div>
                     </div>
                     <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
                       <i class="far fa-copy" aria-hidden="true"></i>

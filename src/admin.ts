@@ -172,7 +172,7 @@ export async function handleDeleteProvider(c: Context<{ Bindings: Env }>) {
 export async function handleTestModel(c: Context<{ Bindings: Env }>) {
   const id = c.req.param('id')
   if (!id) return c.json<ApiResponse>({ success: false, message: '缺少 id 参数' }, 400)
-  const { modelId } = await c.req.json<TestModelRequest>()
+  const { modelId, forceOpenclaw } = await c.req.json<TestModelRequest>()
 
   if (!modelId) {
     return c.json<ApiResponse>({ success: false, message: 'modelId 为必填项' }, 400)
@@ -193,6 +193,14 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
     return c.json<ApiResponse>({ success: false, message: '该提供商未配置可用的 API Key' }, 400)
   }
 
+  const existingOpenClaw = (!forceOpenclaw && modelConfig.openclawTested)
+    ? {
+        openclawTested: modelConfig.openclawTested,
+        openclawCompatible: modelConfig.openclawCompatible,
+        openclawReason: modelConfig.openclawReason,
+      }
+    : undefined
+
   const result = isOpenCodeProvider(provider.id)
     ? await testOpenCodeModel(provider.baseUrl, enabledKeys, modelId, resolveOpenCodeUrls(c.env))
     : await testModelConnection(
@@ -201,13 +209,7 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
         modelId,
         provider.apiType,
         modelConfig.category,
-        modelConfig.openclawTested
-          ? {
-              openclawTested: modelConfig.openclawTested,
-              openclawCompatible: modelConfig.openclawCompatible,
-              openclawReason: modelConfig.openclawReason,
-            }
-          : undefined
+        existingOpenClaw
       )
 
   if (result.openclaw && result.openclaw.tested) {
@@ -224,7 +226,12 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
     modelId,
     result.success,
     result.statusCode || (result.success ? 200 : 500),
-    result.message || ''
+    result.message || '',
+    {
+      category: ('category' in result ? result.category : undefined) || modelConfig.category,
+      openclawCompatible: 'openclaw' in result ? result.openclaw?.compatible : undefined,
+      openclawReason: 'openclaw' in result ? result.openclaw?.reason : undefined,
+    }
   )
 
   return c.json<ApiResponse>({

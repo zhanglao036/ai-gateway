@@ -54,6 +54,7 @@ export interface ProxyRequestBody {
 
 export interface TestModelRequest {
   modelId: string
+  forceOpenclaw?: boolean
 }
 
 export interface CreateProviderRequest {
@@ -122,6 +123,9 @@ export interface ProbeMetric {
   success: boolean
   statusCode?: number
   error?: string
+  category?: string
+  openclawCompatible?: boolean
+  openclawReason?: string
 }
 
 export interface BusinessMetric {

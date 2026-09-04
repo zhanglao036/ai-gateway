@@ -25,9 +25,10 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
 
     const updatedModels = provider.models.map((m) => {
       if (m.id !== modelId) return m
-      updated = true
 
       if (permReason) {
+        if (m.permanentlyDisabled && m.disabledReason === permReason) return m
+        updated = true
         return {
           ...m,
           permanentlyDisabled: true,
@@ -36,10 +37,11 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       }
 
       if (isBadRequestParam) {
-        // 客户端传参问题不增加失败次数也不触发冷却
+        // 客户端传参问题不增加失败次数也不触发冷却，不触发写入
         return m
       }
 
+      updated = true
       const newFailures = (m.failureCount || 0) + 1
       if (newFailures >= 3) {
         return {
@@ -239,7 +241,7 @@ export interface OpenClawProbeResult {
   reason: string
 }
 
-/** 测试模型连接，发送最小请求验证，并同步探测 OpenClaw 兼容性（每个模型仅测试一次） */
+/** 测试模型连接：单次探针同时获取连通性、真实智能体延迟、OpenClaw兼容性及分类标签 (严格单次请求，不发冗余第二枪) */
 export async function testModelConnection(
   baseUrl: string,
   apiKey: string,
@@ -252,6 +254,7 @@ export async function testModelConnection(
   message: string
   statusCode?: number
   latencyMs?: number
+  category?: string
   openclaw?: OpenClawProbeResult
 }> {
   const startTime = Date.now()
@@ -271,15 +274,88 @@ export async function testModelConnection(
       headers['Authorization'] = `Bearer ${apiKey}`
     }
 
-    // 1. 发送基础连通性探测请求 (放宽 max_tokens 至 16，避免思考模型首 token 为空导致误判)
+    const lowerModel = modelId.toLowerCase()
+    const isDrawing = category === '绘图' ||
+      /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|image|video)/i.test(modelId)
+    const isEmbedding = category === '嵌入' ||
+      /^(text-embedding|embedding|bge-|rerank|clip)/i.test(modelId)
+
+    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针
+    if (isDrawing || isEmbedding) {
+      const assignedCategory = isDrawing ? '绘图' : '嵌入'
+      return {
+        success: true,
+        message: `${assignedCategory}模型 (已标记分类，不适合智能体工具调用)`,
+        statusCode: 200,
+        latencyMs: 10,
+        category: assignedCategory,
+        openclaw: {
+          tested: true,
+          compatible: false,
+          reason: `非对话/智能体模型 (${assignedCategory})`,
+        },
+      }
+    }
+
+    // 2. 区分阶梯化探测：已测过 OpenClaw 资质的模型切换为极简轻量测速探针；未测过的执行一次性 OpenClaw 资质探测
+    const alreadyTested = !!existingOpenClaw?.openclawTested
+    const knownCompatible = !!existingOpenClaw?.openclawCompatible
+    const knownReason = existingOpenClaw?.openclawReason || (knownCompatible ? '已确认兼容 OpenClaw' : '已确认不兼容 OpenClaw')
+
+    let reqBody: Record<string, unknown>
+    if (alreadyTested) {
+      // 已知 OpenClaw 资质：仅测试网络健康与延迟 (极低 Token，无 tools 请求体)
+      reqBody = apiType === 'anthropic'
+        ? {
+            model: modelId,
+            messages: [{ role: 'user', content: 'hi' }],
+            max_tokens: 16,
+          }
+        : {
+            model: modelId,
+            messages: [{ role: 'user', content: 'hi' }],
+            max_tokens: 16,
+          }
+    } else {
+      // 首次探测：发送携带 Tools 的 OpenClaw 探针，一次性完成连通性、延迟与 OpenClaw 资质检测
+      reqBody = apiType === 'anthropic'
+        ? {
+            model: modelId,
+            messages: [{ role: 'user', content: 'Call get_weather with Paris.' }],
+            tools: [{
+              name: 'get_weather',
+              description: 'Get weather for a city',
+              input_schema: {
+                type: 'object',
+                properties: { location: { type: 'string' } },
+                required: ['location'],
+              },
+            }],
+            max_tokens: 24,
+          }
+        : {
+            model: modelId,
+            messages: [{ role: 'user', content: 'Call get_weather with Paris.' }],
+            tools: [{
+              type: 'function',
+              function: {
+                name: 'get_weather',
+                description: 'Get weather for a city',
+                parameters: {
+                  type: 'object',
+                  properties: { location: { type: 'string' } },
+                  required: ['location'],
+                },
+              },
+            }],
+            max_tokens: 24,
+          }
+    }
+
     const response = await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: modelId,
-        messages: [{ role: 'user', content: 'hi' }],
-        max_tokens: 16,
-      }),
+      body: JSON.stringify(reqBody),
       signal: AbortSignal.timeout(15000),
     })
 
@@ -287,132 +363,39 @@ export async function testModelConnection(
     const rawText = await response.text().catch(() => '')
 
     if (response.ok) {
-      let isConnectOk = true
-      try {
-        const resData = JSON.parse(rawText) as any
-        // 兼容各类返回结构：只要是合法 choices / content / finish_reason 或 200 响应即算成功
-        if (resData && Array.isArray(resData.choices) && resData.choices.length > 0) {
-          const choice = resData.choices[0]
-          const msg = choice?.message
-          const hasToolCalls = (msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) || !!msg?.function_call
-          const hasReasoning = !!msg?.reasoning_content || !!msg?.thinking
-          const hasFinishReason = !!choice?.finish_reason
-          const content = msg?.content
-
-          // 仅在完全没有内容、没有思考链、没有 tool_call 且没有 finish_reason 的异常空对象时才警告
-          if (!hasToolCalls && !hasReasoning && !hasFinishReason && (content === null || content === undefined) && !resData.id) {
-            isConnectOk = false
-          }
-        }
-      } catch {
-        // 非 JSON 格式只要 HTTP 200 仍算连通
-      }
-
-      if (!isConnectOk) {
-        return { success: false, message: '连接失败: 上游返回空内容', statusCode: response.status, latencyMs }
-      }
-
-      // 2. OpenClaw 兼容性探测（通过探测一次性测试并记录）
-      let openclawResult: OpenClawProbeResult | undefined
-
-      if (existingOpenClaw && existingOpenClaw.openclawTested) {
-        // 已测试过，复用历史结果，不重复请求
-        openclawResult = {
+      // 成功响应
+      return {
+        success: true,
+        message: alreadyTested ? '连接正常 (轻量测速探针)' : '连接正常，完美兼容 OpenClaw',
+        statusCode: response.status,
+        latencyMs,
+        category: category || '文本',
+        openclaw: {
           tested: true,
-          compatible: !!existingOpenClaw.openclawCompatible,
-          reason: existingOpenClaw.openclawReason || (existingOpenClaw.openclawCompatible ? '适合 OpenClaw 智能体' : '未兼容 OpenClaw'),
-        }
-      } else {
-        // 尚未测试过，在本次探测中执行一次 OpenClaw 适合度评估
-        const lowerModel = modelId.toLowerCase()
-        const isDrawingOrMedia = category === '绘图' ||
-          /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|text-embedding|embedding|rerank|bge-|clip|voice)/i.test(modelId) ||
-          (lowerModel.includes('image') && !lowerModel.includes('vision') && !lowerModel.includes('gemini') && !lowerModel.includes('claude') && !lowerModel.includes('gpt')) ||
-          (lowerModel.includes('video') && !lowerModel.includes('gemini'))
+          compatible: alreadyTested ? knownCompatible : true,
+          reason: alreadyTested ? knownReason : '支持 Tool/函数调用与智能体交互',
+        },
+      }
+    }
 
-        if (isDrawingOrMedia) {
-          openclawResult = {
+    // 处理 400 类的参数不兼容（说明模型可连接，但首次探针发现不支持 Tools）
+    if (!alreadyTested && (response.status === 400 || response.status === 422)) {
+      const lowerErr = rawText.toLowerCase()
+      const isToolUnsupported = lowerErr.includes('tool') || lowerErr.includes('function') || lowerErr.includes('parameter')
+      if (isToolUnsupported) {
+        return {
+          success: true, // 网络连通
+          message: '模型可连通，但上游不支持 Tools 工具调用 (仅支持纯文本)',
+          statusCode: 200,
+          latencyMs,
+          category: category || '文本',
+          openclaw: {
             tested: true,
             compatible: false,
-            reason: '非对话/智能体模型 (绘图/多媒体/嵌入)',
-          }
-        } else {
-          // 发送 Tool-Calling 探针请求验证 OpenClaw 关键工具调用能力
-          try {
-            const toolBody = apiType === 'anthropic'
-              ? {
-                  model: modelId,
-                  messages: [{ role: 'user', content: 'What is the weather in Paris? Call get_weather.' }],
-                  tools: [{
-                    name: 'get_weather',
-                    description: 'Get weather for a city',
-                    input_schema: {
-                      type: 'object',
-                      properties: { location: { type: 'string' } },
-                      required: ['location']
-                    }
-                  }],
-                  max_tokens: 30,
-                }
-              : {
-                  model: modelId,
-                  messages: [{ role: 'user', content: 'What is the weather in Paris? Call get_weather.' }],
-                  tools: [{
-                    type: 'function',
-                    function: {
-                      name: 'get_weather',
-                      description: 'Get weather for a city',
-                      parameters: {
-                        type: 'object',
-                        properties: { location: { type: 'string' } },
-                        required: ['location']
-                      }
-                    }
-                  }],
-                  max_tokens: 30,
-                }
-
-            const toolResp = await fetch(url, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(toolBody),
-              signal: AbortSignal.timeout(8000),
-            })
-
-            if (toolResp.ok) {
-              openclawResult = {
-                tested: true,
-                compatible: true,
-                reason: '支持 Tool/函数调用与智能体交互',
-              }
-            } else if (toolResp.status === 400 || toolResp.status === 404 || toolResp.status === 422) {
-              const errTxt = await toolResp.text().catch(() => '')
-              openclawResult = {
-                tested: true,
-                compatible: false,
-                reason: errTxt.includes('tool') || errTxt.includes('function') ? '上游不支持 tools / 函数调用' : '未通过智能体 Tools 探针',
-              }
-            } else {
-              // 遇限流或网关异常时，根据智能体通用模型规则做保底匹配
-              const isCommonAgentModel = /claude-3|claude-2|gpt-4|gpt-3\.5|gpt-4o|o1|o3|gemini|deepseek|qwen.*coder|qwen2\.5|glm-4|kimi|minimax|codex/i.test(modelId)
-              openclawResult = {
-                tested: true,
-                compatible: isCommonAgentModel,
-                reason: isCommonAgentModel ? '主流智能体模型 (匹配通过)' : '未通过 Tool 调用测试',
-              }
-            }
-          } catch {
-            const isCommonAgentModel = /claude-3|claude-2|gpt-4|gpt-3\.5|gpt-4o|o1|o3|gemini|deepseek|qwen.*coder|qwen2\.5|glm-4|kimi|minimax|codex/i.test(modelId)
-            openclawResult = {
-              tested: true,
-              compatible: isCommonAgentModel,
-              reason: isCommonAgentModel ? '主流智能体模型 (匹配通过)' : '未通过 Tool 调用测试',
-            }
-          }
+            reason: '仅支持纯文本对话，不支持 OpenClaw Tools 工具调用',
+          },
         }
       }
-
-      return { success: true, message: '连接成功', statusCode: response.status, latencyMs, openclaw: openclawResult }
     }
 
     let errorBody = ''
@@ -428,13 +411,28 @@ export async function testModelConnection(
       message: `HTTP ${response.status}: ${errorBody.substring(0, 200)}`,
       statusCode: response.status,
       latencyMs,
+      category: category || '文本',
+      openclaw: {
+        tested: alreadyTested,
+        compatible: alreadyTested ? knownCompatible : false,
+        reason: alreadyTested ? knownReason : `调用异常 (HTTP ${response.status})`,
+      },
     }
   } catch (err) {
     const error = err as Error
+    const alreadyTested = !!existingOpenClaw?.openclawTested
+    const knownCompatible = !!existingOpenClaw?.openclawCompatible
+    const knownReason = existingOpenClaw?.openclawReason || (knownCompatible ? '已确认兼容 OpenClaw' : '已确认不兼容 OpenClaw')
     return {
       success: false,
       message: `连接失败: ${error.message?.substring(0, 200) || '未知错误'}`,
       latencyMs: Date.now() - startTime,
+      category: category || '文本',
+      openclaw: {
+        tested: alreadyTested,
+        compatible: alreadyTested ? knownCompatible : false,
+        reason: alreadyTested ? knownReason : (error.message || '网络连接超时'),
+      },
     }
   }
 }
@@ -781,6 +779,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       let lastError: Response | null = null
       let healthUpdated = false
+      let alreadyRecordedFailure = false
 
     for (const keyIndex of keyOrder) {
       const apiKey = enabledKeys[keyIndex].key
@@ -906,6 +905,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           clientIp,
         })
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+        alreadyRecordedFailure = true
         if (isAutoRequest && attempts < maxAttempts) {
           lastError = response
           break // break standard key loop to let outer while-loop continue to next provider
@@ -933,18 +933,20 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     // 写回健康状态
     if (healthUpdated) await writeHealth(c.env, providerId, healthData)
 
-    // 所有 key 均失败或遇到异常中断
+    // 所有 key 均失败或遇到异常中断（若已在单 key 失败时记录过则不重复扣分与记日志）
     if (lastError) {
       const errorBody = await lastError.text().catch(() => '所有 API Key 均失败')
       const errMsg = `所有 API Key 已用完，最后一次错误: HTTP ${lastError.status}`
-      await recordModelFailure(c.env, providerId, modelId, lastError.status || 502, errorBody)
-      await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg, {
-        attemptIndex: attempts,
-        routePath,
-        isStream: isStreamReq,
-        clientIp,
-      })
-      await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+      if (!alreadyRecordedFailure) {
+        await recordModelFailure(c.env, providerId, modelId, lastError.status || 502, errorBody)
+        await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg, {
+          attemptIndex: attempts,
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+        })
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+      }
       if (isAutoRequest && attempts < maxAttempts) {
         continue // outer while-loop continue to next provider in Tier 1
       }

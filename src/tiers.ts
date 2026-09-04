@@ -42,7 +42,7 @@ export function getPermTestIntervalMs(permTestFailCount: number = 0): number {
 }
 
 /**
- * 按照规则更新提供商模型的可连接性/冷却/失效状态
+ * 按照规则更新提供商模型的可连接性/冷却/失效状态以及 OpenClaw / 分类打标
  */
 export async function applyModelProbeResult(
   env: Env,
@@ -50,7 +50,12 @@ export async function applyModelProbeResult(
   modelId: string,
   success: boolean,
   statusCode: number,
-  errorMsg: string
+  errorMsg: string,
+  extra?: {
+    category?: string
+    openclawCompatible?: boolean
+    openclawReason?: string
+  }
 ): Promise<void> {
   const provider = await getProvider(env, providerId)
   if (!provider) return
@@ -59,15 +64,40 @@ export async function applyModelProbeResult(
   const updatedModels = provider.models.map((m) => {
     if (m.id !== modelId) return m
 
+    // 同步更新分类与 OpenClaw 标签
+    let categoryChanged = false
+    let newCategory = m.category
+    if (extra?.category && m.category !== extra.category) {
+      newCategory = extra.category as any
+      categoryChanged = true
+    }
+
+    let openclawChanged = false
+    let newOpenclawTested = m.openclawTested
+    let newOpenclawCompatible = m.openclawCompatible
+    let newOpenclawReason = m.openclawReason
+    if (extra && extra.openclawCompatible !== undefined) {
+      if (!m.openclawTested || m.openclawCompatible !== extra.openclawCompatible || m.openclawReason !== extra.openclawReason) {
+        newOpenclawTested = true
+        newOpenclawCompatible = extra.openclawCompatible
+        newOpenclawReason = extra.openclawReason
+        openclawChanged = true
+      }
+    }
+
     if (success) {
-      // 仅当该模型之前处于异常状态（有失败计数、冷却或禁用）时才需要更新落盘
       const hadAnomaly = (m.failureCount && m.failureCount > 0) || m.cooldownUntil || m.permanentlyDisabled
-      if (!hadAnomaly) {
+      if (!hadAnomaly && !categoryChanged && !openclawChanged) {
         return m
       }
       updated = true
       return {
         ...m,
+        category: newCategory,
+        openclawTested: newOpenclawTested,
+        openclawCompatible: newOpenclawCompatible,
+        openclawReason: newOpenclawReason,
+        openclawTestedAt: openclawChanged ? Date.now() : m.openclawTestedAt,
         cooldownUntil: null,
         failureCount: 0,
         permanentlyDisabled: false,
@@ -76,10 +106,14 @@ export async function applyModelProbeResult(
         disabledReason: undefined,
       }
     } else {
-      updated = true
       if (m.permanentlyDisabled) {
+        updated = true
         return {
           ...m,
+          category: newCategory,
+          openclawTested: newOpenclawTested,
+          openclawCompatible: newOpenclawCompatible,
+          openclawReason: newOpenclawReason,
           lastPermTestAt: Date.now(),
           permTestFailCount: (m.permTestFailCount || 0) + 1,
         }
@@ -93,11 +127,29 @@ export async function applyModelProbeResult(
         lowerMsg.includes('unsupported')
       )
 
-      const permReason = detectPermanentFailure(statusCode, errorMsg)
+      if (isBadRequestParam) {
+        if (categoryChanged || openclawChanged) {
+          updated = true
+          return {
+            ...m,
+            category: newCategory,
+            openclawTested: newOpenclawTested,
+            openclawCompatible: newOpenclawCompatible,
+            openclawReason: newOpenclawReason,
+          }
+        }
+        return m
+      }
 
+      const permReason = detectPermanentFailure(statusCode, errorMsg)
       if (permReason) {
+        updated = true
         return {
           ...m,
+          category: newCategory,
+          openclawTested: newOpenclawTested,
+          openclawCompatible: newOpenclawCompatible,
+          openclawReason: newOpenclawReason,
           permanentlyDisabled: true,
           disabledReason: permReason,
           lastPermTestAt: Date.now(),
@@ -105,14 +157,15 @@ export async function applyModelProbeResult(
         }
       }
 
-      if (isBadRequestParam) {
-        return m
-      }
-
+      updated = true
       const newFailures = (m.failureCount || 0) + 1
       if (newFailures >= 3) {
         return {
           ...m,
+          category: newCategory,
+          openclawTested: newOpenclawTested,
+          openclawCompatible: newOpenclawCompatible,
+          openclawReason: newOpenclawReason,
           failureCount: newFailures,
           permanentlyDisabled: true,
           disabledReason: '探测连续失败达到3次，已标记永久失效',
@@ -123,6 +176,10 @@ export async function applyModelProbeResult(
 
       return {
         ...m,
+        category: newCategory,
+        openclawTested: newOpenclawTested,
+        openclawCompatible: newOpenclawCompatible,
+        openclawReason: newOpenclawReason,
         failureCount: newFailures,
         cooldownUntil: Date.now() + 5 * 60 * 1000,
       }
@@ -192,6 +249,9 @@ export async function runSingleModelProbe(
   let success = false
   let statusCode = 500
   let errorMsg = ''
+  let modelCategory = '文本'
+  let openclawCompatible: boolean | undefined = undefined
+  let openclawReason: string | undefined = undefined
 
   try {
     if (isOpenCodeProvider(provider.id)) {
@@ -214,15 +274,25 @@ export async function runSingleModelProbe(
           error: '提供商未配置有效 Key',
         }
       }
+      const modelConfig = provider.models.find((m) => m.id === modelId)
       const res = await testModelConnection(
         provider.baseUrl,
         apiKey,
         modelId,
-        provider.apiType
+        provider.apiType,
+        modelConfig?.category,
+        modelConfig ? {
+          openclawTested: modelConfig.openclawTested,
+          openclawCompatible: modelConfig.openclawCompatible,
+          openclawReason: modelConfig.openclawReason,
+        } : undefined
       )
       success = res.success
       statusCode = res.statusCode || (success ? 200 : 500)
       errorMsg = res.message
+      modelCategory = res.category || modelConfig?.category || '文本'
+      openclawCompatible = res.openclaw?.compatible
+      openclawReason = res.openclaw?.reason
     }
   } catch (err) {
     success = false
@@ -232,7 +302,11 @@ export async function runSingleModelProbe(
 
   const latency = Date.now() - startTime
 
-  await applyModelProbeResult(env, provider.id, modelId, success, statusCode, errorMsg)
+  await applyModelProbeResult(env, provider.id, modelId, success, statusCode, errorMsg, {
+    category: modelCategory,
+    openclawCompatible,
+    openclawReason,
+  })
 
   return {
     latency: success ? latency : 9999,
@@ -240,6 +314,9 @@ export async function runSingleModelProbe(
     success,
     statusCode,
     error: success ? undefined : errorMsg,
+    category: modelCategory,
+    openclawCompatible,
+    openclawReason,
   }
 }
 
@@ -476,7 +553,8 @@ export async function validateAndRebuildHistoryTier1(
 
   const providerCounts = new Map<string, number>()
 
-  // 1. 对历史 Tier 1 内的模型执行一轮轻量探测，并执行多样性配额检查
+  // 1. 对历史 Tier 1 内的模型并发执行轻量探测，并执行多样性配额检查
+  const toProbe: Array<{ m: TierModelRef; item: { provider: Provider; modelId: string; fullId: string } }> = []
   for (const m of existing.tier1 || []) {
     const item = modelMap.get(m.fullId)
     if (!item) {
@@ -496,15 +574,25 @@ export async function validateAndRebuildHistoryTier1(
       continue
     }
 
-    const metric = await runSingleModelProbe(env, item.provider, item.modelId)
-    probeStats[m.fullId] = metric
+    providerCounts.set(m.providerId, currentCount + 1)
+    toProbe.push({ m, item })
+  }
 
+  // 并发探测，耗时由十多秒骤降至约 1~2 秒
+  const probeResults = await Promise.all(
+    toProbe.map(async ({ m, item }) => {
+      const metric = await runSingleModelProbe(env, item.provider, item.modelId)
+      return { m, metric }
+    })
+  )
+
+  for (const { m, metric } of probeResults) {
+    probeStats[m.fullId] = metric
     if (metric.success) {
       newTier1.push({
         ...m,
         addedAt: m.addedAt || now,
       })
-      providerCounts.set(m.providerId, currentCount + 1)
     } else {
       // 探测失败或处于冷却/失效状态，从第一梯队剔除，降至第二梯队
       newTier2.push({
@@ -754,10 +842,15 @@ export async function backfillTier1FromTier2(
           }
         }
 
-        // 选取本轮探测成功的可用模型按延迟由低到高晋升进入第一梯队
+        // 选取本轮探测成功的可用模型：优先选拔适合 OpenClaw 智能体的高质量模型，其次按延迟由低到高排序
         const successCandidates = roundTested.filter((item) => item.metric.success)
         if (successCandidates.length > 0) {
-          successCandidates.sort((a, b) => a.metric.latency - b.metric.latency)
+          successCandidates.sort((a, b) => {
+            const openclawA = a.metric.openclawCompatible ? 1 : 0
+            const openclawB = b.metric.openclawCompatible ? 1 : 0
+            if (openclawA !== openclawB) return openclawB - openclawA // 适合 OpenClaw 优先
+            return a.metric.latency - b.metric.latency // 延迟由低到高
+          })
           for (const item of successCandidates) {
             if (currentSlotsNeeded <= 0) break
 
