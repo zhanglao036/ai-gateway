@@ -139,6 +139,8 @@ export interface BusinessMetric {
 export interface TierStorage {
   tier1: TierModelRef[]
   tier2: TierModelRef[]
+  tierOpenclaw?: TierModelRef[]
+  tierDrawing?: TierModelRef[]
   probeStats: Record<string, ProbeMetric>
   businessStats: Record<string, BusinessMetric>
   updatedAt: string

@@ -4,7 +4,7 @@ import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './conf
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
 import { detectPermanentFailure } from './models'
-import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2 } from './tiers'
+import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
   try {
@@ -73,22 +73,38 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
     if (storage) {
       let changed = false
       const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
+      const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+      const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
 
       if (isPermDisabled) {
-        // 永久失效 (例如 402/余额不足、连续 3 次失败)：第一时间踢出第一、第二梯队
+        // 永久失效 (例如 402/余额不足、连续 3 次失败)：第一时间踢出第一梯队、第二梯队与各专属梯队
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
+        if (storage.tierOpenclaw) storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        if (storage.tierDrawing) storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
         changed = true
-        console.log(`[proxy] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
-      } else if (inTier1) {
-        // 第一梯队模型调用出现明确故障（如 429 超限、5xx 崩溃、网络超时）：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
-        console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
-        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-        const ref = { providerId, modelId, fullId, addedAt: Date.now() }
-        if (!storage.tier2.some((m) => m.fullId === fullId)) {
-          storage.tier2.push(ref)
+        console.log(`[proxy] 永久失效模型 ${fullId} 已从所有梯队踢出，原因: ${actualDisabledReason}`)
+      } else {
+        if (inTier1) {
+          // 第一梯队模型调用出现明确故障：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
+          console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
+          storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+          const ref = { providerId, modelId, fullId, addedAt: Date.now() }
+          if (!storage.tier2.some((m) => m.fullId === fullId)) {
+            storage.tier2.push(ref)
+          }
+          changed = true
         }
-        changed = true
+        if (inOpenclaw && storage.tierOpenclaw) {
+          console.log(`[proxy] OpenClaw 专属梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除并补位`)
+          storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+          changed = true
+        }
+        if (inDrawing && storage.tierDrawing) {
+          console.log(`[proxy] 绘图专属梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除并补位`)
+          storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
+          changed = true
+        }
       }
 
       if (changed) {
@@ -98,7 +114,9 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
           lastTestedAt: Date.now(),
           error: `HTTP ${status}: ${errorMsg}`,
         }
-        await backfillTier1FromTier2(env, storage)
+        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
+        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
+        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
       }
     }
   } catch (err) {
@@ -492,12 +510,23 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     }
 
     let routeDesc = ''
+    let poolType: 'general' | 'openclaw' | 'drawing' = 'general'
 
-    // 检查后台“自定义指定模型”规则（例如 openclaw/auto -> 指定模型 或 第一梯队池）
+    // 检查后台“自定义指定模型”规则
     const customRoutes = await getCustomModelRoutes(c.env)
     const matchedRoute = customRoutes.find((r) => r.enabled && r.sourceModel.trim().toLowerCase() === model.trim().toLowerCase())
     if (matchedRoute) {
-      if (matchedRoute.targetProviderId === 'tier1' || matchedRoute.targetModelId === 'auto') {
+      if (matchedRoute.targetProviderId === 'tier_openclaw' || matchedRoute.targetModelId === 'openclaw') {
+        isAutoRequest = true
+        poolType = 'openclaw'
+        routeDesc = '🔀 自定义规则 -> 🟣 OpenClaw 专属梯队池'
+        requestedModel = `${clientRequested} (规则: 🟣OpenClaw梯队池)`
+      } else if (matchedRoute.targetProviderId === 'tier_drawing' || matchedRoute.targetModelId === 'drawing') {
+        isAutoRequest = true
+        poolType = 'drawing'
+        routeDesc = '🔀 自定义规则 -> 🎨 绘图专属梯队池'
+        requestedModel = `${clientRequested} (规则: 🎨绘图梯队池)`
+      } else if (matchedRoute.targetProviderId === 'tier1' || matchedRoute.targetModelId === 'auto') {
         isAutoRequest = true
         routeDesc = '🔀 自定义规则 -> ⚡ 第一梯队池'
         requestedModel = `${clientRequested} (规则: ⚡第一梯队池)`
@@ -507,17 +536,35 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         routeDesc = `🔀 自定义规则 -> ${model}`
         requestedModel = `${clientRequested} ➔ ${model}`
       }
-    } else if (model === 'openclaw/auto' || model === 'openclaw') {
-      // 客户端发送 openclaw/auto 且未配规则时，安全默认指向第一梯队池，避免 404
+    } else if (model === 'openclaw/auto' || model === 'openclaw' || model === 'auto-openclaw') {
       isAutoRequest = true
-      routeDesc = '⚡ 第一梯队优选池 (默认)'
-      requestedModel = `${clientRequested} (⚡第一梯队优选池)`
-    }
-
-    if (model === 'auto' || model === 'auto/auto') {
+      poolType = 'openclaw'
+      routeDesc = '🟣 OpenClaw 专属梯队池'
+      requestedModel = `${clientRequested} (🟣OpenClaw梯队池)`
+    } else if (model === 'drawing/auto' || model === 'drawing' || model === 'auto-drawing') {
       isAutoRequest = true
-      routeDesc = '⚡ 第一梯队优选池 (自动调度)'
-      requestedModel = `${clientRequested} (⚡第一梯队优选池)`
+      poolType = 'drawing'
+      routeDesc = '🎨 绘图专属梯队池'
+      requestedModel = `${clientRequested} (🎨绘图梯队池)`
+    } else if (model === 'auto' || model === 'auto/auto' || model === 'tier1') {
+      // 场景智能识别：
+      // 1. 如果请求体包含 tools 或 functions，自动路由至 OpenClaw 专属梯队池
+      const bodyHasTools = (body && Array.isArray((body as any).tools) && (body as any).tools.length > 0) || !!(body as any)?.functions
+      if (bodyHasTools) {
+        isAutoRequest = true
+        poolType = 'openclaw'
+        routeDesc = '🟣 OpenClaw 专属梯队池 (检测到 Agent Tools 调用)'
+        requestedModel = `${clientRequested} (🟣OpenClaw智能体优选)`
+      } else if (routePath.includes('images/generations')) {
+        isAutoRequest = true
+        poolType = 'drawing'
+        routeDesc = '🎨 绘图专属梯队池'
+        requestedModel = `${clientRequested} (🎨绘图梯队池)`
+      } else {
+        isAutoRequest = true
+        routeDesc = '⚡ 第一梯队优选池 (自动调度)'
+        requestedModel = `${clientRequested} (⚡第一梯队优选池)`
+      }
     }
 
     const triedProviders = new Set<string>()
@@ -529,17 +576,17 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       attempts++
 
       if (isAutoRequest) {
-        const autoRes = await selectAutoModel(c.env, isLongText, sessionId, triedProviders)
+        const autoRes = await selectAutoModel(c.env, isLongText, sessionId, triedProviders, poolType)
         if (!autoRes) {
           // 如果尝试了所有提供商，重置重新选，避免死循环
-          const fallbackRes = await selectAutoModel(c.env, isLongText, sessionId, new Set())
+          const fallbackRes = await selectAutoModel(c.env, isLongText, sessionId, new Set(), poolType)
           if (!fallbackRes) {
-            await recordLog(c.env, startTime, requestedModel, 503, '第一梯队无可用的模型', {
+            await recordLog(c.env, startTime, requestedModel, 503, '当前梯队池无可用的模型', {
               routePath,
               isStream: isStreamReq,
               clientIp,
             })
-            return c.json({ error: { message: '第一梯队池暂无可用的模型，请先配置模型或进行初始化探测', type: 'service_unavailable' } }, 503)
+            return c.json({ error: { message: '当前梯队池暂无可用的模型，请先配置模型或进行探测补位', type: 'service_unavailable' } }, 503)
           }
           currentModel = fallbackRes.fullId
         } else {

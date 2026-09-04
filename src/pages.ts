@@ -34,6 +34,8 @@ export async function renderHomePage(c: Context<{ Bindings: Env }>, isLoggedIn: 
   const providers = await getProviders(c.env)
   const tierData = await ensureTierStorage(c.env)
   const tier1Models = tierData.tier1 || []
+  const tierOpenclawModels = tierData.tierOpenclaw || []
+  const tierDrawingModels = tierData.tierDrawing || []
   const tier2Count = (tierData.tier2 || []).length
 
   const host = c.req.header('host') || 'localhost:8787'
@@ -100,8 +102,9 @@ ${H('首页')}
     <div class="metric"><span class="metric__value">${providers.length}</span><span class="metric__label">提供商总计</span></div>
     <div class="metric"><span class="metric__value">${enabledProviders.length}</span><span class="metric__label">已启用提供商</span></div>
     <div class="metric"><span class="metric__value">${allModelsCount}</span><span class="metric__label">模型总计</span></div>
-    <div class="metric"><span class="metric__value">${enabledModelsCount}</span><span class="metric__label">可用模型</span></div>
     <div class="metric"><span class="metric__value">${tier1Models.length} / 9</span><span class="metric__label">第一梯队席位</span></div>
+    <div class="metric"><span class="metric__value">${tierOpenclawModels.length} / 5</span><span class="metric__label">OpenClaw 席位</span></div>
+    <div class="metric"><span class="metric__value">${tierDrawingModels.length} / 5</span><span class="metric__label">绘图池席位</span></div>
   </section>
 
   <section class="shell tier1-showcase" style="margin-top:2rem;margin-bottom:2rem;">
@@ -113,7 +116,7 @@ ${H('首页')}
           <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dbeafe;color:#1e40af;border-radius:9999px;font-weight:600;">9 席位固定</span>
         </h2>
         <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
-          <code>auto/auto</code> 智能路由仅在第一梯队内匹配选优；当模型遭遇业务故障或连续失败时自动淘汰，并使用独立轻量探测从第二梯队候选池（含 ${tier2Count} 个候选模型）海选补位。
+          <code>auto/auto</code> 智能路由仅在第一梯队内匹配选优；当模型遭遇业务故障或连续失败时自动淘汰，并使用独立轻量探测从候选池（含 ${tier2Count} 个候选模型）海选补位。
         </p>
       </div>
     </div>
@@ -122,9 +125,9 @@ ${H('首页')}
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
         <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#0f172a;">
-          <i class="fas fa-bolt" style="color:#eab308;"></i> 极简 Auto 智能路由：指定 model: "auto/auto" 或 "openclaw/auto"
+          <i class="fas fa-bolt" style="color:#eab308;"></i> 极简通用 Auto 智能调度：指定 model: "auto/auto" 或 "tier1"
         </span>
-        <span style="font-size:0.75rem;color:#64748b;">支持动态淘汰与独立轻量海选补位 · 严格指定模型时不漂移</span>
+        <span style="font-size:0.75rem;color:#64748b;">9 席黄金池 · 毫秒级优选 · 自动健康补位</span>
       </div>
       <pre style="background:#0f172a;color:#f8fafc;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/chat/completions \\
   -H "Authorization: Bearer sk_cf_••••" \\
@@ -183,6 +186,176 @@ ${H('首页')}
             <span style="font-size:0.7rem;font-weight:600;color:#94a3b8;margin-bottom:0.2rem;">席位 #${idx + 1}</span>
             <span style="font-size:0.8rem;color:#64748b;display:flex;align-items:center;gap:0.375rem;">
               <i class="fas fa-clock" style="color:#94a3b8;"></i> 待选拔补位
+            </span>
+          </div>`
+        }
+      }).join('')}
+    </div>
+  </section>
+
+  <!-- OpenClaw 专属梯队池展示区 -->
+  <section class="shell openclaw-showcase" style="margin-top:2rem;margin-bottom:2rem;">
+    <div class="section-heading" style="margin-bottom:1rem;">
+      <div>
+        <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
+          <i class="fas fa-robot" style="color:#8b5cf6;"></i>
+          OpenClaw 专属梯队池 (OpenClaw Tier)
+          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:9999px;font-weight:600;">5 席位固定</span>
+        </h2>
+        <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
+          针对复杂 Agent、Function Calling 与智能体场景经过 Canary 探针验证的模型池。传入 <code>model: "openclaw/auto"</code> 或请求包含 <code>tools</code> 时自动调度。
+        </p>
+      </div>
+    </div>
+
+    <!-- OpenClaw 调用示例卡片 -->
+    <div style="background:#fdf4ff;border:1px solid #f5d0fe;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
+        <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#701a75;">
+          <i class="fas fa-wand-magic-sparkles" style="color:#a855f7;"></i> OpenClaw 智能调度：指定 model: "openclaw/auto" 或携带 tools 自动触发
+        </span>
+        <span style="font-size:0.75rem;color:#86198f;">工具调用支持 · 智能体优选 · 自动补位</span>
+      </div>
+      <pre style="background:#1e1b4b;color:#f5d0fe;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/chat/completions \\
+  -H "Authorization: Bearer sk_cf_••••" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "openclaw/auto",
+    "messages": [{ "role": "user", "content": "Fetch weather with tools" }],
+    "tools": [{ "type": "function", "function": { "name": "get_weather" } }]
+  }'</code></pre>
+    </div>
+
+    <!-- OpenClaw 5 个席位卡片 -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
+      ${Array.from({ length: 5 }).map((_, idx) => {
+        const item = tierOpenclawModels[idx]
+        if (item) {
+          const probeStat = tierData.probeStats[item.fullId]
+          const bStat = tierData.businessStats[item.fullId]
+          const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
+          const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
+          return `
+          <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.625rem;padding:0.875rem;box-shadow:0 1px 2px rgba(139,92,246,0.05);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
+              <span style="font-size:0.7rem;font-weight:700;color:#6d28d9;background:#ede9fe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
+                OpenClaw 席位 #${idx + 1}
+              </span>
+              <span style="font-size:0.7rem;color:#7c3aed;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
+                <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 兼容智能体
+              </span>
+            </div>
+            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
+              ${escapePageHtml(item.fullId)}
+            </div>
+            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+              <span style="font-size:0.65rem;background:#fae8ff;color:#86198f;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;">
+                <i class="fas fa-bolt"></i> 适合 OpenClaw
+              </span>
+              <span style="font-size:0.65rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.35rem;border-radius:0.25rem;">
+                ${escapePageHtml(probeStat?.category || '文本')}
+              </span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#faf5ff;padding:0.375rem 0.5rem;border-radius:0.375rem;">
+              <div>
+                <div style="color:#7e22ce;font-size:0.65rem;">探针延迟</div>
+                <div style="font-weight:600;color:#6b21a8;">${probeLatText}</div>
+              </div>
+              <div>
+                <div style="color:#64748b;font-size:0.65rem;">业务延迟</div>
+                <div style="font-weight:600;color:#059669;">${busLatText}</div>
+              </div>
+            </div>
+          </div>`
+        } else {
+          return `
+          <div style="background:#faf5ff;border:1px dashed #d8b4fe;border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:90px;">
+            <span style="font-size:0.7rem;font-weight:600;color:#c084fc;margin-bottom:0.2rem;">OpenClaw 席位 #${idx + 1}</span>
+            <span style="font-size:0.8rem;color:#9333ea;display:flex;align-items:center;gap:0.375rem;">
+              <i class="fas fa-clock" style="color:#c084fc;"></i> 待适配模型补位
+            </span>
+          </div>`
+        }
+      }).join('')}
+    </div>
+  </section>
+
+  <!-- 绘图专属梯队池展示区 -->
+  <section class="shell drawing-showcase" style="margin-top:2rem;margin-bottom:2rem;">
+    <div class="section-heading" style="margin-bottom:1rem;">
+      <div>
+        <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
+          <i class="fas fa-palette" style="color:#ec4899;"></i>
+          绘图专属梯队池 (Drawing Tier)
+          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fce7f3;color:#be185d;border-radius:9999px;font-weight:600;">5 席位固定</span>
+        </h2>
+        <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
+          专门收录 DALL-E、Flux、Stable Diffusion 与各类图像生成模型。传入 <code>model: "drawing/auto"</code> 或请求 <code>/v1/images/generations</code> 接口时自动调度。
+        </p>
+      </div>
+    </div>
+
+    <!-- 绘图调用示例卡片 -->
+    <div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
+        <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#881337;">
+          <i class="fas fa-paint-brush" style="color:#f43f5e;"></i> 绘图模型智能调度：指定 model: "drawing/auto" 或访问图像生成接口
+        </span>
+        <span style="font-size:0.75rem;color:#9f1239;">图像模型优选 · 智能轮询 · 故障自愈</span>
+      </div>
+      <pre style="background:#26131c;color:#fecdd3;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/images/generations \\
+  -H "Authorization: Bearer sk_cf_••••" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "drawing/auto",
+    "prompt": "A futuristic city in watercolor style"
+  }'</code></pre>
+    </div>
+
+    <!-- 绘图 5 个席位卡片 -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
+      ${Array.from({ length: 5 }).map((_, idx) => {
+        const item = tierDrawingModels[idx]
+        if (item) {
+          const probeStat = tierData.probeStats[item.fullId]
+          const bStat = tierData.businessStats[item.fullId]
+          const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
+          const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
+          return `
+          <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.625rem;padding:0.875rem;box-shadow:0 1px 2px rgba(236,72,153,0.05);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
+              <span style="font-size:0.7rem;font-weight:700;color:#be185d;background:#fce7f3;padding:0.15rem 0.4rem;border-radius:0.25rem;">
+                绘图席位 #${idx + 1}
+              </span>
+              <span style="font-size:0.7rem;color:#e11d48;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
+                <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 绘图模型
+              </span>
+            </div>
+            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
+              ${escapePageHtml(item.fullId)}
+            </div>
+            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
+              <span style="font-size:0.65rem;background:#ffe4e6;color:#be123c;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;">
+                <i class="fas fa-palette"></i> 绘图
+              </span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#fff5f7;padding:0.375rem 0.5rem;border-radius:0.375rem;">
+              <div>
+                <div style="color:#be123c;font-size:0.65rem;">探针延迟</div>
+                <div style="font-weight:600;color:#9f1239;">${probeLatText}</div>
+              </div>
+              <div>
+                <div style="color:#64748b;font-size:0.65rem;">业务延迟</div>
+                <div style="font-weight:600;color:#059669;">${busLatText}</div>
+              </div>
+            </div>
+          </div>`
+        } else {
+          return `
+          <div style="background:#fff5f7;border:1px dashed #fecdd3;border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:90px;">
+            <span style="font-size:0.7rem;font-weight:600;color:#fb7185;margin-bottom:0.2rem;">绘图席位 #${idx + 1}</span>
+            <span style="font-size:0.8rem;color:#e11d48;display:flex;align-items:center;gap:0.375rem;">
+              <i class="fas fa-clock" style="color:#fb7185;"></i> 待绘图模型补位
             </span>
           </div>`
         }
