@@ -51,6 +51,7 @@ import type {
   TestModelRequest,
   Model,
   CustomModelRoute,
+  TierStorage,
 } from './types'
 
 // ===== 系统状态 =====
@@ -920,7 +921,18 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
 
 // ===== 获取梯队与探测数据 =====
 export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
-  const tierData = await ensureTierStorage(c.env)
+  const defaultTierData: TierStorage = {
+    tier1: [],
+    tier2: [],
+    tierOpenclaw: [],
+    tierDrawing: [],
+    lastProbeDate: '',
+    probeStats: {},
+    businessStats: {},
+    updatedAt: '',
+    modelCursors: {},
+  }
+  const tierData = (await getTierStorage(c.env)) || defaultTierData
   return c.json<ApiResponse>({
     success: true,
     data: tierData,

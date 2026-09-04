@@ -1,10 +1,10 @@
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
-import type { Env } from './types'
+import type { Env, TierStorage } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
-import { ensureTierStorage } from './tiers'
+import { getTierStorage } from './tiers'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -32,7 +32,19 @@ const H = (title: string) => `
 
 export async function renderHomePage(c: Context<{ Bindings: Env }>, isLoggedIn: boolean) {
   const providers = await getProviders(c.env)
-  const tierData = await ensureTierStorage(c.env)
+  // 仅从 KV 快速读取已有数据，绝不发起任何外部网络测速，保证瞬间秒开
+  const defaultTierData: TierStorage = {
+    tier1: [],
+    tier2: [],
+    tierOpenclaw: [],
+    tierDrawing: [],
+    probeStats: {},
+    businessStats: {},
+    updatedAt: '',
+    lastProbeDate: '',
+    modelCursors: {},
+  }
+  const tierData = (await getTierStorage(c.env)) || defaultTierData
   const tier1Models = tierData.tier1 || []
   const tierOpenclawModels = tierData.tierOpenclaw || []
   const tierDrawingModels = tierData.tierDrawing || []
@@ -1067,11 +1079,11 @@ ${H('管理')}
           <button type="button" class="btn btn-p" onclick="openAddCustomRouteModal()"><i class="fas fa-plus" aria-hidden="true"></i>添加指定规则</button>
         </div>
         <div class="route-tag-bar" id="custom-routes-filter-bar">
-          <button type="button" class="route-tag-chip is-active" data-route-filter="all" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-layer-group"></i> 全部规则</button>
-          <button type="button" class="route-tag-chip" data-route-filter="openclaw" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-robot"></i> OpenClaw 规则</button>
-          <button type="button" class="route-tag-chip" data-route-filter="tier1" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-bolt"></i> 第一梯队规则</button>
-          <button type="button" class="route-tag-chip" data-route-filter="text" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-comment-dots"></i> 文本规则</button>
-          <button type="button" class="route-tag-chip" data-route-filter="image" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-palette"></i> 绘图规则</button>
+          <button type="button" class="route-tag-chip is-active" data-route-filter="all" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-layer-group"></i> 全部规则 <span class="chip-count" id="cr-cnt-all">0</span></button>
+          <button type="button" class="route-tag-chip" data-route-filter="openclaw" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-robot"></i> OpenClaw 规则 <span class="chip-count" id="cr-cnt-openclaw">0</span></button>
+          <button type="button" class="route-tag-chip" data-route-filter="tier1" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-bolt"></i> 第一梯队规则 <span class="chip-count" id="cr-cnt-tier1">0</span></button>
+          <button type="button" class="route-tag-chip" data-route-filter="text" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-comment-dots"></i> 文本规则 <span class="chip-count" id="cr-cnt-text">0</span></button>
+          <button type="button" class="route-tag-chip" data-route-filter="image" onclick="filterCustomRoutesTableBtn(this)"><i class="fas fa-palette"></i> 绘图规则 <span class="chip-count" id="cr-cnt-image">0</span></button>
         </div>
         <div class="table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);">
           <table class="data-table" id="custom-routes-table" style="width:100%;text-align:left;border-collapse:collapse;">
@@ -2517,6 +2529,10 @@ function setActiveAdminNav(hash) {
     if (active) link.setAttribute('aria-current', 'page')
     else link.removeAttribute('aria-current')
   })
+  // 按需加载：仅当切换到 #logs 标签页时才加载日志，避免进后台卡顿
+  if (targetHash === '#logs') {
+    fetchLogs();
+  }
 }
 adminNavLinks.forEach(function (link) {
   link.addEventListener('click', function () { setActiveAdminNav(link.getAttribute('href') || '#overview') })
@@ -2559,10 +2575,11 @@ function setupAutoRefresh(enabled) {
   }
   if (enabled) {
     debugAutoRefreshTimer = setInterval(function() {
-      if (location.hash === '#logs' || !location.hash) {
+      // 仅当用户在日志标签页且页面可见时才刷新，离开自动休眠，绝不浪费主线程
+      if (location.hash === '#logs' && document.visibilityState === 'visible') {
         fetchLogs();
       }
-    }, 3000);
+    }, 4000);
   }
 }
 
@@ -2649,8 +2666,11 @@ function renderLogsTable(logs) {
     return;
   }
 
+  // 性能保护：仅渲染最新 50 条日志，避免大量 DOM 导致界面卡顿
+  var displayLogs = logs.slice(0, 50);
+
   // 桌面端表格行
-  var rowsHtml = logs.map(function(item) {
+  var rowsHtml = displayLogs.map(function(item) {
     var isSuccess = item.status >= 200 && item.status < 300;
     var statusBadgeClass = isSuccess ? 'bd-on' : 'bd-off';
     var statusText = item.status || 500;
@@ -2678,7 +2698,7 @@ function renderLogsTable(logs) {
   }).join('');
 
   // 移动端卡片流
-  var mobileCardsHtml = logs.map(function(item) {
+  var mobileCardsHtml = displayLogs.map(function(item) {
     var isSuccess = item.status >= 200 && item.status < 300;
     var statusBadgeClass = isSuccess ? 'bd-on' : 'bd-off';
     var statusText = item.status || 500;
@@ -2991,6 +3011,52 @@ async function loadCustomRoutes() {
   }
 }
 
+function checkRouteCategoryMatches(r) {
+  var isTier1 = (r.targetProviderId === 'tier1' || r.targetModelId === 'auto');
+  var isOpenclawTier = (r.targetProviderId === 'tier_openclaw' || r.targetModelId === 'openclaw');
+  var isDrawingTier = (r.targetProviderId === 'tier_drawing' || r.targetModelId === 'drawing');
+
+  var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+  var mObj = pObj && pObj.models ? pObj.models.find(function(m) { return m.id === r.targetModelId; }) : null;
+
+  var sModel = (r.sourceModel || '').toLowerCase();
+  var tModel = (r.targetModelId || '').toLowerCase();
+
+  var isDraw = isDrawingTier ||
+    (mObj && mObj.category === '绘图') ||
+    /dall-e|flux|stable-diffusion|sdxl|midjourney|image|draw|recraft|cogview|imagen/i.test(sModel) ||
+    /dall-e|flux|stable-diffusion|sdxl|midjourney|image|draw|recraft|cogview|imagen/i.test(tModel);
+
+  var isOpenclaw = isOpenclawTier ||
+    /openclaw|agent|tool/i.test(sModel) ||
+    (mObj && mObj.openclawTested && mObj.openclawCompatible) ||
+    (mObj && /claude|gpt|gemini|deepseek|qwen|coder/i.test(mObj.id)) ||
+    isTier1;
+
+  var isTier1Match = isTier1;
+  var isText = (!isDraw) || (mObj && mObj.category === '文本') || isTier1;
+
+  return {
+    openclaw: !!isOpenclaw,
+    tier1: !!isTier1Match,
+    text: !!isText,
+    image: !!isDraw
+  };
+}
+
+function updateCustomRoutesFilterCounts(total, openclaw, tier1, text, image) {
+  var elAll = document.getElementById('cr-cnt-all');
+  var elOc = document.getElementById('cr-cnt-openclaw');
+  var elT1 = document.getElementById('cr-cnt-tier1');
+  var elTxt = document.getElementById('cr-cnt-text');
+  var elImg = document.getElementById('cr-cnt-image');
+  if (elAll) elAll.innerText = total;
+  if (elOc) elOc.innerText = openclaw;
+  if (elT1) elT1.innerText = tier1;
+  if (elTxt) elTxt.innerText = text;
+  if (elImg) elImg.innerText = image;
+}
+
 function filterCustomRoutesTable(btn, filterType) {
   customRoutesActiveFilter = filterType;
   var bar = document.getElementById('custom-routes-filter-bar');
@@ -3011,54 +3077,83 @@ function renderCustomRoutesTable() {
   var tbody = document.getElementById('custom-routes-tbody');
   if (!tbody) return;
   if (!customRoutesData || customRoutesData.length === 0) {
+    updateCustomRoutesFilterCounts(0, 0, 0, 0, 0);
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:24px;">暂无自定义指定规则。点击右上角“+ 添加指定规则”可指定将特定模型名（如 openclaw/auto）转发到指定模型或第一梯队池。</td></tr>';
     return;
   }
 
+  // 计算各类规则数量
+  var cntOpenclaw = 0, cntTier1 = 0, cntText = 0, cntImage = 0;
+  customRoutesData.forEach(function(r) {
+    var cat = checkRouteCategoryMatches(r);
+    if (cat.openclaw) cntOpenclaw++;
+    if (cat.tier1) cntTier1++;
+    if (cat.text) cntText++;
+    if (cat.image) cntImage++;
+  });
+  updateCustomRoutesFilterCounts(customRoutesData.length, cntOpenclaw, cntTier1, cntText, cntImage);
+
   var filteredList = customRoutesData.filter(function(r) {
     if (customRoutesActiveFilter === 'all') return true;
-    var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
-    if (customRoutesActiveFilter === 'tier1') return isTier1;
-
-    var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
-    var mObj = pObj && pObj.models ? pObj.models.find(function(m) { return m.id === r.targetModelId; }) : null;
-
-    if (customRoutesActiveFilter === 'openclaw') {
-      return (r.sourceModel && r.sourceModel.toLowerCase().includes('openclaw')) ||
-        (mObj && mObj.openclawTested && mObj.openclawCompatible) ||
-        isTier1;
-    }
-    if (customRoutesActiveFilter === 'text') {
-      return mObj ? (mObj.category === '文本' || !mObj.category) : (!isTier1);
-    }
-    if (customRoutesActiveFilter === 'image') {
-      return mObj && mObj.category === '绘图';
-    }
+    var cat = checkRouteCategoryMatches(r);
+    if (customRoutesActiveFilter === 'openclaw') return cat.openclaw;
+    if (customRoutesActiveFilter === 'tier1') return cat.tier1;
+    if (customRoutesActiveFilter === 'text') return cat.text;
+    if (customRoutesActiveFilter === 'image') return cat.image;
     return true;
   });
 
   if (filteredList.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:20px;">当前标签筛选下无匹配规则</td></tr>';
+    var tipMap = {
+      openclaw: '当前暂无针对 OpenClaw 智能体的指定路由规则',
+      tier1: '当前暂无转发至第一梯队的指定路由规则',
+      text: '当前暂无针对文本模型的指定路由规则',
+      image: '当前暂无针对绘图模型的指定路由规则'
+    };
+    var tip = tipMap[customRoutesActiveFilter] || '当前标签筛选下无匹配规则';
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:24px;">' +
+      '<div style="margin-bottom:6px;"><i class="fas fa-filter" style="color:var(--color-muted);font-size:1.2rem;"></i></div>' +
+      tip + '。您可以点击右上角“+ 添加指定规则”快速添加。' +
+      '</td></tr>';
     return;
   }
 
   tbody.innerHTML = filteredList.map(function(r) {
     var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
-    var pName = isTier1 ? '🌟 第一梯队自动调度池' : r.targetProviderId;
-    var mName = isTier1 ? 'Tier 1 健康模型自动选优' : r.targetModelId;
-    var pObj = null;
-    var mObj = null;
-    if (!isTier1) {
-      pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+    var isOpenclawTier = r.targetProviderId === 'tier_openclaw' || r.targetModelId === 'openclaw';
+    var isDrawingTier = r.targetProviderId === 'tier_drawing' || r.targetModelId === 'drawing';
+
+    var pName = r.targetProviderId;
+    var mName = r.targetModelId;
+    var targetBadge = '';
+
+    if (isOpenclawTier) {
+      pName = '🟣 OpenClaw 专属调度池';
+      mName = 'OpenClaw Tier (5 席智能体池)';
+      targetBadge = '<span class="openclaw-badge openclaw-badge--ok" style="background:#ede9fe;color:#6d28d9;border-color:#ddd6fe;margin-left:4px;"><i class="fas fa-robot"></i> OpenClaw池</span>';
+    } else if (isDrawingTier) {
+      pName = '🎨 绘图专属调度池';
+      mName = 'Drawing Tier (5 席图像模型池)';
+      targetBadge = '<span class="openclaw-badge openclaw-badge--ok" style="background:#fce7f3;color:#be185d;border-color:#fbcfe8;margin-left:4px;"><i class="fas fa-palette"></i> 绘图池</span>';
+    } else if (isTier1) {
+      pName = '🌟 第一梯队自动调度池';
+      mName = 'Tier 1 黄金池 (9 席自动选优)';
+      targetBadge = '<span class="openclaw-badge openclaw-badge--ok" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;margin-left:4px;"><i class="fas fa-bolt"></i> 第一梯队池</span>';
+    } else {
+      var pObj = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
       if (pObj) {
         pName = pObj.name + ' (' + pObj.id + ')';
-        if (pObj.models) mObj = pObj.models.find(function(m) { return m.id === r.targetModelId; });
       }
+      targetBadge = '<span style="color:#0f766e;font-weight:600;font-size:0.75rem;margin-left:4px;"><i class="fas fa-crosshairs"></i> 严格指定</span>';
     }
 
-    var targetBadge = isTier1
-      ? '<span class="openclaw-badge openclaw-badge--ok" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;margin-left:4px;"><i class="fas fa-bolt"></i> 第一梯队池</span>'
-      : '<span style="color:#0f766e;font-weight:600;font-size:0.75rem;margin-left:4px;"><i class="fas fa-crosshairs"></i> 严格指定</span>';
+    var mObj = null;
+    if (!isTier1 && !isOpenclawTier && !isDrawingTier) {
+      var pObjFind = draftProviders.find(function(p) { return p.id === r.targetProviderId; });
+      if (pObjFind && pObjFind.models) {
+        mObj = pObjFind.models.find(function(m) { return m.id === r.targetModelId; });
+      }
+    }
 
     var tagBadges = '';
     if (mObj) {
@@ -3069,7 +3164,7 @@ function renderCustomRoutesTable() {
       }
       if (mObj.category === '绘图') {
         tagBadges += '<span style="padding:1px 5px;font-size:10px;border-radius:3px;background:oklch(96% 0.04 60);border:1px solid oklch(88% 0.08 60);color:oklch(40% 0.12 60);margin-left:4px;"><i class="fas fa-palette"></i> 绘图</span>';
-      } else if (mObj.category === '文本') {
+      } else {
         tagBadges += '<span style="padding:1px 5px;font-size:10px;border-radius:3px;background:var(--color-paper-2);border:1px solid var(--color-rule);color:var(--color-muted);margin-left:4px;"><i class="fas fa-comment-dots"></i> 文本</span>';
       }
     }
@@ -3126,12 +3221,26 @@ function renderCustomRouteQuickPicker(activeTag, selectedPid, selectedMid) {
   });
 
   var html = '';
-  // 如果处于全部或第一梯队池标签，首项提供第一梯队池选项
+  // 如果处于全部或特定标签，首项提供调度池选项
   if (activeTag === 'all' || activeTag === 'tier1') {
     var isTier1Selected = selectedPid === 'tier1' || selectedMid === 'auto';
     html += '<div class="route-model-pick-card ' + (isTier1Selected ? 'is-selected' : '') + '" data-pid="tier1" data-mid="auto" onclick="onPickCardClick(this)">' +
-      '<div class="rm-title" style="color:#0284c7;"><i class="fas fa-bolt" style="color:#eab308;"></i> 🌟 第一梯队自动调度池</div>' +
+      '<div class="rm-title" style="color:#0284c7;"><i class="fas fa-bolt" style="color:#eab308;"></i> 🌟 第一梯队调度池</div>' +
       '<div class="rm-meta"><span>动态选优</span><span class="openclaw-badge openclaw-badge--ok" style="background:#e0f2fe;color:#0369a1;border-color:#bae6fd;padding:0 4px;font-size:10px;">Tier 1</span></div>' +
+    '</div>';
+  }
+  if (activeTag === 'all' || activeTag === 'openclaw') {
+    var isOcSelected = selectedPid === 'tier_openclaw' || selectedMid === 'openclaw';
+    html += '<div class="route-model-pick-card ' + (isOcSelected ? 'is-selected' : '') + '" data-pid="tier_openclaw" data-mid="openclaw" onclick="onPickCardClick(this)">' +
+      '<div class="rm-title" style="color:#7c3aed;"><i class="fas fa-robot" style="color:#8b5cf6;"></i> 🟣 OpenClaw 专属池</div>' +
+      '<div class="rm-meta"><span>智能体</span><span class="openclaw-badge openclaw-badge--ok" style="background:#ede9fe;color:#6d28d9;border-color:#ddd6fe;padding:0 4px;font-size:10px;">OpenClaw</span></div>' +
+    '</div>';
+  }
+  if (activeTag === 'all' || activeTag === 'image') {
+    var isDrawSelected = selectedPid === 'tier_drawing' || selectedMid === 'drawing';
+    html += '<div class="route-model-pick-card ' + (isDrawSelected ? 'is-selected' : '') + '" data-pid="tier_drawing" data-mid="drawing" onclick="onPickCardClick(this)">' +
+      '<div class="rm-title" style="color:#be185d;"><i class="fas fa-palette" style="color:#ec4899;"></i> 🎨 绘图专属池</div>' +
+      '<div class="rm-meta"><span>图像模型</span><span class="openclaw-badge openclaw-badge--ok" style="background:#fce7f3;color:#be185d;border-color:#fbcfe8;padding:0 4px;font-size:10px;">Drawing</span></div>' +
     '</div>';
   }
 
@@ -3210,7 +3319,11 @@ function onSelectModelFromPicker(pid, mid) {
   // 自动贴心填充/建议请求模型名称
   if (sourceInput && !sourceInput.value.trim()) {
     if (pid === 'tier1' || mid === 'auto') {
+      sourceInput.value = 'auto/auto';
+    } else if (pid === 'tier_openclaw' || mid === 'openclaw') {
       sourceInput.value = 'openclaw/auto';
+    } else if (pid === 'tier_drawing' || mid === 'drawing') {
+      sourceInput.value = 'drawing/auto';
     } else if (modalActiveTag === 'openclaw' || mid.toLowerCase().includes('openclaw')) {
       sourceInput.value = 'openclaw/auto';
     } else {
@@ -3218,7 +3331,10 @@ function onSelectModelFromPicker(pid, mid) {
     }
   }
 
-  toast('已选定目标：' + (pid === 'tier1' ? '🌟 第一梯队调度池' : (pid + ' / ' + mid)), 'info');
+  var poolTitle = '🌟 第一梯队调度池';
+  if (pid === 'tier_openclaw') poolTitle = '🟣 OpenClaw 专属池';
+  if (pid === 'tier_drawing') poolTitle = '🎨 绘图专属池';
+  toast('已选定目标：' + (pid.startsWith('tier') ? poolTitle : (pid + ' / ' + mid)), 'info');
 }
 
 function openAddCustomRouteModal() {
@@ -3246,7 +3362,11 @@ function openAddCustomRouteModal() {
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 (匹配项) *</label><input type="text" id="cr-source" placeholder="例如 openclaw/auto 或 deepseek-chat" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
     '<div class="grid-2-gap6" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
       '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
-        '<option value="tier1" selected>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+        '<optgroup label="智能调度池 (自动选优与故障自愈)">' +
+          '<option value="tier1" selected>🌟 第一梯队池 (Tier 1 通用黄金池)</option>' +
+          '<option value="tier_openclaw">🟣 OpenClaw 专属池 (智能体/Tools 优选)</option>' +
+          '<option value="tier_drawing">🎨 绘图专属池 (图像生成模型优选)</option>' +
+        '</optgroup>' +
         '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
         draftProviders.map(function(p) { return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>'; }).join('') +
         '</optgroup>' +
@@ -3270,6 +3390,14 @@ function updateCustomRouteModelOptions(selectedModelId) {
   }
   if (pid === 'tier1') {
     mSelect.innerHTML = '<option value="auto" selected>🌟 第一梯队池自动选优 (9席健康模型智能调度)</option>';
+    return;
+  }
+  if (pid === 'tier_openclaw') {
+    mSelect.innerHTML = '<option value="openclaw" selected>🟣 OpenClaw 专属池自动选优 (5席智能体模型)</option>';
+    return;
+  }
+  if (pid === 'tier_drawing') {
+    mSelect.innerHTML = '<option value="drawing" selected>🎨 绘图专属池自动选优 (5席图像模型)</option>';
     return;
   }
   var p = draftProviders.find(function(item) { return item.id === pid; });
@@ -3313,6 +3441,10 @@ function editCustomRouteBtn(btn) {
   currentEditingRouteId = id;
   modalActiveTag = 'all';
   var isTier1 = r.targetProviderId === 'tier1' || r.targetModelId === 'auto';
+  var isOpenclawTier = r.targetProviderId === 'tier_openclaw' || r.targetModelId === 'openclaw';
+  var isDrawingTier = r.targetProviderId === 'tier_drawing' || r.targetModelId === 'drawing';
+  var isSpecialTier = isTier1 || isOpenclawTier || isDrawingTier;
+
   var allModels = getAllFlattenedModels();
   var openclawCount = allModels.filter(function(m) { return m.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(m.modelId); }).length;
   var textCount = allModels.filter(function(m) { return m.category === '文本'; }).length;
@@ -3335,10 +3467,14 @@ function editCustomRouteBtn(btn) {
     '<div class="fg mb-3"><label for="cr-source">客户端请求模型名称 (匹配项) *</label><input type="text" id="cr-source" value="' + escapeHtml(r.sourceModel) + '" class="fx1" style="width:100%;box-sizing:border-box;"></div>' +
     '<div class="grid-2-gap6" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">' +
       '<div class="fg mb-3"><label for="cr-provider">目标提供商 *</label><select id="cr-provider" onchange="updateCustomRouteModelOptions()" class="select-sm" style="width:100%;">' +
-        '<option value="tier1" ' + (isTier1 ? 'selected' : '') + '>🌟 第一梯队池 (Tier 1 自动选优调度)</option>' +
+        '<optgroup label="智能调度池 (自动选优与故障自愈)">' +
+          '<option value="tier1" ' + (isTier1 ? 'selected' : '') + '>🌟 第一梯队池 (Tier 1 通用黄金池)</option>' +
+          '<option value="tier_openclaw" ' + (isOpenclawTier ? 'selected' : '') + '>🟣 OpenClaw 专属池 (智能体/Tools 优选)</option>' +
+          '<option value="tier_drawing" ' + (isDrawingTier ? 'selected' : '') + '>🎨 绘图专属池 (图像生成模型优选)</option>' +
+        '</optgroup>' +
         '<optgroup label="指定特定提供商具体模型（绝不切换其他模型）">' +
         draftProviders.map(function(p) {
-          var isSel = !isTier1 && p.id === r.targetProviderId ? 'selected' : '';
+          var isSel = !isSpecialTier && p.id === r.targetProviderId ? 'selected' : '';
           return '<option value="' + escapeHtml(p.id) + '" ' + isSel + '>' + escapeHtml(p.name) + ' (' + escapeHtml(p.id) + ')</option>';
         }).join('') +
         '</optgroup>' +
@@ -3347,8 +3483,8 @@ function editCustomRouteBtn(btn) {
     '</div>' +
     '<div class="fa" style="margin-top:16px;"><button class="btn btn-s" onclick="closeM()">取消</button><button class="btn btn-p" onclick="saveCustomRouteFromModal()">保存更改</button></div>';
   showM(modalHtml);
-  renderCustomRouteQuickPicker('all', isTier1 ? 'tier1' : r.targetProviderId, isTier1 ? 'auto' : r.targetModelId);
-  updateCustomRouteModelOptions(isTier1 ? 'auto' : r.targetModelId);
+  renderCustomRouteQuickPicker('all', r.targetProviderId, r.targetModelId);
+  updateCustomRouteModelOptions(r.targetModelId);
 }
 
 async function testCustomRouteLatencyBtn(btn) {
@@ -3458,7 +3594,6 @@ async function saveCustomRoutesToServer() {
   }
 }
 
-fetchLogs();
 loadCustomRoutes();
 </script>
 </body></html>`)

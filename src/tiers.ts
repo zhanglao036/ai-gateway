@@ -1036,18 +1036,12 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
 
 /**
  * 确保梯队数据就绪（初始化/校验）
+ * 平时纯读取与元数据校验，绝不进行耗时的外部网络 HTTP 探测，保障毫秒级瞬时响应。
  */
 export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   let existing = await getTierStorage(env)
-  if (existing && Array.isArray(existing.tier1) && existing.tier1.length > 0) {
-    // 存在历史 Tier 1 数据
-    const today = new Date().toISOString().split('T')[0]
-    if (existing.lastProbeDate !== today) {
-      // 跨日或已有前一日历史数据：以此作为基底，对梯队内模型执行一轮轻量探测并补位
-      existing = await validateAndRebuildHistoryTier1(env, existing)
-    }
-
-    // 重点：同步并清理系统中的全部可用/已删除/已停用模型，防止新模型或被删模型导致无法补位
+  if (existing && Array.isArray(existing.tier1)) {
+    // 同步并清理系统中的全部可用/已删除/已停用模型，防止新模型或被删模型导致无法补位
     const allModels = await getAllAvailableModels(env)
     const availableSet = new Set(allModels.map((item) => item.fullId))
 
@@ -1061,8 +1055,8 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       changed = true
     }
 
-    const prevTier2Length = existing.tier2.length
-    existing.tier2 = existing.tier2.filter((m) => availableSet.has(m.fullId))
+    const prevTier2Length = (existing.tier2 || []).length
+    existing.tier2 = (existing.tier2 || []).filter((m) => availableSet.has(m.fullId))
     if (existing.tier2.length !== prevTier2Length) {
       changed = true
     }
@@ -1070,10 +1064,10 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
     existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
 
-    // 2. 将新增的可用模型实时同步加入第二梯队
+    // 2. 将新增的可用模型实时同步加入第二梯队待命
     for (const item of allModels) {
       const isInTier1 = existing.tier1.some((x) => x.fullId === item.fullId)
-      const isInTier2 = existing.tier2.some((x) => x.fullId === item.fullId)
+      const isInTier2 = (existing.tier2 || []).some((x) => x.fullId === item.fullId)
       if (!isInTier1 && !isInTier2) {
         existing.tier2.push({
           providerId: item.provider.id,
@@ -1085,37 +1079,58 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 自动补位：
-    // 1. 第一梯队满编保障 (9 席)
-    if (existing.tier1.length < TIER_1_MAX_SLOTS) {
-      existing = await backfillTier1FromTier2(env, existing)
-      changed = true
-    }
-
-    // 2. OpenClaw 专属梯队满编保障 (5 席)
-    existing.tierOpenclaw = existing.tierOpenclaw || []
-    if (existing.tierOpenclaw.length < TIER_OPENCLAW_MAX_SLOTS) {
-      existing = await backfillOpenclawTier(env, existing)
-      changed = true
-    }
-
-    // 3. 绘图专属梯队满编保障 (5 席)
-    existing.tierDrawing = existing.tierDrawing || []
-    if (existing.tierDrawing.length < TIER_DRAWING_MAX_SLOTS) {
-      existing = await backfillDrawingTier(env, existing)
-      changed = true
-    }
-
     if (changed) {
       await saveTierStorage(env, existing)
     }
     return existing
   }
 
-  // 无历史梯队数据：启动初始化交叉轮询海选
-  const fresh = await runInitCrossProbe(env)
-  await backfillOpenclawTier(env, fresh)
-  await backfillDrawingTier(env, fresh)
+  // 没有任何历史梯队数据：采用轻量静态分配（前9个可用模型进tier1，其余进tier2），不发任何外部HTTP测试
+  const allModels = await getAllAvailableModels(env)
+  const now = Date.now()
+  const initialTier1 = allModels.slice(0, TIER_1_MAX_SLOTS).map((item) => ({
+    providerId: item.provider.id,
+    modelId: item.modelId,
+    fullId: item.fullId,
+    addedAt: now,
+  }))
+  const initialTier2 = allModels.slice(TIER_1_MAX_SLOTS).map((item) => ({
+    providerId: item.provider.id,
+    modelId: item.modelId,
+    fullId: item.fullId,
+    addedAt: now,
+  }))
+  const initialOpenclaw = allModels.filter((item) => {
+    const m = item.provider.models.find((x) => x.id === item.modelId)
+    return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
+  }).slice(0, TIER_OPENCLAW_MAX_SLOTS).map((item) => ({
+    providerId: item.provider.id,
+    modelId: item.modelId,
+    fullId: item.fullId,
+    addedAt: now,
+  }))
+  const initialDrawing = allModels.filter((item) => {
+    const m = item.provider.models.find((x) => x.id === item.modelId)
+    return m?.category === '绘图'
+  }).slice(0, TIER_DRAWING_MAX_SLOTS).map((item) => ({
+    providerId: item.provider.id,
+    modelId: item.modelId,
+    fullId: item.fullId,
+    addedAt: now,
+  }))
+
+  const fresh: TierStorage = {
+    tier1: initialTier1,
+    tier2: initialTier2,
+    tierOpenclaw: initialOpenclaw,
+    tierDrawing: initialDrawing,
+    lastProbeDate: new Date().toISOString().split('T')[0],
+    probeStats: {},
+    businessStats: {},
+    updatedAt: new Date().toISOString(),
+    modelCursors: {},
+  }
+  await saveTierStorage(env, fresh)
   return fresh
 }
 
@@ -1162,7 +1177,8 @@ export async function selectAutoModel(
   // 1. OpenClaw 专属梯队池选择
   if (poolType === 'openclaw') {
     let pool = (storage.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
-    if (pool.length === 0 || pool.length < TIER_OPENCLAW_MAX_SLOTS) {
+    // 只有在池子完全为空时才紧急补位，平时直接使用池内就绪模型
+    if (pool.length === 0) {
       const backfilled = await backfillOpenclawTier(env, storage)
       pool = (backfilled.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     }
@@ -1188,7 +1204,8 @@ export async function selectAutoModel(
   // 2. 绘图专属梯队池选择
   if (poolType === 'drawing') {
     let pool = (storage.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
-    if (pool.length === 0 || pool.length < TIER_DRAWING_MAX_SLOTS) {
+    // 只有在池子完全为空时才紧急补位，平时直接使用池内就绪模型
+    if (pool.length === 0) {
       const backfilled = await backfillDrawingTier(env, storage)
       pool = (backfilled.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
     }
@@ -1222,8 +1239,8 @@ export async function selectAutoModel(
   // 3. 通用第一梯队池 (Tier 1) 选择
   let activeTier1 = storage.tier1.filter((m) => modelMap.has(m.fullId))
 
-  if (activeTier1.length === 0 || storage.tier1.length < TIER_1_MAX_SLOTS) {
-    // 若第一梯队全部模型不可用，或第一梯队不满 9 席，尝试补位
+  // 只有在第一梯队完全没有可用模型时才紧急补位，平时直接使用池内就绪模型
+  if (activeTier1.length === 0) {
     const backfilled = await backfillTier1FromTier2(env, storage)
     activeTier1 = backfilled.tier1.filter((m) => modelMap.has(m.fullId))
   }
