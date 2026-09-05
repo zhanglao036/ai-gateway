@@ -222,25 +222,18 @@ interface KeyHealth {
 }
 type HealthMap = Record<string, KeyHealth>
 
-const HEALTH_KEY = (providerId: string) => KV_KEYS.KEY_HEALTH_PREFIX + providerId
+const memoryHealthMap = new Map<string, HealthMap>()
 
 async function readHealth(env: Env, providerId: string): Promise<HealthMap> {
-  const raw = await kvGet(env, HEALTH_KEY(providerId))
-  return raw ? JSON.parse(raw) : {}
+  return memoryHealthMap.get(providerId) || {}
 }
 
 async function writeHealth(env: Env, providerId: string, health: HealthMap): Promise<void> {
-  // 只保存有失败记录的 key，避免 KV 膨胀
   const filtered: HealthMap = {}
   for (const [k, v] of Object.entries(health)) {
     if (v.failures > 0) filtered[k] = v
   }
-  if (Object.keys(filtered).length > 0) {
-    await kvPut(env, HEALTH_KEY(providerId), JSON.stringify(filtered))
-  } else {
-    // 全部健康，删除 KV 条目
-    await kvDelete(env, HEALTH_KEY(providerId)).catch(() => {})
-  }
+  memoryHealthMap.set(providerId, filtered)
 }
 
 /** 解析模型 ID，如 "deepseek/deepseek-chat" → { providerId, modelId } */

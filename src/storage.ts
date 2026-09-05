@@ -382,94 +382,50 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 =====
+// ===== 网关请求日志管理 (纯内存高速队列，0 KV 写入消耗) =====
 
-let logQueue: RequestLog[] = []
-let logFlushTimer: ReturnType<typeof setTimeout> | null = null
+const MAX_MEMORY_LOGS = 150
+const inMemoryLogs: RequestLog[] = []
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
-  const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
-  const storedLogs: RequestLog[] = kvData ? JSON.parse(kvData) : []
-  const combined = [...logQueue, ...storedLogs]
-  const uniqueMap = new Map<string, RequestLog>()
-  for (const item of combined) {
-    if (item && item.id && !uniqueMap.has(item.id)) {
-      uniqueMap.set(item.id, item)
-    }
+  // 优先直接返回内存中的实时请求日志
+  if (inMemoryLogs.length > 0) {
+    return inMemoryLogs.slice(0, 100)
   }
-  return Array.from(uniqueMap.values()).slice(0, 100)
+  // 仅在首次启动且内存为空时，尝试从 KV 读取一次历史日志缓存填充内存
+  try {
+    const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
+    if (kvData) {
+      const storedLogs: RequestLog[] = JSON.parse(kvData)
+      if (Array.isArray(storedLogs)) {
+        inMemoryLogs.push(...storedLogs.slice(0, MAX_MEMORY_LOGS))
+      }
+    }
+  } catch {}
+  return inMemoryLogs.slice(0, 100)
 }
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    const config = await getLogConfig(env)
-
-    // 所有日志均完整推入内存队列（前台 getLogs 随时读取，一条不漏）
-    logQueue.unshift(log)
-    if (logQueue.length > 100) logQueue.length = 100
-
-    // 如果是异常失败日志（状态码>=400或包含错误原因），立即持久化落盘，确保关键故障日志永久保存
-    const isError = log.status >= 400 || !!log.error
-    if (isError) {
-      await flushPendingLogs(env)
-      return
-    }
-
-    // 正常调用日志：达到批量阈值（如5条）立即落盘，未达阈值则定时落盘，避免高频穿透写 KV
-    const maxCount = config.bufferMaxCount || 5
-    if (logQueue.length >= maxCount) {
-      await flushPendingLogs(env)
-    } else {
-      scheduleLogFlush(env, (config.flushIntervalSeconds || 15) * 1000)
+    // 纯内存维护滚动队列，零网络耗时、永远不消耗 KV 写入额度！
+    inMemoryLogs.unshift(log)
+    if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+      inMemoryLogs.length = MAX_MEMORY_LOGS
     }
   } catch (err) {
-    console.warn('[storage] addRequestLog 异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+    console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
   }
-}
-
-function scheduleLogFlush(env: Env, intervalMs: number = LOG_FLUSH_INTERVAL_MS) {
-  if (logFlushTimer) return
-  logFlushTimer = setTimeout(() => {
-    logFlushTimer = null
-    flushPendingLogs(env).catch(console.error)
-  }, intervalMs)
 }
 
 export async function flushPendingLogs(env: Env): Promise<void> {
-  if (logFlushTimer) {
-    clearTimeout(logFlushTimer)
-    logFlushTimer = null
-  }
-  if (logQueue.length === 0) return
-
-  const itemsToFlush = [...logQueue]
-  logQueue = []
-
-  try {
-    const rawKV = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
-    const existing: RequestLog[] = rawKV ? JSON.parse(rawKV) : []
-    const merged = [...itemsToFlush, ...existing]
-    const uniqueMap = new Map<string, RequestLog>()
-    for (const item of merged) {
-      if (item && item.id && !uniqueMap.has(item.id)) {
-        uniqueMap.set(item.id, item)
-      }
-    }
-    const finalLogs = Array.from(uniqueMap.values()).slice(0, 100)
-    await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(finalLogs))
-  } catch (err) {
-    console.error('[storage] 批量落盘日志失败:', err)
-    logQueue = [...itemsToFlush, ...logQueue]
-  }
+  // 保留接口兼容，不再主动向 KV 刷写普通日志
 }
 
 export async function clearLogs(env: Env): Promise<void> {
-  logQueue = []
-  if (logFlushTimer) {
-    clearTimeout(logFlushTimer)
-    logFlushTimer = null
-  }
-  await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
+  inMemoryLogs.length = 0
+  try {
+    await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
+  } catch {}
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {
@@ -485,5 +441,58 @@ export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]
 
 export async function saveCustomModelRoutes(env: Env, routes: CustomModelRoute[]): Promise<void> {
   await kvPut(env, KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(routes))
+}
+
+/**
+ * 核心统一保存：将所有配置（提供商、转发Key、指定模型路由）打包合流，一次性落盘
+ */
+export async function saveAllUnifiedConfig(
+  env: Env,
+  data: {
+    providers?: Provider[]
+    proxyKeys?: ProxyKey[]
+    customRoutes?: CustomModelRoute[]
+  }
+): Promise<void> {
+  if (Array.isArray(data.providers)) {
+    const cleaned = data.providers.map((p) => {
+      const seenKeys = new Set<string>()
+      const uniqueKeys = (p.apiKeys || [])
+        .filter((k) => {
+          const trimmed = (k.key || '').trim()
+          if (!trimmed || seenKeys.has(trimmed)) return false
+          seenKeys.add(trimmed)
+          return true
+        })
+        .map((k) => ({ key: k.key.trim(), enabled: k.enabled !== false }))
+
+      const seenModels = new Set<string>()
+      const uniqueModels = (p.models || []).filter((m) => {
+        const trimmed = (m.id || '').trim()
+        if (!trimmed || seenModels.has(trimmed)) return false
+        seenModels.add(trimmed)
+        return true
+      })
+
+      return {
+        ...p,
+        baseUrl: (p.baseUrl || '').trim().replace(/\/$/, ''),
+        apiKeys: uniqueKeys,
+        models: uniqueModels,
+      }
+    })
+    memoryCache.set(KV_KEYS.PROVIDERS, { value: JSON.stringify(cleaned) })
+    await getKV(env).put(KV_KEYS.PROVIDERS, JSON.stringify(cleaned))
+  }
+
+  if (Array.isArray(data.proxyKeys)) {
+    memoryCache.set(KV_KEYS.PROXY_KEYS, { value: JSON.stringify(data.proxyKeys) })
+    await getKV(env).put(KV_KEYS.PROXY_KEYS, JSON.stringify(data.proxyKeys))
+  }
+
+  if (Array.isArray(data.customRoutes)) {
+    memoryCache.set(KV_KEYS.CUSTOM_MODEL_ROUTES, { value: JSON.stringify(data.customRoutes) })
+    await getKV(env).put(KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(data.customRoutes))
+  }
 }
 

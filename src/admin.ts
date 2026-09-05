@@ -19,6 +19,7 @@ import {
   saveLogConfig,
   getCustomModelRoutes,
   saveCustomModelRoutes,
+  saveAllUnifiedConfig,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
@@ -423,17 +424,21 @@ export async function handleUpdateProxyKey(c: Context<{ Bindings: Env }>) {
  */
 export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
   try {
-    const body = await c.req.json<{ providers?: Provider[]; proxyKeys?: import('./types').ProxyKey[] }>()
-    if (!body || !Array.isArray(body.providers) || !Array.isArray(body.proxyKeys)) {
-      return c.json<ApiResponse>({ success: false, message: '请求格式错误：providers 与 proxyKeys 必须为数组' }, 400)
-    }
+    const body = await c.req.json<{
+      providers?: Provider[]
+      proxyKeys?: import('./types').ProxyKey[]
+      customRoutes?: import('./types').CustomModelRoute[]
+    }>()
 
-    await setProviders(c.env, body.providers)
-    await setProxyKeys(c.env, body.proxyKeys)
+    await saveAllUnifiedConfig(c.env, {
+      providers: body?.providers,
+      proxyKeys: body?.proxyKeys,
+      customRoutes: body?.customRoutes,
+    })
 
     return c.json<ApiResponse>({
       success: true,
-      message: '全部配置已成功批量写入 KV 持久化存储！',
+      message: '全部配置（提供商、转发Key、指定路由）已一次性成功保存至 KV！',
     })
   } catch (err) {
     return c.json<ApiResponse>({

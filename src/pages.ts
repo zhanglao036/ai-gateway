@@ -533,33 +533,23 @@ ${renderSiteFooter(SITE_CONFIG.title)}
 
 <script>
 (function () {
-  // 自动从 localStorage 恢复会话并向后端轻量校验有效性，杜绝“假登录”
   var savedToken = localStorage.getItem('admin_token');
   if (savedToken) {
     if (!document.cookie.includes('session_id=')) {
       document.cookie = "session_id=" + savedToken + "; path=/; max-age=86400; SameSite=None; Secure";
     }
-    // 异步探测是否真正有效
-    fetch('/admin/api/auth-check')
-      .then(function(res) { return res.json(); })
-      .then(function(data) {
-        var nav = document.getElementById('topbar-actions');
-        if (data && data.loggedIn) {
-          if (nav && !nav.innerHTML.includes('管理控制台')) {
-            nav.innerHTML = '<a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a>' +
-                            '<a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem(&quot;admin_token&quot;)"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>';
-          }
-        } else {
-          // Token 实际已失效，自动清除残留，还原登录按钮
-          localStorage.removeItem('admin_token');
-          document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
-          if (nav && nav.innerHTML.includes('管理控制台')) {
-            nav.innerHTML = '<a href="/admin/login" class="btn btn-p"><i class="fas fa-sign-in-alt" aria-hidden="true"></i>管理员登录</a>';
-          }
-        }
-      })
-      .catch(function() {});
   }
+  // 异步探测会话是否有效，失效则立刻跳往登录页
+  fetch('/admin/api/auth-check')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      if (!data || !data.loggedIn) {
+        localStorage.removeItem('admin_token');
+        document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
+        window.location.href = '/admin/login';
+      }
+    })
+    .catch(function() {});
 
   // 复制控制
   var copyStatus = document.getElementById('copy-status');
@@ -705,11 +695,11 @@ ${H('登录')}
 <body class="site-page auth-page">
 <header class="topbar topbar--auth">
   <div class="shell topbar__inner">
-    <a class="brand" href="/" aria-label="AI Gateway 首页">
+    <div class="brand" aria-label="AI Gateway 访问控制">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-    </a>
-    <a href="/" class="btn btn-gh"><i class="fas fa-arrow-left" aria-hidden="true"></i>返回首页</a>
+      <span class="brand__descriptor">CONTROL PLANE</span>
+    </div>
   </div>
 </header>
 
@@ -1219,17 +1209,19 @@ async function saveAllConfig() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         providers: draftProviders,
-        proxyKeys: draftProxyKeys
+        proxyKeys: draftProxyKeys,
+        customRoutes: customRoutesData,
       })
     });
 
     var data = await resp.json();
 
     if (data && data.success) {
-      toast('保存成功！所有配置已一次性批量落盘写入 KV。', 'success');
+      toast('保存成功！所有提供商、Key及指定路由配置已合包一次性写入 KV。', 'success');
       markDirty(false);
       renderProviderList();
       renderProxyKeyList();
+      renderCustomRoutesTable();
     } else {
       var errMsg = (data && data.message) ? data.message : '未知系统错误';
       aM('保存失败：' + errMsg, 'error');
@@ -2859,71 +2851,62 @@ async function showImportModal(providerId) {
   var text = await pM('导入模型 ID 列表（支持换行、逗号或分号分隔，自动剔除重复项并自动分类）：');
   if (!text) return;
 
-  try {
-    var res = await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/import-models', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: text })
-    });
-    var data = await res.json();
-    if (data.success && data.data && data.data.models) {
-      p.models = data.data.models;
-      markDirty(true);
-      renderProviderList();
-      toast(data.message || '导入成功', 'success');
-    } else {
-      aM('导入失败：' + (data.message || '未知错误'), 'error');
+  var lines = text.split(new RegExp('[\\\\n,;]+')).map(function(s) { return s.trim(); }).filter(Boolean);
+  if (!lines.length) return;
+
+  p.models = p.models || [];
+  var seen = new Set(p.models.map(function(m) { return m.id; }));
+  var addedCount = 0;
+  lines.forEach(function(mid) {
+    if (!seen.has(mid)) {
+      seen.add(mid);
+      var cat = '通用对话';
+      var lower = mid.toLowerCase();
+      if (/image|draw|flux|dall|sd|midjourney|recraft|stable-diffusion|wanx/i.test(lower)) cat = '绘图';
+      else if (/code|coder|dev|sql|prog/i.test(lower)) cat = '代码';
+      else if (/reason|r1|o1|o3|thinking|cot/i.test(lower)) cat = '推理';
+      else if (/vision|vl|4v|4o|gemini-1.5|image-to-text|multimodal/i.test(lower)) cat = '多模态';
+      else if (/embed|bge|text-embedding/i.test(lower)) cat = '向量嵌入';
+
+      p.models.push({
+        id: mid,
+        name: mid,
+        enabled: true,
+        category: cat,
+      });
+      addedCount++;
     }
-  } catch (err) {
-    aM('导入模型网络异常：' + ((err && err.message) || String(err)), 'error');
-  }
+  });
+
+  markDirty(true);
+  renderProviderList();
+  toast('成功导入 ' + addedCount + ' 个模型至草稿，请点击【统一保存】写入 KV', 'success');
 }
 
 async function clearProviderModels(providerId) {
-  if (!(await cM('确定要一键删除该提供商的全部模型？此操作不可逆！'))) return;
-  try {
-    var res = await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/models', { method: 'DELETE' });
-    var data = await res.json();
-    if (data.success) {
-      var p = draftProviders.find(function(item) { return item.id === providerId; });
-      if (p) p.models = [];
-      markDirty(true);
-      renderProviderList();
-      toast('已成功清空该提供商的全部模型', 'success');
-    } else {
-      aM('删除模型失败：' + (data.message || '未知错误'), 'error');
-    }
-  } catch (err) {
-    aM('请求网络异常：' + ((err && err.message) || String(err)), 'error');
+  if (!(await cM('确定要清空该提供商的全部模型？（请点击【统一保存】后生效）'))) return;
+  var p = draftProviders.find(function(item) { return item.id === providerId; });
+  if (p) {
+    p.models = [];
+    markDirty(true);
+    renderProviderList();
+    toast('已清空该提供商模型列表（已暂存草稿，请点击统一保存）', 'info');
   }
 }
 
 async function unblockModel(providerId, modelId) {
-  try {
-    var res = await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/models/' + encodeURIComponent(modelId), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ unblockPermanent: true })
-    });
-    var data = await res.json();
-    if (data.success) {
-      var p = draftProviders.find(function(item) { return item.id === providerId; });
-      if (p) {
-        var m = p.models.find(function(m) { return m.id === modelId; });
-        if (m) {
-          m.permanentlyDisabled = false;
-          m.disabledReason = null;
-          m.failureCount = 0;
-          m.cooldownUntil = null;
-        }
-      }
+  var p = draftProviders.find(function(item) { return item.id === providerId; });
+  if (p) {
+    var m = p.models.find(function(m) { return m.id === modelId; });
+    if (m) {
+      m.permanentlyDisabled = false;
+      m.disabledReason = null;
+      m.failureCount = 0;
+      m.cooldownUntil = null;
+      markDirty(true);
       renderProviderList();
-      toast('模型 [' + modelId + '] 已成功解封/重置！', 'success');
-    } else {
-      aM('解封失败：' + (data.message || '未知错误'), 'error');
+      toast('模型 [' + modelId + '] 已在内存中重置，请点击【统一保存】持久化', 'success');
     }
-  } catch (err) {
-    aM('请求异常：' + ((err && err.message) || String(err)), 'error');
   }
 }
 
@@ -2931,44 +2914,19 @@ async function resetAllModelsInProvider(providerId) {
   var p = draftProviders.find(function(item) { return item.id === providerId; });
   if (!p || !p.models || !p.models.length) return;
 
-  var abnormalModels = p.models.filter(function(m) {
-    return m.permanentlyDisabled || (m.cooldownUntil && Date.now() < m.cooldownUntil) || (m.failureCount && m.failureCount > 0);
+  p.models.forEach(function(m) {
+    m.permanentlyDisabled = false;
+    m.disabledReason = null;
+    m.failureCount = 0;
+    m.cooldownUntil = null;
+    m.permTestFailCount = 0;
+    m.lastPermTestAt = undefined;
+    m.enabled = true;
   });
 
-  if (!abnormalModels.length) {
-    toast('该提供商下无异常模型需重置', 'info');
-    return;
-  }
-
-  try {
-    toast('正在一键重置本提供商所有异常模型...', 'info');
-    var res = await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/reset-models', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    var data = await res.json();
-    if (data && data.success) {
-      if (data.data && data.data.provider && Array.isArray(data.data.provider.models)) {
-        p.models = data.data.provider.models;
-      } else {
-        p.models.forEach(function(m) {
-          m.permanentlyDisabled = false;
-          m.disabledReason = null;
-          m.failureCount = 0;
-          m.cooldownUntil = null;
-          m.permTestFailCount = 0;
-          m.lastPermTestAt = undefined;
-          m.enabled = true;
-        });
-      }
-      renderProviderList();
-      toast(data.message || '已成功重置本提供商所有模型的异常状态！', 'success');
-    } else {
-      aM('重置异常：' + ((data && data.message) || '未知错误'), 'error');
-    }
-  } catch (err) {
-    aM('重置模型网络请求异常：' + ((err && err.message) || String(err)), 'error');
-  }
+  markDirty(true);
+  renderProviderList();
+  toast('已一键重置该提供商所有模型状态（请点击【统一保存】持久化）', 'success');
 }
 
 async function updateModelCat(providerId, modelId, category) {
@@ -2978,16 +2936,9 @@ async function updateModelCat(providerId, modelId, category) {
     if (m) {
       m.category = category;
       markDirty(true);
+      toast('模型分类已更新为 [' + category + ']（请点击【统一保存】写入 KV）', 'info');
     }
   }
-  try {
-    await fetch('/admin/api/providers/' + encodeURIComponent(providerId) + '/models/' + encodeURIComponent(modelId), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ category: category })
-    });
-    toast('已将模型分类修改为 [' + category + ']', 'success');
-  } catch (err) {}
 }
 
 /* ========== 自定义指定模型路由逻辑 ========== */
@@ -3551,7 +3502,11 @@ async function saveCustomRouteFromModal() {
   } else {
     customRoutesData.push(routeObj);
   }
-  await saveCustomRoutesToServer();
+  renderCustomRoutesTable();
+  var countBadge = document.getElementById('custom-routes-count-badge');
+  if (countBadge) countBadge.textContent = customRoutesData.length;
+  markDirty(true);
+  toast('指定路由规则已加入草稿，请点击【统一保存】写入 KV', 'success');
   closeM();
 }
 
@@ -3561,16 +3516,21 @@ async function toggleCustomRouteBtn(checkbox) {
   var r = customRoutesData.find(function(item) { return item.id === id; });
   if (r) {
     r.enabled = checkbox.checked;
-    await saveCustomRoutesToServer();
+    markDirty(true);
+    toast('路由状态已变更（草稿），请点击【统一保存】写入 KV', 'info');
   }
 }
 
 async function deleteCustomRouteBtn(btn) {
   var id = btn.getAttribute('data-id');
   if (!id) return;
-  if (!(await cM('确定删除该条指定路由规则？'))) return;
+  if (!(await cM('确定删除该条指定路由规则？（需点击【统一保存】持久化）'))) return;
   customRoutesData = customRoutesData.filter(function(r) { return r.id !== id; });
-  await saveCustomRoutesToServer();
+  renderCustomRoutesTable();
+  var countBadge = document.getElementById('custom-routes-count-badge');
+  if (countBadge) countBadge.textContent = customRoutesData.length;
+  markDirty(true);
+  toast('已从草稿中删除规则，请点击【统一保存】写入 KV', 'info');
 }
 
 async function saveCustomRoutesToServer() {

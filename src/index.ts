@@ -74,20 +74,54 @@ app.use('*', async (c, next) => {
   return next()
 })
 
-// ===== 首页 =====
+// ===== 首页（需登录才能查看，未登录重定向至登录页） =====
 app.get('/', async (c) => {
-  const { getCookie } = await import('hono/cookie')
-  const sessionId = getCookie(c, 'session_id')
-  let isLoggedIn = false
-  if (sessionId) {
-const session = await getSession(c.env, sessionId)
-    isLoggedIn = session !== null
+  const { getCookie, deleteCookie } = await import('hono/cookie')
+  const url = new URL(c.req.url)
+  let sessionId = getCookie(c, 'session_id')
+  if (!sessionId) {
+    const authHeader = c.req.header('Authorization')
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      sessionId = authHeader.slice(7)
+    } else {
+      sessionId = url.searchParams.get('token') || url.searchParams.get('session_id') || undefined
+    }
   }
-  return renderHomePage(c, isLoggedIn)
+
+  if (!sessionId) {
+    return c.redirect('/admin/login')
+  }
+
+  const session = await getSession(c.env, sessionId)
+  if (!session) {
+    deleteCookie(c, 'session_id')
+    return c.redirect('/admin/login')
+  }
+
+  return renderHomePage(c, true)
 })
 
 // ===== 登录/退出 =====
-app.get('/admin/login', async (c) => renderLoginPage(c))
+app.get('/admin/login', async (c) => {
+  const { getCookie } = await import('hono/cookie')
+  const url = new URL(c.req.url)
+  let sessionId = getCookie(c, 'session_id')
+  if (!sessionId) {
+    const authHeader = c.req.header('Authorization')
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      sessionId = authHeader.slice(7)
+    } else {
+      sessionId = url.searchParams.get('token') || url.searchParams.get('session_id') || undefined
+    }
+  }
+  if (sessionId) {
+    const session = await getSession(c.env, sessionId)
+    if (session) {
+      return c.redirect('/admin')
+    }
+  }
+  return renderLoginPage(c)
+})
 app.post('/admin/login', handleLogin)
 app.get('/admin/logout', handleLogout)
 app.get('/admin/api/auth-check', handleCheckAuth)

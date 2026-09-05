@@ -141,7 +141,7 @@ export async function handleLogout(c: Context<{ Bindings: Env }>) {
     await deleteSession(c.env, sessionId)
     deleteCookie(c, 'session_id')
   }
-  return c.redirect('/')
+  return c.redirect('/admin/login')
 }
 
 /** 转发 API Key 验证中间件 */
