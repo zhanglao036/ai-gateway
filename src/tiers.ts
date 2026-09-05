@@ -522,6 +522,12 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
     businessStats: {},
     updatedAt: new Date().toISOString(),
     lastProbeDate: nowStr,
+    modelCursors: Object.fromEntries(
+      Array.from(providerPointers.entries()).map(([pid, ptr]) => {
+        const total = (providerModelsMap.get(pid) || []).length
+        return [pid, total > 0 ? ptr % total : 0]
+      })
+    ),
   }
 
   await saveTierStorage(env, newStorage)
@@ -753,10 +759,27 @@ export async function backfillTier1FromTier2(
         providerToModels[pid].sort((a, b) => a.modelId.localeCompare(b.modelId))
       }
 
-      // 记录每个提供商本轮已轮抽/测试的模型指针
-      const providerPointers: Record<string, number> = {}
+      // 【核心升级】：初始化/读取每个提供商的持久化模型游标（Ring Buffer 环形轮询）
+      // 确保无论何时触发补位，各提供商都从上一次测试到的下一个模型开始轮询，绝不总是固定测试前几个模型
+      storage.modelCursors = storage.modelCursors || {}
+      const providerModelLists: Record<string, typeof candidates> = {}
+      const providerTestedCount: Record<string, number> = {}
+
       for (const pid of providerIds) {
-        providerPointers[pid] = 0
+        const rawList = providerToModels[pid] || []
+        providerTestedCount[pid] = 0
+
+        if (rawList.length <= 1) {
+          providerModelLists[pid] = rawList
+        } else {
+          // 读取该提供商上一次记录的游标位置 (0-based)
+          let lastOffset = typeof storage.modelCursors[pid] === 'number' ? storage.modelCursors[pid] : 0
+          // 环形切分重组：从上一次的下一个位置 (lastOffset) 开始往后轮询，再拼接前半部分
+          if (lastOffset < 0 || lastOffset >= rawList.length) {
+            lastOffset = 0
+          }
+          providerModelLists[pid] = [...rawList.slice(lastOffset), ...rawList.slice(0, lastOffset)]
+        }
       }
 
       // 收集达到复测间隔的已封禁模型（每轮海选附带抽测最多 1~2 个）
@@ -795,13 +818,20 @@ export async function backfillTier1FromTier2(
             continue // 该提供商已达均匀配额
           }
 
-          const idx = providerPointers[pid]
-          const list = providerToModels[pid]
-          if (idx < list.length) {
+          const list = providerModelLists[pid] || []
+          const count = providerTestedCount[pid] || 0
+          if (count < list.length) {
             hasMoreToTest = true
-            const cand = list[idx]
-            providerPointers[pid] = idx + 1
+            const cand = list[count]
+            providerTestedCount[pid] = count + 1
             roundToTest.push(cand)
+
+            // 持久化更新该提供商的模型游标位置：计算当前模型在原始列表中的下一个索引
+            const origList = providerToModels[pid] || []
+            const origIdx = origList.findIndex((x) => x.fullId === cand.fullId)
+            if (origIdx !== -1 && origList.length > 0) {
+              storage.modelCursors[pid] = (origIdx + 1) % origList.length
+            }
           }
         }
 
