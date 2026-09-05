@@ -382,32 +382,19 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 (纯内存高速队列，0 KV 写入消耗) =====
+// ===== 网关请求日志管理 (纯高速内存队列，0 KV 写入/读取消耗) =====
 
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
-export async function getLogs(env: Env): Promise<RequestLog[]> {
-  // 优先直接返回内存中的实时请求日志
-  if (inMemoryLogs.length > 0) {
-    return inMemoryLogs.slice(0, 100)
-  }
-  // 仅在首次启动且内存为空时，尝试从 KV 读取一次历史日志缓存填充内存
-  try {
-    const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
-    if (kvData) {
-      const storedLogs: RequestLog[] = JSON.parse(kvData)
-      if (Array.isArray(storedLogs)) {
-        inMemoryLogs.push(...storedLogs.slice(0, MAX_MEMORY_LOGS))
-      }
-    }
-  } catch {}
+export async function getLogs(_env: Env): Promise<RequestLog[]> {
+  // 直接从高速内存返回最新的 100 条日志，0 延迟、0 KV 消耗
   return inMemoryLogs.slice(0, 100)
 }
 
-export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
+export async function addRequestLog(_env: Env, log: RequestLog): Promise<void> {
   try {
-    // 纯内存维护滚动队列，零网络耗时、永远不消耗 KV 写入额度！
+    // 纯内存维护滚动队列，最新日志置顶，超出 150 条自动淘汰老日志
     inMemoryLogs.unshift(log)
     if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
       inMemoryLogs.length = MAX_MEMORY_LOGS
@@ -417,15 +404,12 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   }
 }
 
-export async function flushPendingLogs(env: Env): Promise<void> {
-  // 保留接口兼容，不再主动向 KV 刷写普通日志
+export async function flushPendingLogs(_env: Env): Promise<void> {
+  // 纯内存模式无需向 KV 刷写任何日志
 }
 
-export async function clearLogs(env: Env): Promise<void> {
+export async function clearLogs(_env: Env): Promise<void> {
   inMemoryLogs.length = 0
-  try {
-    await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
-  } catch {}
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {

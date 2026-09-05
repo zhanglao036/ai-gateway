@@ -157,7 +157,7 @@ async function recordModelSuccess(env: Env, providerId: string, modelId: string)
   }
 }
 
-function getClientIp(c: Context<{ Bindings: Env }>): string | null {
+export function getClientIp(c: Context<{ Bindings: Env }>): string | null {
   const cfIp = c.req.header('cf-connecting-ip')
   if (cfIp) return cfIp.trim()
   const xRealIp = c.req.header('x-real-ip')
@@ -171,14 +171,14 @@ function getClientIp(c: Context<{ Bindings: Env }>): string | null {
   return null
 }
 
-function maskKey(key: string): string {
+export function maskKey(key: string): string {
   if (!key) return ''
   const trimmed = key.trim()
   if (trimmed.length <= 8) return '***'
   return `${trimmed.substring(0, 4)}***${trimmed.substring(trimmed.length - 4)}`
 }
 
-async function recordLog(
+export async function recordLog(
   env: Env,
   startTime: number,
   model: string,
@@ -1039,6 +1039,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
 /** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀与自定义指定模型） */
 export async function handleModels(c: Context<{ Bindings: Env }>) {
+  const startTime = Date.now()
+  const clientIp = getClientIp(c)
+  const routePath = new URL(c.req.url).pathname
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
+  const masked = maskKey(token)
+
   const providers = await getProviders(c.env)
   const customRoutes = await getCustomModelRoutes(c.env)
 
@@ -1098,6 +1105,12 @@ export async function handleModels(c: Context<{ Bindings: Env }>) {
       })
     }
   }
+
+  await recordLog(c.env, startTime, `获取模型列表 (${models.length} 个)`, 200, null, {
+    keyMask: masked,
+    routePath,
+    clientIp,
+  })
 
   return c.json({
     object: 'list',

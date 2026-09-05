@@ -146,8 +146,17 @@ export async function handleLogout(c: Context<{ Bindings: Env }>) {
 
 /** 转发 API Key 验证中间件 */
 export async function proxyKeyAuthMiddleware(c: Context<{ Bindings: Env }>, next: Next) {
+  const startTime = Date.now()
   const authHeader = c.req.header('Authorization')
+  const { recordLog, getClientIp, maskKey } = await import('./proxy')
+  const clientIp = getClientIp(c)
+  const routePath = new URL(c.req.url).pathname
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    await recordLog(c.env, startTime, '鉴权失败', 401, '缺少或无效的 Authorization 头 (需 Bearer sk_cf_*)', {
+      routePath,
+      clientIp,
+    })
     return c.json({
       error: { message: '缺少或无效的 Authorization 头，格式: Bearer sk_cf_*', type: 'authentication_error' },
     }, 401)
@@ -156,6 +165,11 @@ export async function proxyKeyAuthMiddleware(c: Context<{ Bindings: Env }>, next
   const token = authHeader.slice(7)
   const isValid = await validateProxyKey(c.env, token)
   if (!isValid) {
+    await recordLog(c.env, startTime, '鉴权失败', 401, `API Key 无效、已禁用或已过期: ${maskKey(token)}`, {
+      keyMask: maskKey(token),
+      routePath,
+      clientIp,
+    })
     return c.json({
       error: { message: 'API Key 无效或已禁用', type: 'authentication_error' },
     }, 401)

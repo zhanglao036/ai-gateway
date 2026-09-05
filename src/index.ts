@@ -183,13 +183,36 @@ app.get('/v1/models', handleModels)
 app.all('/v1/*', handleProxy)
 
 // ===== 404 处理 =====
-app.notFound((c) => {
-  return c.json({ error: { message: '接口不存在', type: 'not_found' } }, 404)
+app.notFound(async (c) => {
+  const url = new URL(c.req.url)
+  const path = url.pathname
+  // 如果是试图请求 API 相关的路径打错了，记录日志以便排查
+  if (path.startsWith('/v1/') || path.startsWith('/chat/') || path.startsWith('/api/')) {
+    try {
+      const { recordLog, getClientIp } = await import('./proxy')
+      await recordLog(c.env, Date.now(), '路径错误(404)', 404, `请求了不存在的接口: ${path}`, {
+        routePath: path,
+        clientIp: getClientIp(c),
+      })
+    } catch {}
+  }
+  return c.json({ error: { message: `接口不存在: ${path}`, type: 'not_found' } }, 404)
 })
 
 // ===== 错误处理 =====
-app.onError((err, c) => {
+app.onError(async (err, c) => {
   console.error('未捕获的错误:', err)
+  const url = new URL(c.req.url)
+  const path = url.pathname
+  if (path.startsWith('/v1/')) {
+    try {
+      const { recordLog, getClientIp } = await import('./proxy')
+      await recordLog(c.env, Date.now(), '服务内部错误(500)', 500, err instanceof Error ? err.message : String(err), {
+        routePath: path,
+        clientIp: getClientIp(c),
+      })
+    } catch {}
+  }
   return c.json({ error: { message: '服务器内部错误', type: 'server_error' } }, 500)
 })
 
