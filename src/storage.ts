@@ -382,34 +382,84 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 (纯高速内存队列，0 KV 写入/读取消耗) =====
+// ===== 网关请求日志管理 (智能调试策略：开启调试模式时实时落盘 KV，平时极低频/内存) =====
 
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
-export async function getLogs(_env: Env): Promise<RequestLog[]> {
-  // 直接从高速内存返回最新的 100 条日志，0 延迟、0 KV 消耗
+export async function getLogs(env: Env): Promise<RequestLog[]> {
+  try {
+    const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
+    if (kvData) {
+      const storedLogs: RequestLog[] = JSON.parse(kvData)
+      if (Array.isArray(storedLogs) && storedLogs.length > 0) {
+        // 合并内存与 KV 存储中的日志，按 ID 去重
+        const map = new Map<string, RequestLog>()
+        for (const l of inMemoryLogs) if (l && l.id) map.set(l.id, l)
+        for (const l of storedLogs) if (l && l.id) map.set(l.id, l)
+        return Array.from(map.values()).slice(0, 100)
+      }
+    }
+  } catch {}
   return inMemoryLogs.slice(0, 100)
 }
 
-export async function addRequestLog(_env: Env, log: RequestLog): Promise<void> {
+let pendingLogWrites: RequestLog[] = []
+let logFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    // 纯内存维护滚动队列，最新日志置顶，超出 150 条自动淘汰老日志
     inMemoryLogs.unshift(log)
     if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
       inMemoryLogs.length = MAX_MEMORY_LOGS
+    }
+
+    const isDbg = isDebugMode(env)
+    if (isDbg) {
+      // 调试模式开启：立即落盘 KV，确保多进程/多实例下后台手动刷新 100% 看到！
+      try {
+        await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
+      } catch (err) {
+        console.warn('[storage] 调试模式写入日志至 KV 异常:', err instanceof Error ? err.message : String(err))
+      }
+    } else {
+      // 生产普通模式：延迟 3 秒防抖合并，极低频写入，节约 99% 的 KV 额度
+      pendingLogWrites.push(log)
+      if (!logFlushTimer) {
+        logFlushTimer = setTimeout(async () => {
+          logFlushTimer = null
+          pendingLogWrites = []
+          try {
+            await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
+          } catch {}
+        }, 3000)
+      }
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
   }
 }
 
-export async function flushPendingLogs(_env: Env): Promise<void> {
-  // 纯内存模式无需向 KV 刷写任何日志
+export async function flushPendingLogs(env: Env): Promise<void> {
+  if (logFlushTimer) {
+    clearTimeout(logFlushTimer)
+    logFlushTimer = null
+  }
+  try {
+    await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
+  } catch {}
 }
 
-export async function clearLogs(_env: Env): Promise<void> {
+export async function clearLogs(env: Env): Promise<void> {
   inMemoryLogs.length = 0
+  if (logFlushTimer) {
+    clearTimeout(logFlushTimer)
+    logFlushTimer = null
+  }
+  pendingLogWrites = []
+  try {
+    await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
+  } catch {}
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {

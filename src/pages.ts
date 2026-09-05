@@ -2532,8 +2532,7 @@ adminNavLinks.forEach(function (link) {
 window.addEventListener('hashchange', function () { setActiveAdminNav(location.hash) })
 setActiveAdminNav(location.hash)
 
-// 网关日志及调试模式前端逻辑
-var debugAutoRefreshTimer = null;
+// 网关日志及调试模式前端逻辑 (支持手动按需刷新)
 
 async function fetchLogs() {
   try {
@@ -2546,7 +2545,6 @@ async function fetchLogs() {
         dbgToggle.checked = json.data.debugMode;
         var cfgBox = document.getElementById('log-buffer-config-box');
         if (cfgBox) cfgBox.style.display = json.data.debugMode ? 'none' : 'flex';
-        setupAutoRefresh(json.data.debugMode);
       }
       if (json.data.config) {
         var cntInput = document.getElementById('log-cfg-max-count');
@@ -2557,21 +2555,6 @@ async function fetchLogs() {
     }
   } catch (err) {
     console.error('获取请求日志失败:', err);
-  }
-}
-
-function setupAutoRefresh(enabled) {
-  if (debugAutoRefreshTimer) {
-    clearInterval(debugAutoRefreshTimer);
-    debugAutoRefreshTimer = null;
-  }
-  if (enabled) {
-    debugAutoRefreshTimer = setInterval(function() {
-      // 仅当用户在日志标签页且页面可见时才刷新，离开自动休眠，绝不浪费主线程
-      if (location.hash === '#logs' && document.visibilityState === 'visible') {
-        fetchLogs();
-      }
-    }, 4000);
   }
 }
 
