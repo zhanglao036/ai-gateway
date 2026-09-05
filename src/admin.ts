@@ -128,6 +128,7 @@ export async function handleCreateProvider(c: Context<{ Bindings: Env }>) {
     apiKeys: normalizeArray(body.apiKeys, (k) => ({ key: k, enabled: true })),
     models: body.models ? deduplicateAndClassifyModels(body.models) : [],
     enabled: body.enabled !== undefined ? body.enabled : true,
+    useBrowserUA: body.useBrowserUA,
     createdAt: now,
     updatedAt: now,
   }
@@ -145,6 +146,7 @@ export async function handleUpdateProvider(c: Context<{ Bindings: Env }>) {
   if (body.name !== undefined) updates.name = body.name
   if (body.baseUrl !== undefined) updates.baseUrl = body.baseUrl.replace(/\/$/, '')
   if (body.apiType !== undefined) updates.apiType = body.apiType
+  if (body.useBrowserUA !== undefined) updates.useBrowserUA = body.useBrowserUA
   if (body.apiKeys !== undefined) {
     updates.apiKeys = normalizeArray(body.apiKeys, (k) => ({ key: k, enabled: true }))
   }
@@ -211,7 +213,8 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
         modelId,
         provider.apiType,
         modelConfig.category,
-        existingOpenClaw
+        existingOpenClaw,
+        provider.useBrowserUA
       )
 
   if (result.openclaw && result.openclaw.tested) {
@@ -244,9 +247,10 @@ export async function handleTestModel(c: Context<{ Bindings: Env }>) {
 
 // ===== Key / 模型连通性测试（通过服务端代理，避免 CORS） =====
 
-function buildAuthHeaders(apiKey: string, apiType?: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+function buildAuthHeaders(apiKey: string, apiType?: string, useBrowserUA?: boolean): Record<string, string> {
+  const headers: Record<string, string> = {}
+  if (useBrowserUA) {
+    headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   }
   if (apiType === 'anthropic') {
     headers['x-api-key'] = apiKey
@@ -258,11 +262,12 @@ function buildAuthHeaders(apiKey: string, apiType?: string): Record<string, stri
 }
 
 export async function handleTestKeyNew(c: Context<{ Bindings: Env }>) {
-  const { url, apiKey, apiType, providerId } = await c.req.json<{
+  const { url, apiKey, apiType, providerId, useBrowserUA } = await c.req.json<{
     url: string
     apiKey: string
     apiType?: string
     providerId?: string
+    useBrowserUA?: boolean
   }>()
   if (!url || (!apiKey && !(providerId && isOpenCodeProvider(providerId)))) {
     return c.json<ApiResponse>({ success: false, message: 'url 和 apiKey 为必填项' }, 400)
@@ -294,7 +299,7 @@ export async function handleTestKeyNew(c: Context<{ Bindings: Env }>) {
   const cleanBase = url.trim().replace(/\/+$/, '')
   try {
     const response = await fetch(`${cleanBase}/models`, {
-      method: 'GET', headers: buildAuthHeaders(apiKey, apiType), signal: AbortSignal.timeout(15000),
+      method: 'GET', headers: buildAuthHeaders(apiKey, apiType, useBrowserUA), signal: AbortSignal.timeout(15000),
     })
 
     let data: unknown = null
@@ -315,12 +320,13 @@ export async function handleTestKeyNew(c: Context<{ Bindings: Env }>) {
 }
 
 export async function handleTestModelNew(c: Context<{ Bindings: Env }>) {
-  const { url, apiKey, apiType, model, providerId } = await c.req.json<{
+  const { url, apiKey, apiType, model, providerId, useBrowserUA } = await c.req.json<{
     url: string
     apiKey: string
     apiType?: string
     model: string
     providerId?: string
+    useBrowserUA?: boolean
   }>()
   if (!url || !model || (!apiKey && !isOpenCodeProvider(providerId || ''))) {
     return c.json<ApiResponse>({ success: false, message: 'url、apiKey、model 为必填项' }, 400)
@@ -335,7 +341,7 @@ export async function handleTestModelNew(c: Context<{ Bindings: Env }>) {
     })
   }
 
-  const result = await testModelConnection(url, apiKey, model, apiType as any)
+  const result = await testModelConnection(url, apiKey, model, apiType as any, undefined, undefined, useBrowserUA)
   return c.json<ApiResponse>({
     success: true,
     data: {
@@ -600,7 +606,7 @@ export async function handleTestCustomRoute(c: Context<{ Bindings: Env }>) {
 
   const testRes = isOpenCodeProvider(provider.id)
     ? await testOpenCodeModel(provider.baseUrl, enabledKeys, targetModelId, resolveOpenCodeUrls(c.env))
-    : await testModelConnection(provider.baseUrl, enabledKeys[0]?.key || '', targetModelId, provider.apiType)
+    : await testModelConnection(provider.baseUrl, enabledKeys[0]?.key || '', targetModelId, provider.apiType, undefined, undefined, provider.useBrowserUA)
 
   return c.json<ApiResponse>({
     success: true,

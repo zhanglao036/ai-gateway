@@ -896,6 +896,18 @@ ${H('管理')}
             </div>
             <div class="fg"><label for="aurl">API 地址</label><input type="url" id="aurl" placeholder="https://api.deepseek.com"></div>
             <div class="fg"><label for="afmt">API 格式</label><select id="afmt" class="select-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 兼容</option></select></div>
+            <div class="fg" style="margin-top:6px;margin-bottom:12px;">
+              <div class="fc" style="gap:10px;align-items:center;">
+                <label class="tg" title="开启浏览器 User-Agent 伪装">
+                  <input type="checkbox" id="aua">
+                  <span class="sl"></span>
+                </label>
+                <div style="display:flex;flex-direction:column;gap:1px;">
+                  <span style="font-size:var(--text-xs);font-weight:600;color:var(--color-ink-2);">浏览器 User-Agent 伪装</span>
+                  <span style="font-size:11px;color:var(--color-muted);line-height:1.3;">开启后请求头附带 Chrome 标识，防止上游 Cloudflare / WAF 403 拦截</span>
+                </div>
+              </div>
+            </div>
             <fieldset class="form-group"><legend>上游 API Keys</legend><div id="akeys"><div class="fc mb-4 field-row"><input type="text" placeholder="sk-xxx" class="fx1 aki" aria-label="上游 API Key"><label class="tg" title="启用 Key"><input type="checkbox" checked class="ake" aria-label="启用 Key"><span class="sl"></span></label><button class="icon-btn" onclick="copyRowVal(this)" title="复制 Key" aria-label="复制 Key"><i class="far fa-copy" aria-hidden="true"></i></button><button class="icon-btn" onclick="testNewAKey(this)" title="测试 Key" aria-label="测试 Key"><i class="fas fa-plug" aria-hidden="true"></i></button><button class="icon-btn" onclick="this.parentElement.remove()" title="移除 Key" aria-label="移除 Key"><i class="fas fa-times" aria-hidden="true"></i></button></div></div><button class="btn btn-s btn-xs" onclick="addAKeyRow()"><i class="fas fa-plus" aria-hidden="true"></i>添加 Key</button></fieldset>
             <aside id="amc" class="hd mdl-list-panel"><div class="panel-heading"><div><span class="panel-heading__mark"><i class="fas fa-cube" aria-hidden="true"></i></span><div><h3>可用模型</h3><p>点击“+”单条添加，或使用一键导入。</p></div></div><div class="fc" style="gap:var(--space-2xs);"><button class="btn btn-s btn-xs" onclick="importAllNewModels()" style="margin-right:8px;"><i class="fas fa-file-import" aria-hidden="true"></i> 一键导入</button><button class="icon-btn" type="button" onclick="hideMdlPanel('amc')" title="关闭可用模型" aria-label="关闭可用模型"><i class="fas fa-times" aria-hidden="true"></i></button></div></div><div id="amcl"></div></aside>
             <fieldset class="form-group"><legend>模型 ID</legend><div id="amodels"><div class="fc mb-4 field-row"><input type="text" placeholder="deepseek-chat" class="fx1 ami" aria-label="模型 ID"><label class="tg" title="启用模型"><input type="checkbox" checked class="ame" aria-label="启用模型"><span class="sl"></span></label><button class="icon-btn" onclick="testNewMdl(this)" title="测试模型" aria-label="测试模型"><i class="fas fa-plug" aria-hidden="true"></i></button><button class="icon-btn" onclick="this.parentElement.remove()" title="移除模型" aria-label="移除模型"><i class="fas fa-times" aria-hidden="true"></i></button></div></div><div class="fc mt-1 field-row"><button class="btn btn-s btn-xs" onclick="addMdlRow()"><i class="fas fa-plus" aria-hidden="true"></i>添加模型</button><button class="btn btn-s btn-xs btn-d" onclick="clearAllNewModels()" style="margin-left:8px;"><i class="fas fa-trash" aria-hidden="true"></i>一键删除所有模型</button></div></fieldset>
@@ -961,6 +973,18 @@ ${H('管理')}
               <div class="fr"><div class="fg"><label>名称</label><input type="text" id="nm-${escapePageHtml(p.id)}" value="${escapePageHtml(p.name)}"></div><div class="fg"><label>ID</label><input type="text" value="${escapePageHtml(p.id)}" disabled></div></div>
               <div class="fg"><label>API 地址</label><input type="url" id="url-${escapePageHtml(p.id)}" value="${escapePageHtml(p.baseUrl)}"></div>
               <div class="fg"><label>API 格式</label><select id="at-${escapePageHtml(p.id)}" class="select-sm"><option value="openai" ${(p.apiType||'openai')!=='anthropic'?'selected':''}>OpenAI 兼容</option><option value="anthropic" ${(p.apiType||'openai')==='anthropic'?'selected':''}>Anthropic 兼容</option></select></div>
+              <div class="fg" style="margin-top:6px;margin-bottom:12px;">
+                <div class="fc" style="gap:10px;align-items:center;">
+                  <label class="tg" title="开启浏览器 User-Agent 伪装">
+                    <input type="checkbox" id="ua-${escapePageHtml(p.id)}" ${p.useBrowserUA?'checked':''} onchange="markDirty(true)">
+                    <span class="sl"></span>
+                  </label>
+                  <div style="display:flex;flex-direction:column;gap:1px;">
+                    <span style="font-size:var(--text-xs);font-weight:600;color:var(--color-ink-2);">浏览器 User-Agent 伪装</span>
+                    <span style="font-size:11px;color:var(--color-muted);line-height:1.3;">开启后请求头附带 Chrome 标识，防止上游 Cloudflare / WAF 403 拦截</span>
+                  </div>
+                </div>
+              </div>
               <fieldset class="form-group"><legend>上游 API Keys</legend><div id="keys-${escapePageHtml(p.id)}">${p.apiKeys.map((k,ki)=>`<div class="fc mb-3 field-row" data-kidx="${ki}"><input type="text" value="${escapePageHtml(k.key)}" class="fx1" id="k-${escapePageHtml(p.id)}-${ki}" placeholder="API Key" aria-label="API Key"><label class="tg"><input type="checkbox" ${k.enabled?'checked':''} id="ken-${escapePageHtml(p.id)}-${ki}" aria-label="启用 Key"><span class="sl"></span></label><button class="icon-btn" onclick="copyRowVal(this)" title="复制 Key" aria-label="复制 Key"><i class="far fa-copy" aria-hidden="true"></i></button><button class="icon-btn" onclick="testKeyRowBtn(this)" data-pid="${escapePageHtml(p.id)}" data-kidx="${ki}" title="测试 Key" aria-label="测试 Key"><i class="fas fa-plug" aria-hidden="true"></i></button><button class="icon-btn" onclick="rmKeyRowBtn(this)" data-pid="${escapePageHtml(p.id)}" data-kidx="${ki}" title="移除 Key" aria-label="移除 Key"><i class="fas fa-times" aria-hidden="true"></i></button></div>`).join('')}</div><div class="fc mt-1 field-row"><input type="text" id="nk-${escapePageHtml(p.id)}" placeholder="新的 API Key" class="fx1"><button class="btn btn-s btn-xs" onclick="addKeyRowBtn(this)" data-pid="${escapePageHtml(p.id)}"><i class="fas fa-plus" aria-hidden="true"></i>添加</button></div></fieldset>
               <fieldset class="form-group"><legend>模型</legend>
                 <div class="fc mb-3" style="gap:8px;flex-wrap:wrap;background:var(--color-paper);padding:8px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);">
@@ -1156,10 +1180,12 @@ function syncActiveFormsToDraft() {
     var nmEl = document.getElementById('nm-' + p.id);
     var urlEl = document.getElementById('url-' + p.id);
     var atEl = document.getElementById('at-' + p.id);
+    var uaEl = document.getElementById('ua-' + p.id);
     var enEl = document.getElementById('en-' + p.id);
     if (nmEl) p.name = nmEl.value.trim();
     if (urlEl) p.baseUrl = urlEl.value.trim();
     if (atEl) p.apiType = atEl.value;
+    if (uaEl) p.useBrowserUA = uaEl.checked;
     if (enEl) p.enabled = enEl.checked;
 
     var keysContainer = document.getElementById('keys-' + p.id);
@@ -1474,6 +1500,7 @@ function resetAddForm() {
   if (aid) aid.value = '';
   if (aurl) aurl.value = '';
   if (afmt) afmt.value = 'openai';
+  if (document.getElementById('aua')) document.getElementById('aua').checked = false;
   if (aen) aen.checked = true;
   if (atestR) atestR.innerHTML = '';
 
@@ -1626,7 +1653,8 @@ async function testNewAKey(btn) {
     const apiType = document.getElementById('afmt').value
     const tr = document.getElementById('atestR')
     showSpinner(tr)
-    const result = await testKeyConnection(url, apiType, k, providerId)
+    const useBrowserUA = document.getElementById('aua') ? document.getElementById('aua').checked : false
+    const result = await testKeyConnection(url, apiType, k, providerId, useBrowserUA)
     if (result.success && result.data) {
       document.getElementById('amcl').innerHTML = renderModelGrid(result.data.data || [], null, providerId)
       document.getElementById('amc').classList.remove('hd')
@@ -1675,7 +1703,8 @@ async function testNewMdl(btn) {
     showSpinner(tr)
     const providerId = document.getElementById('aid').value.trim()
     const apiKey = configuredKey || (providerId === 'opencode' ? '' : 'dummy')
-    const result = await testModelConnection(url, apiType, apiKey, mid, providerId)
+    const useBrowserUA = document.getElementById('aua') ? document.getElementById('aua').checked : false
+    const result = await testModelConnection(url, apiType, apiKey, mid, providerId, useBrowserUA)
     showResult(tr, result.success, result.success ? '' : 'HTTP ' + result.status)
   } finally {
     if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
@@ -1690,6 +1719,7 @@ function createProv() {
     var id = document.getElementById('aid').value.trim();
     var url = document.getElementById('aurl').value.trim();
     var apiType = document.getElementById('afmt').value;
+    var useBrowserUA = document.getElementById('aua') ? document.getElementById('aua').checked : false;
     var aki = document.querySelectorAll('#akeys .aki');
     var seenKeys = new Set();
     var keys = Array.from(aki).map(function(inp) {
@@ -1732,6 +1762,7 @@ function createProv() {
       name: nm,
       baseUrl: url,
       apiType: apiType,
+      useBrowserUA: useBrowserUA,
       apiKeys: keys,
       models: models,
       enabled: enabled,
@@ -1820,9 +1851,11 @@ async function testKeyRow(id, idx, btn) {
     const url = urlInp ? urlInp.value.trim() : ''
     if (!k) { toast('请输入 API Key', 'error'); return }
     const apiType = document.getElementById('at-' + id).value
+    const uaInp = document.getElementById('ua-' + id)
+    const useBrowserUA = uaInp ? uaInp.checked : false
     const tr = document.getElementById('tr-' + id)
     showSpinner(tr)
-    const result = await testKeyConnection(url, apiType, k, id)
+    const result = await testKeyConnection(url, apiType, k, id, useBrowserUA)
     showResult(tr, result.success, result.success ? '' : 'HTTP ' + result.status)
     if (result.success && result.data) {
       showEditModelsList(id, result.data.data || [])
@@ -1840,9 +1873,11 @@ async function fetchEditModels(id, btn) {
     const keys = getKeys(id)
     const apiKey = keys.length > 0 ? keys[0].key : ''
     const apiType = document.getElementById('at-' + id).value
+    const uaInp = document.getElementById('ua-' + id)
+    const useBrowserUA = uaInp ? uaInp.checked : false
     const tr = document.getElementById('tr-' + id)
     showSpinner(tr)
-    const result = await testKeyConnection(url, apiType, apiKey, id)
+    const result = await testKeyConnection(url, apiType, apiKey, id, useBrowserUA)
     showResult(tr, result.success, result.success ? '' : escapeHtml(result.message || '获取模型失败'))
     if (result.success && result.data) {
       showEditModelsList(id, result.data.data || [])
@@ -2147,6 +2182,8 @@ function save(id, btn) {
     p.name = nmInp ? nmInp.value.trim() : p.name;
     p.baseUrl = urlInp ? urlInp.value.trim() : p.baseUrl;
     p.apiType = atInp ? atInp.value : p.apiType;
+    var uaInp = document.getElementById('ua-' + id);
+    if (uaInp) p.useBrowserUA = uaInp.checked;
     p.apiKeys = getKeys(id);
     p.models = getMdl(id);
     p.enabled = enInp ? enInp.checked : p.enabled;
@@ -2449,6 +2486,18 @@ function renderProviderList() {
         '<div class="fr"><div class="fg"><label>名称</label><input type="text" id="nm-' + pId + '" value="' + pName + '" oninput="markDirty(true)"></div><div class="fg"><label>ID</label><input type="text" value="' + pId + '" disabled></div></div>' +
         '<div class="fg"><label>API 地址</label><input type="url" id="url-' + pId + '" value="' + pUrl + '" oninput="markDirty(true)"></div>' +
         '<div class="fg"><label>API 格式</label><select id="at-' + pId + '" class="select-sm" onchange="markDirty(true)"><option value="openai" ' + (!isAnthropic ? 'selected' : '') + '>OpenAI 兼容</option><option value="anthropic" ' + (isAnthropic ? 'selected' : '') + '>Anthropic 兼容</option></select></div>' +
+        '<div class="fg" style="margin-top:6px;margin-bottom:12px;">' +
+          '<div class="fc" style="gap:10px;align-items:center;">' +
+            '<label class="tg" title="开启浏览器 User-Agent 伪装">' +
+              '<input type="checkbox" id="ua-' + pId + '" ' + (p.useBrowserUA ? 'checked' : '') + ' onchange="markDirty(true)">' +
+              '<span class="sl"></span>' +
+            '</label>' +
+            '<div style="display:flex;flex-direction:column;gap:1px;">' +
+              '<span style="font-size:var(--text-xs);font-weight:600;color:var(--color-ink-2);">浏览器 User-Agent 伪装</span>' +
+              '<span style="font-size:11px;color:var(--color-muted);line-height:1.3;">开启后请求头附带 Chrome 标识，防止上游 Cloudflare / WAF 403 拦截</span>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
         '<fieldset class="form-group"><legend>上游 API Keys</legend><div id="keys-' + pId + '">' + keysHtml + '</div><div class="fc mt-1 field-row"><input type="text" id="nk-' + pId + '" placeholder="新的 API Key" class="fx1"><button class="btn btn-s btn-xs" onclick="addKeyRowBtn(this)" data-pid="' + pId + '"><i class="fas fa-plus" aria-hidden="true"></i>添加</button></div></fieldset>' +
         '<fieldset class="form-group"><legend>模型</legend>' + providerModelActions + '<div id="ml-' + pId + '">' + modelsHtml + '</div><div class="fc mt-1 field-row"><input type="text" id="nmid-' + pId + '" placeholder="新的模型 ID" class="fx1"><button class="btn btn-s btn-xs" onclick="addMdlBtn(this)" data-pid="' + pId + '"><i class="fas fa-plus" aria-hidden="true"></i>添加</button></div></fieldset>' +
         '<div class="detail-actions"><div id="tr-' + pId + '" aria-live="polite"></div><div>' + opencodeBtn + '<button class="btn btn-d" onclick="delBtn(this)" data-pid="' + pId + '"><i class="fas fa-trash" aria-hidden="true"></i>删除</button><button class="btn btn-p" onclick="saveBtn(this)" data-pid="' + pId + '"><i class="fas fa-save" aria-hidden="true"></i>暂存更改</button></div></div>' +
