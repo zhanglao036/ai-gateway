@@ -1106,16 +1106,8 @@ ${H('管理')}
         <div class="section-heading section-heading--admin">
           <div><h2 id="logs-title">网关请求日志</h2><p>记录客户端 API 请求，包含耗时、HTTP 状态、调用详情与失败原因。</p></div>
           <div class="fc" style="gap:12px;flex-wrap:wrap;align-items:center;">
-            <div id="log-buffer-config-box" class="fc" style="gap:8px;align-items:center;background:var(--color-paper-2);padding:4px 10px;border-radius:var(--radius-control);border:1px solid var(--color-rule);display:${isDebug ? 'none' : 'flex'};">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);" title="队列达到该条数后立即批量写入 KV">缓存阈值:</span>
-              <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" style="width:58px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="最大缓冲条数" onchange="saveLogBufferConfig()">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);">条</span>
-              <span style="font-size:var(--text-xs);color:var(--color-muted);margin-left:4px;" title="定时器强制落盘间隔">间隔:</span>
-              <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" style="width:52px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="定时器强制落盘间隔（秒）" onchange="saveLogBufferConfig()">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);">秒</span>
-            </div>
-            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条日志实时写入 KV 并前端实时刷新；关闭后启用内存缓存批量落盘策略">
-              <span style="font-size:var(--text-xs);font-weight:600;">调试模式 (实时落盘)</span>
+            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条请求日志即时同步写入 KV，点击【刷新日志】可实时查看；关闭后彻底停用日志（0 KV 消耗）">
+              <span style="font-size:var(--text-xs);font-weight:600;">调试模式 (同步落盘)</span>
               <span class="tg"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)"><span class="sl"></span></span>
             </label>
             <button class="btn btn-s" onclick="fetchLogs()"><i class="fas fa-sync" aria-hidden="true"></i>刷新日志</button>
@@ -2543,14 +2535,6 @@ async function fetchLogs() {
       var dbgToggle = document.getElementById('debug-mode-toggle');
       if (dbgToggle && typeof json.data.debugMode === 'boolean') {
         dbgToggle.checked = json.data.debugMode;
-        var cfgBox = document.getElementById('log-buffer-config-box');
-        if (cfgBox) cfgBox.style.display = json.data.debugMode ? 'none' : 'flex';
-      }
-      if (json.data.config) {
-        var cntInput = document.getElementById('log-cfg-max-count');
-        var intInput = document.getElementById('log-cfg-interval');
-        if (cntInput && json.data.config.bufferMaxCount) cntInput.value = json.data.config.bufferMaxCount;
-        if (intInput && json.data.config.flushIntervalSeconds) intInput.value = json.data.config.flushIntervalSeconds;
       }
     }
   } catch (err) {
@@ -2560,56 +2544,22 @@ async function fetchLogs() {
 
 async function toggleDebugMode(checked) {
   try {
-    var cfgBox = document.getElementById('log-buffer-config-box');
-    if (cfgBox) cfgBox.style.display = checked ? 'none' : 'flex';
-    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
-    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
-
     var res = await fetch('/admin/api/debug-mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         debugMode: checked,
-        bufferMaxCount: cntVal,
-        flushIntervalSeconds: intVal,
       })
     });
     var json = await res.json();
     if (json.success) {
       toast(json.message, 'success');
-      setupAutoRefresh(checked);
       fetchLogs();
     } else {
       toast(json.message || '切换调试模式失败', 'error');
     }
   } catch (err) {
     toast('切换调试模式请求异常', 'error');
-  }
-}
-
-async function saveLogBufferConfig() {
-  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
-  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
-  var dbgChecked = document.getElementById('debug-mode-toggle')?.checked || false;
-
-  try {
-    var res = await fetch('/admin/api/debug-mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        debugMode: dbgChecked,
-        bufferMaxCount: cntVal,
-        flushIntervalSeconds: intVal,
-      })
-    });
-    var json = await res.json();
-    if (json.success) {
-      toast('日志缓存策略已保存（达到 ' + cntVal + ' 条或 ' + intVal + ' 秒定时清空落盘）', 'success');
-    } else {
-      toast(json.message || '保存缓存参数失败', 'error');
-    }
-  } catch (err) {
-    toast('保存缓存参数异常', 'error');
   }
 }
 

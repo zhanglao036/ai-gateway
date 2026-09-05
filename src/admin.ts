@@ -476,19 +476,17 @@ export async function handleGetDebugMode(c: Context<{ Bindings: Env }>) {
 }
 
 export async function handleToggleDebugMode(c: Context<{ Bindings: Env }>) {
-  const body = await c.req.json<{ debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }>().catch(() => ({} as { debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }))
+  const body = await c.req.json<{ debugMode?: boolean }>().catch(() => ({} as { debugMode?: boolean }))
   await saveLogConfig(c.env, {
     debugMode: !!body.debugMode,
-    bufferMaxCount: body.bufferMaxCount,
-    flushIntervalSeconds: body.flushIntervalSeconds,
   })
   const updatedConfig = await getLogConfig(c.env)
   return c.json<ApiResponse>({
     success: true,
     data: { debugMode: updatedConfig.debugMode, config: updatedConfig },
     message: body.debugMode
-      ? '调试模式已开启：每条请求日志实时写入 KV，前端面板实时刷新'
-      : `正式模式已启用：日志内存缓存策略生效（满 ${updatedConfig.bufferMaxCount} 条或 ${updatedConfig.flushIntervalSeconds} 秒定时批量落盘，未落地日志已强制立即落盘）`,
+      ? '调试模式已开启：请求日志将即时同步写入 KV，点击【刷新日志】可实时查看'
+      : '调试模式已关闭：请求日志已停用（0 KV 写入消耗）',
   })
 }
 

@@ -28,8 +28,6 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 
 // 动态调试模式与日志参数控制
 let dynamicDebugMode: boolean | null = null
-let dynamicBufferMaxCount: number | null = null
-let dynamicFlushIntervalSeconds: number | null = null
 
 export function isDebugMode(env?: Env): boolean {
   if (dynamicDebugMode !== null) return dynamicDebugMode
@@ -38,19 +36,15 @@ export function isDebugMode(env?: Env): boolean {
   return false
 }
 
-export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; bufferMaxCount: number; flushIntervalSeconds: number }> {
+export async function getLogConfig(env: Env): Promise<{ debugMode: boolean }> {
   let debug = dynamicDebugMode
-  let maxCount = dynamicBufferMaxCount
-  let intervalSec = dynamicFlushIntervalSeconds
 
-  if (debug === null || maxCount === null || intervalSec === null) {
+  if (debug === null) {
     const raw = await getKV(env).get(KV_KEYS.LOG_CONFIG)
     if (raw) {
       try {
         const parsed = JSON.parse(raw)
         if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
-        if (typeof parsed.bufferMaxCount === 'number' && parsed.bufferMaxCount > 0) maxCount = parsed.bufferMaxCount
-        if (typeof parsed.flushIntervalSeconds === 'number' && parsed.flushIntervalSeconds > 0) intervalSec = parsed.flushIntervalSeconds
       } catch {}
     }
   }
@@ -59,14 +53,10 @@ export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; buff
     const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
     debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
   }
-  if (maxCount === null) maxCount = 5 // 默认 5 条批量落盘，节约 80% 写入
-  if (intervalSec === null) intervalSec = 15 // 默认 15 秒定时合并
 
   dynamicDebugMode = debug
-  dynamicBufferMaxCount = maxCount
-  dynamicFlushIntervalSeconds = intervalSec
 
-  return { debugMode: debug, bufferMaxCount: maxCount, flushIntervalSeconds: intervalSec }
+  return { debugMode: !!debug }
 }
 
 export async function getDebugMode(env: Env): Promise<boolean> {
@@ -76,21 +66,13 @@ export async function getDebugMode(env: Env): Promise<boolean> {
 
 export async function saveLogConfig(
   env: Env,
-  config: { debugMode: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }
+  config: { debugMode: boolean }
 ): Promise<void> {
-  const current = await getLogConfig(env)
-  const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : current.debugMode
-  const newMaxCount = typeof config.bufferMaxCount === 'number' && config.bufferMaxCount > 0 ? config.bufferMaxCount : current.bufferMaxCount
-  const newInterval = typeof config.flushIntervalSeconds === 'number' && config.flushIntervalSeconds > 0 ? config.flushIntervalSeconds : current.flushIntervalSeconds
-
+  const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : false
   dynamicDebugMode = newDebug
-  dynamicBufferMaxCount = newMaxCount
-  dynamicFlushIntervalSeconds = newInterval
 
   const configObj = {
     debugMode: newDebug,
-    bufferMaxCount: newMaxCount,
-    flushIntervalSeconds: newInterval,
   }
 
   try {
@@ -98,14 +80,6 @@ export async function saveLogConfig(
     await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
   } catch (err) {
     console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
-  }
-
-  // 切换配置或调试模式瞬间，未落地日志及缓存强制落盘
-  try {
-    await flushPendingLogs(env)
-    await flushPendingWrites(env)
-  } catch (err) {
-    console.warn('[storage] 强制落盘异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
 }
 
@@ -382,84 +356,67 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 (智能调试策略：开启调试模式时实时落盘 KV，平时极低频/内存) =====
+// ===== 网关请求日志管理 (开启调试模式即时同步写入 KV，关闭调试模式完全不产生日志与写入) =====
 
-const MAX_MEMORY_LOGS = 150
-const inMemoryLogs: RequestLog[] = []
+const MAX_LOG_COUNT = 100
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
-      if (Array.isArray(storedLogs) && storedLogs.length > 0) {
-        // 合并内存与 KV 存储中的日志，按 ID 去重
-        const map = new Map<string, RequestLog>()
-        for (const l of inMemoryLogs) if (l && l.id) map.set(l.id, l)
-        for (const l of storedLogs) if (l && l.id) map.set(l.id, l)
-        return Array.from(map.values()).slice(0, 100)
-      }
-    }
-  } catch {}
-  return inMemoryLogs.slice(0, 100)
-}
-
-let pendingLogWrites: RequestLog[] = []
-let logFlushTimer: ReturnType<typeof setTimeout> | null = null
-
-export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
-  try {
-    inMemoryLogs.unshift(log)
-    if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
-      inMemoryLogs.length = MAX_MEMORY_LOGS
-    }
-
-    const isDbg = isDebugMode(env)
-    if (isDbg) {
-      // 调试模式开启：立即落盘 KV，确保多进程/多实例下后台手动刷新 100% 看到！
-      try {
-        await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
-      } catch (err) {
-        console.warn('[storage] 调试模式写入日志至 KV 异常:', err instanceof Error ? err.message : String(err))
-      }
-    } else {
-      // 生产普通模式：延迟 3 秒防抖合并，极低频写入，节约 99% 的 KV 额度
-      pendingLogWrites.push(log)
-      if (!logFlushTimer) {
-        logFlushTimer = setTimeout(async () => {
-          logFlushTimer = null
-          pendingLogWrites = []
-          try {
-            await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
-          } catch {}
-        }, 3000)
+      if (Array.isArray(storedLogs)) {
+        return storedLogs.slice(0, MAX_LOG_COUNT)
       }
     }
   } catch (err) {
-    console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
+    console.warn('[storage] 读取 KV 日志异常:', err instanceof Error ? err.message : String(err))
+  }
+  return []
+}
+
+export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
+  try {
+    // 检查调试模式是否开启（支持 KV 配置和环境变量）
+    const isDbg = await getDebugMode(env)
+    if (!isDbg) {
+      // 调试模式关闭：彻底不记录日志，0 性能损耗，0 KV 写入消耗
+      return
+    }
+
+    // 调试模式开启：即时同步落盘写入 KV，绝不丢失任何请求记录
+    const kv = getKV(env)
+    let logs: RequestLog[] = []
+    try {
+      const raw = await kv.get(KV_KEYS.REQUEST_LOGS)
+      if (raw) {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) logs = parsed
+      }
+    } catch {}
+
+    // 新日志置顶
+    logs.unshift(log)
+    if (logs.length > MAX_LOG_COUNT) {
+      logs = logs.slice(0, MAX_LOG_COUNT)
+    }
+
+    await kv.put(KV_KEYS.REQUEST_LOGS, JSON.stringify(logs))
+  } catch (err) {
+    console.warn('[storage] 写入请求日志至 KV 异常:', err instanceof Error ? err.message : String(err))
   }
 }
 
-export async function flushPendingLogs(env: Env): Promise<void> {
-  if (logFlushTimer) {
-    clearTimeout(logFlushTimer)
-    logFlushTimer = null
-  }
-  try {
-    await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(inMemoryLogs.slice(0, MAX_MEMORY_LOGS)))
-  } catch {}
+export async function flushPendingLogs(_env: Env): Promise<void> {
+  // 即时落盘模式无需后台定时器刷写
 }
 
 export async function clearLogs(env: Env): Promise<void> {
-  inMemoryLogs.length = 0
-  if (logFlushTimer) {
-    clearTimeout(logFlushTimer)
-    logFlushTimer = null
-  }
-  pendingLogWrites = []
   try {
     await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
-  } catch {}
+  } catch (err) {
+    console.warn('[storage] 清空 KV 日志异常:', err instanceof Error ? err.message : String(err))
+  }
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {
