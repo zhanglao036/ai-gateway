@@ -134,6 +134,7 @@ export interface BusinessMetric {
   successCount: number
   failureCount: number
   lastUsedAt: number
+  lastPersistedAt?: number
 }
 
 export interface TierStorage {

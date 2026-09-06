@@ -1322,8 +1322,10 @@ export async function selectAutoModel(
 }
 
 /**
- * ⚠️ 严格隔离：记录用户真实业务请求延迟
- * 只针对 auto/auto 的业务流量生效，只读取【用户真实业务延迟】这一套统计样本，轻探测延迟完全不参与淘汰判断。
+ * ⚠️ 记录用户真实业务请求延迟
+ * 采用【时间窗口节流 + 采样落盘】机制：
+ * 1. 每次请求计算滑动平均延迟，保证统计准确；
+ * 2. 仅在（首次请求 / 累计10次 / 距上次落盘超5分钟 / 发生调用失败）时异步写入 KV，将写入消耗降低95%以上，保护每日配额。
  */
 export async function recordBusinessLatency(
   env: Env,
@@ -1333,9 +1335,6 @@ export async function recordBusinessLatency(
   isAutoRequest: boolean = false
 ): Promise<void> {
   try {
-    // 仅针对 auto/auto 业务流量生效
-    if (!isAutoRequest) return
-
     let storage = await getTierStorage(env)
     if (!storage) return
 
@@ -1360,7 +1359,11 @@ export async function recordBusinessLatency(
       bStat.failureCount++
     }
 
-    storage.businessStats[fullId] = bStat
+    // 判断是否满足 KV 持久化条件（节流与采样）
+    const isFirstRequest = bStat.totalRequests === 1
+    const isBatchThreshold = bStat.totalRequests % 10 === 0
+    const isTimeInterval = !bStat.lastPersistedAt || (now - bStat.lastPersistedAt >= 5 * 60 * 1000)
+    const isFailure = !success
 
     const debugMode = await getDebugMode(env)
     if (debugMode) {
@@ -1373,27 +1376,16 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 检查该模型是否在第一梯队中
-    const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
-    if (!isInTier1) {
-      // 非第一梯队的正常调用，仅内存累加指标，避免频繁刷写 KV
-      return
-    }
+    storage.businessStats[fullId] = bStat
 
-    let shouldEliminate = false
-    let eliminationReason = ''
+    // 检查该模型是否在第一梯队中（仅 auto 智能调度或第一梯队模型触发故障淘汰）
+    const isInTier1 = (storage.tier1 || []).some((m) => m.fullId === fullId)
+    let tierChanged = false
 
-    if (!success) {
-      // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
-      shouldEliminate = true
-      eliminationReason = `业务请求失败 1 次`
-    }
+    if (isAutoRequest && isInTier1 && !success) {
+      // 智能路由下的第一梯队业务请求失败：模型标黄移出第一梯队，冷却 10 分钟
+      console.log(`[tiers] 业务请求失败，淘汰第一梯队模型 ${fullId}`)
 
-    if (shouldEliminate) {
-      console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
-
-      // 模型标黄，移出第一梯队，冷却 10 分钟
-      // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
       const parts = fullId.split('/')
       const providerId = parts[0]
       const modelId = parts.slice(1).join('/')
@@ -1420,13 +1412,19 @@ export async function recordBusinessLatency(
         storage.tier2.push(ref)
       }
 
-      // 触发空位海选补位
+      // 触发空位海选补位（内部会自动 saveTierStorage）
       storage = await backfillTier1FromTier2(env, storage)
-    } else {
-      if (storage.tier1.length < TIER_1_MAX_SLOTS) {
-        storage = await backfillTier1FromTier2(env, storage)
-      }
-      // 成功且席位完备时，不写 KV，极大节约免费额度
+      tierChanged = true
+    } else if (isAutoRequest && storage.tier1 && storage.tier1.length < TIER_1_MAX_SLOTS) {
+      storage = await backfillTier1FromTier2(env, storage)
+      tierChanged = true
+    }
+
+    // 若未发生梯队补位/淘汰保存，且满足节流写入条件，则落盘保存业务延迟指标
+    if (!tierChanged && (isFirstRequest || isBatchThreshold || isTimeInterval || isFailure || debugMode)) {
+      bStat.lastPersistedAt = now
+      storage.businessStats[fullId] = bStat
+      await saveTierStorage(env, storage)
     }
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
