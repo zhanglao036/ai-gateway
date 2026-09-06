@@ -212,7 +212,7 @@ ${H('首页')}
         <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
           <i class="fas fa-robot" style="color:#8b5cf6;"></i>
           OpenClaw 专属梯队池 (OpenClaw Tier)
-          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:9999px;font-weight:600;">5 席位固定</span>
+          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:9999px;font-weight:600;">6 席位固定</span>
         </h2>
         <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
           针对复杂 Agent、Function Calling 与智能体场景经过 Canary 探针验证的模型池。传入 <code>model: "openclaw/auto"</code> 或请求包含 <code>tools</code> 时自动调度。
@@ -238,9 +238,9 @@ ${H('首页')}
   }'</code></pre>
     </div>
 
-    <!-- OpenClaw 5 个席位卡片 -->
+    <!-- OpenClaw 6 个席位卡片 -->
     <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
-      ${Array.from({ length: 5 }).map((_, idx) => {
+      ${Array.from({ length: 6 }).map((_, idx) => {
         const item = tierOpenclawModels[idx]
         if (item) {
           const probeStat = tierData.probeStats[item.fullId]
@@ -299,7 +299,7 @@ ${H('首页')}
         <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
           <i class="fas fa-palette" style="color:#ec4899;"></i>
           绘图专属梯队池 (Drawing Tier)
-          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fce7f3;color:#be185d;border-radius:9999px;font-weight:600;">5 席位固定</span>
+          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fce7f3;color:#be185d;border-radius:9999px;font-weight:600;">6 席位固定</span>
         </h2>
         <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
           专门收录 DALL-E、Flux、Stable Diffusion 与各类图像生成模型。传入 <code>model: "drawing/auto"</code> 或请求 <code>/v1/images/generations</code> 接口时自动调度。
@@ -324,9 +324,9 @@ ${H('首页')}
   }'</code></pre>
     </div>
 
-    <!-- 绘图 5 个席位卡片 -->
+    <!-- 绘图 6 个席位卡片 -->
     <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
-      ${Array.from({ length: 5 }).map((_, idx) => {
+      ${Array.from({ length: 6 }).map((_, idx) => {
         const item = tierDrawingModels[idx]
         if (item) {
           const probeStat = tierData.probeStats[item.fullId]

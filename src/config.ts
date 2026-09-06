@@ -28,8 +28,10 @@ export const LOG_BATCH_SIZE = 10
 export const LOG_FLUSH_INTERVAL_MS = 30000
 
 export const TIER_1_MAX_SLOTS = 9
-export const TIER_OPENCLAW_MAX_SLOTS = 5
-export const TIER_DRAWING_MAX_SLOTS = 5
+// OpenClaw 专属梯队池席位上限：由原有的 5 席增加为 6 席
+export const TIER_OPENCLAW_MAX_SLOTS = 6
+// 绘图专属梯队池席位上限：由原有的 5 席增加为 6 席
+export const TIER_DRAWING_MAX_SLOTS = 6
 
 export const KV_KEYS = {
   PROVIDERS: 'providers',

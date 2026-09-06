@@ -956,7 +956,7 @@ export function isDrawingModel(modelId: string, category?: string): boolean {
 /**
  * 为 OpenClaw 专属梯队池补位：
  * 筛选全系统中 openclawCompatible === true 的健康模型，
- * 补足到 TIER_OPENCLAW_MAX_SLOTS (默认 5 席)
+ * 补足到 TIER_OPENCLAW_MAX_SLOTS (默认 6 席)
  */
 export async function backfillOpenclawTier(env: Env, storage: TierStorage): Promise<TierStorage> {
   storage.tierOpenclaw = storage.tierOpenclaw || []
@@ -1015,7 +1015,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 /**
  * 为绘图专属梯队池补位：
  * 筛选全系统中标记或识别为【绘图】的健康模型，
- * 补足到 TIER_DRAWING_MAX_SLOTS (默认 5 席)
+ * 补足到 TIER_DRAWING_MAX_SLOTS (默认 6 席)
  */
 export async function backfillDrawingTier(env: Env, storage: TierStorage): Promise<TierStorage> {
   storage.tierDrawing = storage.tierDrawing || []
@@ -1094,7 +1094,49 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
     existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
 
-    // 2. 将新增的可用模型实时同步加入第二梯队待命
+    // 2. 检查专属梯队池是否达到新的席位上限（6 席），若有空位自动从可用候选中填满
+    if (existing.tierOpenclaw.length < TIER_OPENCLAW_MAX_SLOTS) {
+      const openclawExistingIds = new Set(existing.tierOpenclaw.map((m) => m.fullId))
+      for (const item of allModels) {
+        if (existing.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+        if (openclawExistingIds.has(item.fullId)) continue
+        const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+        const isMatch = mConfig?.openclawTested
+          ? mConfig.openclawCompatible
+          : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
+        if (isMatch) {
+          existing.tierOpenclaw.push({
+            providerId: item.provider.id,
+            modelId: item.modelId,
+            fullId: item.fullId,
+            addedAt: now,
+          })
+          openclawExistingIds.add(item.fullId)
+          changed = true
+        }
+      }
+    }
+
+    if (existing.tierDrawing.length < TIER_DRAWING_MAX_SLOTS) {
+      const drawingExistingIds = new Set(existing.tierDrawing.map((m) => m.fullId))
+      for (const item of allModels) {
+        if (existing.tierDrawing.length >= TIER_DRAWING_MAX_SLOTS) break
+        if (drawingExistingIds.has(item.fullId)) continue
+        const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+        if (isDrawingModel(item.modelId, mConfig?.category)) {
+          existing.tierDrawing.push({
+            providerId: item.provider.id,
+            modelId: item.modelId,
+            fullId: item.fullId,
+            addedAt: now,
+          })
+          drawingExistingIds.add(item.fullId)
+          changed = true
+        }
+      }
+    }
+
+    // 3. 将新增的可用模型实时同步加入第二梯队待命
     for (const item of allModels) {
       const isInTier1 = existing.tier1.some((x) => x.fullId === item.fullId)
       const isInTier2 = (existing.tier2 || []).some((x) => x.fullId === item.fullId)
