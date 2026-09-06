@@ -1,4 +1,5 @@
-import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
+import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS, DEFAULT_POOL_TIMEOUTS } from './config'
+import type { PoolTimeoutConfig } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
 import { createLocalKV } from './localKv'
 
@@ -377,14 +378,19 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
+    // 检查是否为异常/报错请求 (HTTP 状态码非 200，或者包含错误原因)
+    const isErrorLog = (log.status !== undefined && log.status !== 200) || !!log.error
+
     // 检查调试模式是否开启（支持 KV 配置和环境变量）
     const isDbg = await getDebugMode(env)
-    if (!isDbg) {
-      // 调试模式关闭：彻底不记录日志，0 性能损耗，0 KV 写入消耗
+
+    // 成功请求在关闭调试模式时：彻底不记录日志，0 性能损耗，0 KV 写入消耗
+    // 报错请求特权通道：只要模型报错，不受调试开关影响，100% 立即存入日志便于排查
+    if (!isErrorLog && !isDbg) {
       return
     }
 
-    // 调试模式开启：即时同步落盘写入 KV，绝不丢失任何请求记录
+    // 即时同步落盘写入 KV，绝不丢失任何异常报错或排查记录
     const kv = getKV(env)
     let logs: RequestLog[] = []
     try {
@@ -417,6 +423,58 @@ export async function clearLogs(env: Env): Promise<void> {
   } catch (err) {
     console.warn('[storage] 清空 KV 日志异常:', err instanceof Error ? err.message : String(err))
   }
+}
+
+// ===== 各梯队池独立请求超时配置管理 =====
+
+// 单实例内存缓存（1分钟有效，避免重复查询 KV）
+let cachedPoolTimeouts: PoolTimeoutConfig | null = null
+let cachedPoolTimeoutsTime = 0
+
+/**
+ * 获取各梯队池的请求超时配置（秒）
+ */
+export async function getPoolTimeouts(env: Env): Promise<PoolTimeoutConfig> {
+  const now = Date.now()
+  if (cachedPoolTimeouts && now - cachedPoolTimeoutsTime < 60000) {
+    return cachedPoolTimeouts
+  }
+  try {
+    const raw = await kvGet(env, KV_KEYS.TIMEOUT_CONFIG)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      cachedPoolTimeouts = {
+        generalTimeout: typeof parsed.generalTimeout === 'number' && parsed.generalTimeout > 0 ? parsed.generalTimeout : DEFAULT_POOL_TIMEOUTS.generalTimeout,
+        openclawTimeout: typeof parsed.openclawTimeout === 'number' && parsed.openclawTimeout > 0 ? parsed.openclawTimeout : DEFAULT_POOL_TIMEOUTS.openclawTimeout,
+        drawingTimeout: typeof parsed.drawingTimeout === 'number' && parsed.drawingTimeout > 0 ? parsed.drawingTimeout : DEFAULT_POOL_TIMEOUTS.drawingTimeout,
+      }
+      cachedPoolTimeoutsTime = now
+      return cachedPoolTimeouts
+    }
+  } catch (err) {
+    console.warn('[storage] 读取梯队池超时配置异常:', err instanceof Error ? err.message : String(err))
+  }
+  cachedPoolTimeouts = { ...DEFAULT_POOL_TIMEOUTS }
+  cachedPoolTimeoutsTime = now
+  return cachedPoolTimeouts
+}
+
+/**
+ * 保存各梯队池的请求超时配置（秒）
+ */
+export async function savePoolTimeouts(env: Env, config: Partial<PoolTimeoutConfig>): Promise<PoolTimeoutConfig> {
+  const current = await getPoolTimeouts(env)
+  const cleaned: PoolTimeoutConfig = {
+    // 限制单次超时在 5 秒 ~ 600 秒之间，防止异常过小或过大值
+    generalTimeout: Math.max(5, Math.min(600, Number(config.generalTimeout) || current.generalTimeout || DEFAULT_POOL_TIMEOUTS.generalTimeout)),
+    openclawTimeout: Math.max(5, Math.min(600, Number(config.openclawTimeout) || current.openclawTimeout || DEFAULT_POOL_TIMEOUTS.openclawTimeout)),
+    drawingTimeout: Math.max(5, Math.min(600, Number(config.drawingTimeout) || current.drawingTimeout || DEFAULT_POOL_TIMEOUTS.drawingTimeout)),
+  }
+  await kvPut(env, KV_KEYS.TIMEOUT_CONFIG, JSON.stringify(cleaned))
+  await flushPendingWrites(env)
+  cachedPoolTimeouts = cleaned
+  cachedPoolTimeoutsTime = Date.now()
+  return cleaned
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {

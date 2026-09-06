@@ -1,5 +1,5 @@
 import { Context } from 'hono'
-import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
+import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes, getPoolTimeouts } from './storage'
 import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './config'
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
@@ -560,6 +560,16 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
     }
 
+    // 获取各梯队池的独立超时设置，按当前请求目标池计算单次超时（秒）
+    const poolTimeouts = await getPoolTimeouts(c.env)
+    let requestTimeoutSec = poolTimeouts.generalTimeout
+    if (poolType === 'openclaw') {
+      requestTimeoutSec = poolTimeouts.openclawTimeout
+    } else if (poolType === 'drawing') {
+      requestTimeoutSec = poolTimeouts.drawingTimeout
+    }
+    const requestTimeoutMs = requestTimeoutSec * 1000
+
     const triedProviders = new Set<string>()
     let currentModel = model
     let attempts = 0
@@ -839,7 +849,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(requestTimeoutMs),
         })
 
         if (response.ok) {

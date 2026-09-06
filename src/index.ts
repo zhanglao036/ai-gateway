@@ -36,6 +36,8 @@ import {
   handleUpdateModelStatus,
   handleGetTiers,
   handleTestBlockedModels,
+  handleGetTimeouts,
+  handleSaveTimeouts,
 } from './admin'
 import { renderHomePage, renderLoginPage, renderAdminPage } from './pages'
 import { seedInitialData, getSession } from './storage'
@@ -171,6 +173,10 @@ app.get('/admin/api/logs', handleGetLogs)
 app.delete('/admin/api/logs', handleClearLogs)
 app.get('/admin/api/debug-mode', handleGetDebugMode)
 app.post('/admin/api/debug-mode', handleToggleDebugMode)
+
+// 各梯队池独立超时设置
+app.get('/admin/api/timeouts', handleGetTimeouts)
+app.post('/admin/api/timeouts', handleSaveTimeouts)
 
 // 自定义指定模型路由
 app.get('/admin/api/custom-routes', handleGetCustomRoutes)

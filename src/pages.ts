@@ -1,5 +1,5 @@
 import { Context } from 'hono'
-import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
+import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes, getPoolTimeouts } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env, TierStorage } from './types'
 import { CSS_CONTENT } from './pages.css'
@@ -812,6 +812,7 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
   const logs = await getLogs(c.env)
   const logConfig = await getLogConfig(c.env)
   const customRoutes = await getCustomModelRoutes(c.env)
+  const poolTimeouts = await getPoolTimeouts(c.env)
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
   const modelsCount = providers.reduce((total, provider) => total + provider.models.length, 0)
@@ -829,6 +830,7 @@ ${H('管理')}
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
+      <a class="admin-nav__link" href="#timeouts"><i class="fas fa-stopwatch" aria-hidden="true"></i><span>超时控制</span></a>
       <a class="admin-nav__link" href="#providers"><i class="fas fa-server" aria-hidden="true"></i><span>提供商</span><b>${providers.length}</b></a>
       <a class="admin-nav__link" href="#custom-routes"><i class="fas fa-route" aria-hidden="true"></i><span>指定模型路由</span><b id="custom-routes-count-badge">${customRoutes.length}</b></a>
       <a class="admin-nav__link" href="#proxy-keys"><i class="fas fa-key" aria-hidden="true"></i><span>转发 Key</span><b>${proxyKeys.length}</b></a>
@@ -851,7 +853,7 @@ ${H('管理')}
   <div class="admin-main">
     <header class="admin-topbar">
       <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span></a>
-      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
+      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#timeouts">超时</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
       <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
       <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
     </header>
@@ -878,6 +880,95 @@ ${H('管理')}
           <div><span>${modelsCount}</span><p>模型</p><small>${enabledModelsCount} 个可用</small></div>
           <div><span>${proxyKeys.length}</span><p>转发 Key</p><small>${enabledProxyKeysCount} 个可用</small></div>
           <div><span class="status-dot status-dot--online"><i aria-hidden="true"></i>已配置</span><p>存储</p><small>Cloudflare KV</small></div>
+        </div>
+      </section>
+
+      <!-- 各梯队池请求超时独立控制区 -->
+      <section id="timeouts" class="workspace-section" aria-labelledby="timeouts-title">
+        <div class="section-heading section-heading--admin">
+          <div>
+            <h2 id="timeouts-title" style="display:flex;align-items:center;gap:8px;">
+              <i class="fas fa-stopwatch" style="color:var(--color-brand);"></i>
+              各梯队池请求超时独立控制
+            </h2>
+            <p>为每个梯队池独立配置上游模型单次调用的超时等待时间。超时后自动无缝切换备用模型，彻底告别卡死。</p>
+          </div>
+          <button type="button" class="btn btn-p" onclick="saveTimeoutsBtn()"><i class="fas fa-save" aria-hidden="true"></i> 💾 保存超时设置</button>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;margin-bottom:20px;">
+          <!-- OpenClaw 专属池超时卡片 -->
+          <div style="background:var(--color-paper);border:1px solid #ddd6fe;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(139,92,246,0.06);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-weight:700;font-size:14px;color:#6d28d9;display:flex;align-items:center;gap:6px;">
+                <i class="fas fa-robot"></i> OpenClaw 专属池
+              </span>
+              <span style="font-size:11px;background:#ede9fe;color:#7c3aed;padding:2px 8px;border-radius:999px;font-weight:600;">智能体专属</span>
+            </div>
+            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
+              针对 <code>openclaw/auto</code> 或包含 tools 工具调用的请求生效。
+            </p>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <input type="number" id="timeout-openclaw" class="form-input" min="5" max="600" value="${poolTimeouts.openclawTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #c4b5fd;">
+              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
+            </div>
+            <div style="font-size:11px;color:#7c3aed;margin-top:8px;line-height:1.5;">
+              💡 保持默认 60 秒。若客户端频繁提示 Cause: timeout，建议您手动调为 20~25 秒。
+            </div>
+          </div>
+
+          <!-- 通用第一梯队池超时卡片 -->
+          <div style="background:var(--color-paper);border:1px solid #fed7aa;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(249,115,22,0.06);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-weight:700;font-size:14px;color:#c2410c;display:flex;align-items:center;gap:6px;">
+                <i class="fas fa-bolt"></i> 第一梯队（通用池）
+              </span>
+              <span style="font-size:11px;background:#ffedd5;color:#ea580c;padding:2px 8px;border-radius:999px;font-weight:600;">日常对话</span>
+            </div>
+            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
+              针对 <code>auto</code> 智能调度或普通对话请求生效。
+            </p>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <input type="number" id="timeout-general" class="form-input" min="5" max="600" value="${poolTimeouts.generalTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #fdba74;">
+              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
+            </div>
+            <div style="font-size:11px;color:#ea580c;margin-top:8px;line-height:1.5;">
+              💡 保持默认 60 秒。兼顾深度推理与稳定性，可根据个人网络按需微调。
+            </div>
+          </div>
+
+          <!-- 绘图专属池超时卡片 -->
+          <div style="background:var(--color-paper);border:1px solid #fbcfe8;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(236,72,153,0.06);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <span style="font-weight:700;font-size:14px;color:#be185d;display:flex;align-items:center;gap:6px;">
+                <i class="fas fa-palette"></i> 绘图专属池
+              </span>
+              <span style="font-size:11px;background:#fce7f3;color:#db2777;padding:2px 8px;border-radius:999px;font-weight:600;">AI生图</span>
+            </div>
+            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
+              针对 <code>drawing/auto</code> 或生图接口生效。
+            </p>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <input type="number" id="timeout-drawing" class="form-input" min="5" max="600" value="${poolTimeouts.drawingTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #f472b6;">
+              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
+            </div>
+            <div style="font-size:11px;color:#db2777;margin-top:8px;line-height:1.5;">
+              💡 保持默认 60 秒。由于 AI 画图耗时较长，建议保持 60 秒或更大数值。
+            </div>
+          </div>
+        </div>
+
+        <!-- 小白能看懂的规则与使用指南卡片 -->
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:var(--radius-panel);padding:16px 20px;">
+          <h4 style="margin:0 0 8px 0;font-size:13px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:6px;">
+            <i class="fas fa-info-circle" style="color:#3b82f6;"></i> 超时与无缝自动切换机制说明指南
+          </h4>
+          <ul style="margin:0;padding-left:18px;font-size:12px;color:#475569;line-height:1.8;">
+            <li><strong>故障自愈与自动切换</strong>：客户端请求时，若当前模型响应卡死达到上述设定的超时时间，网关会自动判定该模型异常，并在同一连接中<strong>立刻无缝切换至下一个备用模型</strong>继续作答。</li>
+            <li><strong>如何解决 OpenClaw 报错 Cause: timeout</strong>：OpenClaw 客户端自身只等待 60~120 秒。如果网关单次等待 60 秒，客户端可能提前失去耐心报错。<strong>手动将 OpenClaw 专属池超时改为 20~25 秒</strong>，可以让网关在机器人断开前完成多次重试切换，彻底避免报错。</li>
+            <li><strong>保存即生效与极度省流</strong>：点击【💾 保存超时设置】后仅写入 1 次 Cloudflare KV 并即时生效，平时调用 0 次 KV 消耗，0 性能延迟。</li>
+            <li><strong>报错日志保障</strong>：无论下方的“调试模式”是否开启，<strong>所有超时与报错日志均 100% 强制存入日志面板</strong>，方便您随时排查定位。</li>
+          </ul>
         </div>
       </section>
 
@@ -2539,6 +2630,50 @@ async function fetchLogs() {
     }
   } catch (err) {
     console.error('获取请求日志失败:', err);
+  }
+}
+
+async function saveTimeoutsBtn() {
+  var oInput = document.getElementById('timeout-openclaw');
+  var gInput = document.getElementById('timeout-general');
+  var dInput = document.getElementById('timeout-drawing');
+
+  var oVal = oInput ? parseInt(oInput.value, 10) : 60;
+  var gVal = gInput ? parseInt(gInput.value, 10) : 60;
+  var dVal = dInput ? parseInt(dInput.value, 10) : 60;
+
+  if (isNaN(oVal) || oVal < 5 || oVal > 600) {
+    toast('OpenClaw 专属池超时请输入 5 ~ 600 秒之间的数字', 'error');
+    return;
+  }
+  if (isNaN(gVal) || gVal < 5 || gVal > 600) {
+    toast('第一梯队通用池超时请输入 5 ~ 600 秒之间的数字', 'error');
+    return;
+  }
+  if (isNaN(dVal) || dVal < 5 || dVal > 600) {
+    toast('绘图专属池超时请输入 5 ~ 600 秒之间的数字', 'error');
+    return;
+  }
+
+  toast('正在保存各梯队池超时设置...', 'info');
+  try {
+    var res = await fetch('/admin/api/timeouts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        openclawTimeout: oVal,
+        generalTimeout: gVal,
+        drawingTimeout: dVal,
+      })
+    });
+    var json = await res.json();
+    if (json.success) {
+      toast('各梯队池超时设置已成功保存并立即生效！', 'success');
+    } else {
+      toast(json.message || '保存超时设置失败', 'error');
+    }
+  } catch (err) {
+    toast('保存超时设置请求异常', 'error');
   }
 }
 

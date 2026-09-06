@@ -44,7 +44,25 @@ export const KV_KEYS = {
   LOG_CONFIG: 'config:log_settings',
   CUSTOM_MODEL_ROUTES: 'config:custom_model_routes',
   TIER_DATA: 'gateway:tier_data',
+  TIMEOUT_CONFIG: 'system:timeout_config',
 } as const
+
+// 各梯队池独立超时配置结构定义
+export interface PoolTimeoutConfig {
+  // 第一梯队（通用池）超时时长，单位秒，默认 60 秒
+  generalTimeout: number
+  // OpenClaw 专属池超时时长，单位秒，默认 60 秒
+  openclawTimeout: number
+  // 绘图专属池超时时长，单位秒，默认 60 秒
+  drawingTimeout: number
+}
+
+// 梯队池默认超时配置（严格保持 60 秒不变，由用户后续自主修改）
+export const DEFAULT_POOL_TIMEOUTS: PoolTimeoutConfig = {
+  generalTimeout: 60,
+  openclawTimeout: 60,
+  drawingTimeout: 60,
+}
 
 // 有效期选项（秒）
 export const EXPIRY_OPTIONS: Record<string, number | null> = {

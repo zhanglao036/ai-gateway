@@ -20,10 +20,12 @@ import {
   getCustomModelRoutes,
   saveCustomModelRoutes,
   saveAllUnifiedConfig,
+  getPoolTimeouts,
+  savePoolTimeouts,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
-import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL } from './config'
+import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL, PoolTimeoutConfig } from './config'
 import {
   deduplicateAndClassifyModels,
   resetAllCooldowns,
@@ -1069,4 +1071,24 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
   } finally {
     isProbeRunning = false
   }
+}
+
+/** 获取各梯队池的请求超时设置 */
+export async function handleGetTimeouts(c: Context<{ Bindings: Env }>) {
+  const timeouts = await getPoolTimeouts(c.env)
+  return c.json<ApiResponse>({
+    success: true,
+    data: timeouts,
+  })
+}
+
+/** 保存各梯队池的请求超时设置 */
+export async function handleSaveTimeouts(c: Context<{ Bindings: Env }>) {
+  const body = await c.req.json<Partial<PoolTimeoutConfig>>().catch(() => ({}))
+  const saved = await savePoolTimeouts(c.env, body)
+  return c.json<ApiResponse>({
+    success: true,
+    data: saved,
+    message: '各梯队池超时设置已成功保存并立即生效',
+  })
 }
