@@ -259,8 +259,7 @@ export async function testModelConnection(
   modelId: string,
   apiType?: 'openai' | 'anthropic',
   category?: string,
-  existingOpenClaw?: { openclawTested?: boolean; openclawCompatible?: boolean; openclawReason?: string | null },
-  useBrowserUA?: boolean
+  existingOpenClaw?: { openclawTested?: boolean; openclawCompatible?: boolean; openclawReason?: string | null }
 ): Promise<{
   success: boolean
   message: string
@@ -277,9 +276,7 @@ export async function testModelConnection(
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-    }
-    if (useBrowserUA) {
-      headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     if (apiType === 'anthropic') {
       headers['x-api-key'] = apiKey
@@ -830,9 +827,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       try {
         const forwardHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
-        }
-        if (provider.useBrowserUA) {
-          forwardHeaders['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         if (provider.apiType === 'anthropic') {
           forwardHeaders['x-api-key'] = apiKey

@@ -83,12 +83,12 @@ function showResult(el, success, msg) {
 }
 
 // ── API 请求函数 ──
-async function testKeyConnection(url, apiType, key, providerId, useBrowserUA) {
+async function testKeyConnection(url, apiType, key, providerId) {
   try {
     var r = await fetch('/admin/api/test-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url, apiKey: key, apiType: apiType, providerId: providerId, useBrowserUA: useBrowserUA })
+      body: JSON.stringify({ url: url, apiKey: key, apiType: apiType, providerId: providerId })
     })
     var d = await r.json()
     if (d.success && d.data) {
@@ -99,12 +99,12 @@ async function testKeyConnection(url, apiType, key, providerId, useBrowserUA) {
     return { success: false, status: 0, data: null }
   }
 }
-async function testModelConnection(url, apiType, key, modelId, providerId, useBrowserUA) {
+async function testModelConnection(url, apiType, key, modelId, providerId) {
   try {
     var r = await fetch('/admin/api/test-model', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url, apiKey: key, apiType: apiType, model: modelId, providerId: providerId, useBrowserUA: useBrowserUA })
+      body: JSON.stringify({ url: url, apiKey: key, apiType: apiType, model: modelId, providerId: providerId })
     })
     var d = await r.json()
     if (d.success && d.data) {

@@ -285,8 +285,7 @@ export async function runSingleModelProbe(
           openclawTested: modelConfig.openclawTested,
           openclawCompatible: modelConfig.openclawCompatible,
           openclawReason: modelConfig.openclawReason,
-        } : undefined,
-        provider.useBrowserUA
+        } : undefined
       )
       success = res.success
       statusCode = res.statusCode || (success ? 200 : 500)
