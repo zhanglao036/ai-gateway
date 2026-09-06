@@ -21,12 +21,15 @@ export async function getTierStorage(env: Env): Promise<TierStorage | null> {
 
 /**
  * 批量写入/保存梯队数据到 KV
- * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)
+ * 采用顺风车打包落盘机制，修改后立即刷盘，确保页面刷新即刻看到最新结果
  */
 export async function saveTierStorage(env: Env, data: TierStorage): Promise<void> {
   try {
     data.updatedAt = new Date().toISOString()
+    // 写入梯队数据
     await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
+    // 顺风车立即刷盘，确保 Cloudflare KV 立即持久化最新状态
+    await flushPendingWrites(env)
   } catch (err) {
     console.warn('[tiers] 保存梯队数据异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
@@ -985,29 +988,27 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
     return latA - latB
   })
 
-  // 逐个探测并择优补位
+  // 逐个择优秒级补位，不在此处阻塞等待长达数十秒的远程网络测试
   for (const item of candidates) {
+    // 达到席位上限则停止补位
     if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
 
     const mConfig = item.provider.models.find((x) => x.id === item.modelId)
-    // 已经明确测试过且不兼容的跳过
+    // 已经明确测试过且不兼容 OpenClaw 的跳过
     if (mConfig?.openclawTested && !mConfig.openclawCompatible) {
       continue
     }
 
-    const metric = await runSingleModelProbe(env, item.provider, item.modelId)
-    storage.probeStats[item.fullId] = metric
-
-    if (metric.success && metric.openclawCompatible) {
-      storage.tierOpenclaw.push({
-        providerId: item.provider.id,
-        modelId: item.modelId,
-        fullId: item.fullId,
-        addedAt: Date.now(),
-      })
-    }
+    // 立即入选席位并记录上岗时间
+    storage.tierOpenclaw.push({
+      providerId: item.provider.id,
+      modelId: item.modelId,
+      fullId: item.fullId,
+      addedAt: Date.now(),
+    })
   }
 
+  // 立即存入 KV，确保前端刷新秒级生效
   await saveTierStorage(env, storage)
   return storage
 }
@@ -1043,23 +1044,21 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
     return latA - latB
   })
 
-  // 探测并择优补位
+  // 逐个择优秒级补位，不在此处阻塞等待远程网络测试
   for (const item of candidates) {
+    // 达到绘图席位上限则停止补位
     if (storage.tierDrawing.length >= TIER_DRAWING_MAX_SLOTS) break
 
-    const metric = await runSingleModelProbe(env, item.provider, item.modelId)
-    storage.probeStats[item.fullId] = metric
-
-    if (metric.success) {
-      storage.tierDrawing.push({
-        providerId: item.provider.id,
-        modelId: item.modelId,
-        fullId: item.fullId,
-        addedAt: Date.now(),
-      })
-    }
+    // 立即入选绘图席位并记录上岗时间
+    storage.tierDrawing.push({
+      providerId: item.provider.id,
+      modelId: item.modelId,
+      fullId: item.fullId,
+      addedAt: Date.now(),
+    })
   }
 
+  // 立即存入 KV，确保前端刷新秒级生效
   await saveTierStorage(env, storage)
   return storage
 }
@@ -1407,26 +1406,20 @@ export async function recordBusinessLatency(
     const isTimeInterval = !bStat.lastPersistedAt || (now - bStat.lastPersistedAt >= 5 * 60 * 1000)
     const isFailure = !success
 
-    const debugMode = await getDebugMode(env)
-    if (debugMode) {
-      // 调试模式：将最新请求延迟与结果实时同步更新至 probeStats，方便前端直接展示最新探测/调用延迟
-      storage.probeStats[fullId] = {
-        success,
-        latency: Math.round(latency),
-        lastTestedAt: now,
-        error: success ? undefined : '调用异常/失败',
-      }
-    }
+    // 严禁在此处将业务请求耗时覆盖写入 probeStats（探针延迟），两者彻底解绑，职责清晰：
+    // probeStats 专属于轻量探针测试基准延迟；businessStats 专属于真实业务请求耗时。
 
     storage.businessStats[fullId] = bStat
 
-    // 检查该模型是否在第一梯队中（仅 auto 智能调度或第一梯队模型触发故障淘汰）
+    // 检查该模型是否在第一梯队或各专属梯队中
     const isInTier1 = (storage.tier1 || []).some((m) => m.fullId === fullId)
+    const isInOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+    const isInDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
     let tierChanged = false
 
-    if (isAutoRequest && isInTier1 && !success) {
-      // 智能路由下的第一梯队业务请求失败：模型标黄移出第一梯队，冷却 10 分钟
-      console.log(`[tiers] 业务请求失败，淘汰第一梯队模型 ${fullId}`)
+    if (!success && (isInTier1 || isInOpenclaw || isInDrawing)) {
+      // 业务请求失败：模型标黄并设置冷却时间
+      console.log(`[tiers] 业务请求失败，淘汰故障模型 ${fullId}`)
 
       const parts = fullId.split('/')
       const providerId = parts[0]
@@ -1447,20 +1440,36 @@ export async function recordBusinessLatency(
         }
       }
 
-      // 移出第一梯队，回到第二梯队候选池
-      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-      const ref = { providerId, modelId, fullId, addedAt: now }
-      if (!storage.tier2.some((m) => m.fullId === fullId)) {
-        storage.tier2.push(ref)
+      // 如果在第一梯队，移出第一梯队回到第二梯队待命
+      if (isInTier1) {
+        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+        const ref = { providerId, modelId, fullId, addedAt: now }
+        if (!storage.tier2.some((m) => m.fullId === fullId)) {
+          storage.tier2.push(ref)
+        }
+        storage = await backfillTier1FromTier2(env, storage)
+        tierChanged = true
       }
 
-      // 触发空位海选补位（内部会自动 saveTierStorage）
-      storage = await backfillTier1FromTier2(env, storage)
-      tierChanged = true
+      // 如果在 OpenClaw 专属池，移出并秒级补位
+      if (isInOpenclaw && storage.tierOpenclaw) {
+        storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        storage = await backfillOpenclawTier(env, storage)
+        tierChanged = true
+      }
+
+      // 如果在绘图专属池，移出并秒级补位
+      if (isInDrawing && storage.tierDrawing) {
+        storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
+        storage = await backfillDrawingTier(env, storage)
+        tierChanged = true
+      }
     } else if (isAutoRequest && storage.tier1 && storage.tier1.length < TIER_1_MAX_SLOTS) {
       storage = await backfillTier1FromTier2(env, storage)
       tierChanged = true
     }
+
+    const debugMode = await getDebugMode(env)
 
     // 若未发生梯队补位/淘汰保存，且满足节流写入条件，则落盘保存业务延迟指标
     if (!tierChanged && (isFirstRequest || isBatchThreshold || isTimeInterval || isFailure || debugMode)) {

@@ -88,7 +88,12 @@ export async function setDebugMode(env: Env, enabled: boolean): Promise<void> {
   await saveLogConfig(env, { debugMode: enabled })
 }
 
+// 记录最近一次落盘到 KV 的内容指纹，如果新写入内容完全一致，则直接拦截，节省 KV 写入额度
+const lastWrittenContent = new Map<string, string>()
+
+// 获取 KV 键对应的值，优先读取内存缓存以减少 KV 读操作
 export async function kvGet(env: Env, key: string): Promise<string | null> {
+  // 检查内存中是否存在未过期数据
   const mem = memoryCache.get(key)
   if (mem) {
     if (!mem.expiresAt || mem.expiresAt > Date.now()) {
@@ -97,6 +102,7 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
       memoryCache.delete(key)
     }
   }
+  // 内存未命中，从 Cloudflare KV 读取
   const val = await getKV(env).get(key)
   if (val !== null) {
     memoryCache.set(key, { value: val })
@@ -104,27 +110,38 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
   return val
 }
 
+// 写入数据：更新内存，并加入待写入暂存箱，支持顺风车打包落盘
 export async function kvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
   const expiresAt = options?.expirationTtl ? Date.now() + options.expirationTtl * 1000 : undefined
+  // 同步更新内存缓存，确保读取立即可见
   memoryCache.set(key, { value, expiresAt })
+
+  // 内容比对：如果与上次成功落盘的内容完全一致，无需重复写入 KV，0 次消耗
+  if (lastWrittenContent.get(key) === value) {
+    pendingWrites.delete(key)
+    return
+  }
 
   if (isDebugMode(env)) {
     // 调试模式：立即直接落盘 KV
     try {
       await getKV(env).put(key, value, options)
+      lastWrittenContent.set(key, value)
     } catch (err) {
       console.warn(`[storage] 调试模式写入 KV 异常 (key: ${key}, 已静默降级):`, err instanceof Error ? err.message : String(err))
     }
     return
   }
 
-  // 正式模式：合并内存批量/延迟落盘，降低 KV 写入频率
+  // 正式模式：加入暂存箱，等待顺风车批量落盘，降低 KV 写入频率
   pendingWrites.set(key, { value, options, isDelete: false })
   scheduleFlush(env)
 }
 
+// 删除数据：清除内存并记录待删除操作
 export async function kvDelete(env: Env, key: string): Promise<void> {
   memoryCache.delete(key)
+  lastWrittenContent.delete(key)
   if (isDebugMode(env)) {
     await getKV(env).delete(key)
     return
@@ -133,6 +150,7 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
   scheduleFlush(env)
 }
 
+// 调度后台延迟刷盘定时器
 function scheduleFlush(env: Env) {
   if (flushTimer) return
   flushTimer = setTimeout(() => {
@@ -141,19 +159,44 @@ function scheduleFlush(env: Env) {
   }, 1000)
 }
 
+/**
+ * 顺风车批量打包刷盘函数：
+ * 一次性将暂存箱（pendingWrites）中的所有待写入数据同步写入 KV，
+ * 避免各自单独发起写操作，最大化节省 Cloudflare KV 每天 1000 次的写入限额。
+ */
 export async function flushPendingWrites(env: Env): Promise<void> {
+  // 如果暂存箱为空，直接退出
   if (pendingWrites.size === 0) return
+
+  // 清除定时器，避免重复执行
+  if (flushTimer) {
+    clearTimeout(flushTimer)
+    flushTimer = null
+  }
+
+  // 取出当前所有待写入项并清空暂存箱
   const entries = Array.from(pendingWrites.entries())
   pendingWrites.clear()
+
+  // 循环逐项写入 Cloudflare KV
   for (const [key, item] of entries) {
     try {
       if (item.isDelete) {
+        // 执行删除操作
         await getKV(env).delete(key)
+        lastWrittenContent.delete(key)
       } else {
+        // 再次检查内容指纹，完全一致则跳过写入
+        if (lastWrittenContent.get(key) === item.value) {
+          continue
+        }
+        // 执行写入操作
         await getKV(env).put(key, item.value, item.options)
+        // 记录最新指纹
+        lastWrittenContent.set(key, item.value)
       }
     } catch (err) {
-      console.error(`[storage] KV flush error for key ${key}:`, err)
+      console.error(`[storage] KV 顺风车刷盘异常 (key: ${key}):`, err)
     }
   }
 }

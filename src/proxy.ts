@@ -4,7 +4,7 @@ import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './conf
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
 import { detectPermanentFailure } from './models'
-import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
+import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
   try {
@@ -108,15 +108,21 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       }
 
       if (changed) {
+        // 记录探针异常状态
         storage.probeStats[fullId] = {
           success: false,
           latency: 0,
           lastTestedAt: Date.now(),
           error: `HTTP ${status}: ${errorMsg}`,
         }
+        // 如果在第一梯队或永久失效，秒级自动补位
         if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
+        // 如果在 OpenClaw 专属池或永久失效，秒级自动补位
         if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
+        // 如果在绘图专属池或永久失效，秒级自动补位
         if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
+        // 立即顺风车落盘至 KV，保证前台 F5 刷新即刻看到最新结果
+        await saveTierStorage(env, storage)
       }
     }
   } catch (err) {
