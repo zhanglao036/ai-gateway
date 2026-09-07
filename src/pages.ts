@@ -4,7 +4,7 @@ import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env, TierStorage } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
-import { getTierStorage } from './tiers'
+import { getTierStorage, ensureTierStorage } from './tiers'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -44,7 +44,22 @@ export async function renderHomePage(c: Context<{ Bindings: Env }>, isLoggedIn: 
     lastProbeDate: '',
     modelCursors: {},
   }
-  const tierData = (await getTierStorage(c.env)) || defaultTierData
+  let tierData = await getTierStorage(c.env)
+  if (!tierData) {
+    // 首次进入无梯队数据，触发初始化
+    tierData = await ensureTierStorage(c.env)
+  } else {
+    // 若现有梯队中存在尚无探针数据的席位（如绘图池补位未探测的历史遗留），平滑调用 ensureTierStorage 并发补测并存盘
+    const hasMissingProbe = [
+      ...(tierData.tier1 || []),
+      ...(tierData.tierOpenclaw || []),
+      ...(tierData.tierDrawing || []),
+    ].some((seat) => !tierData?.probeStats?.[seat.fullId])
+    if (hasMissingProbe) {
+      tierData = await ensureTierStorage(c.env)
+    }
+  }
+  tierData = tierData || defaultTierData
   const tier1Models = tierData.tier1 || []
   const tierOpenclawModels = tierData.tierOpenclaw || []
   const tierDrawingModels = tierData.tierDrawing || []
@@ -115,8 +130,8 @@ ${H('首页')}
     <div class="metric"><span class="metric__value">${enabledProviders.length}</span><span class="metric__label">已启用提供商</span></div>
     <div class="metric"><span class="metric__value">${allModelsCount}</span><span class="metric__label">模型总计</span></div>
     <div class="metric"><span class="metric__value">${tier1Models.length} / 9</span><span class="metric__label">第一梯队席位</span></div>
-    <div class="metric"><span class="metric__value">${tierOpenclawModels.length} / 5</span><span class="metric__label">OpenClaw 席位</span></div>
-    <div class="metric"><span class="metric__value">${tierDrawingModels.length} / 5</span><span class="metric__label">绘图池席位</span></div>
+    <div class="metric"><span class="metric__value">${tierOpenclawModels.length} / 6</span><span class="metric__label">OpenClaw 席位</span></div>
+    <div class="metric"><span class="metric__value">${tierDrawingModels.length} / 6</span><span class="metric__label">绘图池席位</span></div>
   </section>
 
   <section class="shell tier1-showcase" style="margin-top:2rem;margin-bottom:2rem;">

@@ -957,12 +957,16 @@ export function isDrawingModel(modelId: string, category?: string): boolean {
 }
 
 /**
- * 为 OpenClaw 专属梯队池补位：
- * 筛选全系统中 openclawCompatible === true 的健康模型，
- * 补足到 TIER_OPENCLAW_MAX_SLOTS (默认 6 席)
+ * 为 OpenClaw 专属梯队池海选补位（严格统一海选流程）：
+ * 1. 现场对候选模型执行轻量探针测速
+ * 2. 严格筛选测通的模型 (success === true)
+ * 3. 按照本轮实测延迟由低到高严格择优录取
+ * 4. 入池同时立刻记录测速延迟成绩，杜绝事后二次补测
  */
 export async function backfillOpenclawTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+  // 确保 tierOpenclaw 数组与探针成绩单已初始化
   storage.tierOpenclaw = storage.tierOpenclaw || []
+  storage.probeStats = storage.probeStats || {}
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
@@ -973,53 +977,76 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 
   const existingFullIds = new Set(storage.tierOpenclaw.map((m) => m.fullId))
 
-  // 2. 候选模型：未在 OpenClaw 池中的健康模型
-  const candidates = allModels.filter((m) => !existingFullIds.has(m.fullId))
+  // 2. 筛选出候选模型（未在 OpenClaw 池中的健康模型，且排除已知不兼容项）
+  const candidates = allModels.filter((m) => {
+    if (existingFullIds.has(m.fullId)) return false
+    const mConfig = m.provider.models.find((x) => x.id === m.modelId)
+    if (mConfig?.openclawTested && !mConfig.openclawCompatible) return false
+    return true
+  })
 
-  // 优先排序：已测试且兼容 OpenClaw 的优先，其次未测试过的，不兼容的排最后
+  if (candidates.length === 0) return storage
+
+  // 优先排序候选人：已测试兼容的排前面，限制单轮海选前 15 个模型，防止死循环与卡顿
   candidates.sort((a, b) => {
     const mA = a.provider.models.find((x) => x.id === a.modelId)
     const mB = b.provider.models.find((x) => x.id === b.modelId)
     const scoreA = mA?.openclawTested ? (mA.openclawCompatible ? 2 : 0) : 1
     const scoreB = mB?.openclawTested ? (mB.openclawCompatible ? 2 : 0) : 1
-    if (scoreA !== scoreB) return scoreB - scoreA
-    const latA = storage.probeStats[a.fullId]?.latency || 9999
-    const latB = storage.probeStats[b.fullId]?.latency || 9999
-    return latA - latB
+    return scoreB - scoreA
+  })
+  const candidatesToProbe = candidates.slice(0, 15)
+
+  // 3. 现场并发海选测速（0成本轻量握手）
+  const probeResults = await Promise.allSettled(
+    candidatesToProbe.map((item) => runSingleModelProbe(env, item.provider, item.modelId))
+  )
+
+  // 4. 严格过滤测通的模型，并组装实测成绩
+  const qualified: Array<{ item: typeof candidatesToProbe[0]; metric: ProbeMetric }> = []
+  probeResults.forEach((res, idx) => {
+    if (res.status === 'fulfilled' && res.value.success) {
+      qualified.push({
+        item: candidatesToProbe[idx],
+        metric: res.value,
+      })
+    }
   })
 
-  // 逐个择优秒级补位，不在此处阻塞等待长达数十秒的远程网络测试
-  for (const item of candidates) {
-    // 达到席位上限则停止补位
-    if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+  // 5. 按本轮实测延迟从低到高排序，择优录取
+  qualified.sort((a, b) => a.metric.latency - b.metric.latency)
 
-    const mConfig = item.provider.models.find((x) => x.id === item.modelId)
-    // 已经明确测试过且不兼容 OpenClaw 的跳过
-    if (mConfig?.openclawTested && !mConfig.openclawCompatible) {
-      continue
-    }
-
-    // 立即入选席位并记录上岗时间
+  // 6. 晋升入池并当场登记测速成绩
+  let slotsLeft = needed
+  for (const q of qualified) {
+    if (slotsLeft <= 0) break
     storage.tierOpenclaw.push({
-      providerId: item.provider.id,
-      modelId: item.modelId,
-      fullId: item.fullId,
+      providerId: q.item.provider.id,
+      modelId: q.item.modelId,
+      fullId: q.item.fullId,
       addedAt: Date.now(),
     })
+    // 同步记录延迟成绩单
+    storage.probeStats[q.item.fullId] = q.metric
+    slotsLeft--
   }
 
-  // 立即存入 KV，确保前端刷新秒级生效
+  // 7. 顺风车合并打包写入 KV
   await saveTierStorage(env, storage)
   return storage
 }
 
 /**
- * 为绘图专属梯队池补位：
- * 筛选全系统中标记或识别为【绘图】的健康模型，
- * 补足到 TIER_DRAWING_MAX_SLOTS (默认 6 席)
+ * 为绘图专属梯队池海选补位（严格统一海选流程）：
+ * 1. 现场对候选绘图模型执行轻量握手探针测速
+ * 2. 严格筛选测通的模型 (success === true)
+ * 3. 按照本轮实测延迟由低到高严格择优录取
+ * 4. 入池同时立刻记录测速延迟成绩，杜绝事后二次补测
  */
 export async function backfillDrawingTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+  // 确保 tierDrawing 数组与探针成绩单已初始化
   storage.tierDrawing = storage.tierDrawing || []
+  storage.probeStats = storage.probeStats || {}
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
@@ -1030,42 +1057,60 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
 
   const existingFullIds = new Set(storage.tierDrawing.map((m) => m.fullId))
 
-  // 2. 挑选候选绘图模型
+  // 2. 筛选出候选绘图模型
   const candidates = allModels.filter((m) => {
     if (existingFullIds.has(m.fullId)) return false
     const mConfig = m.provider.models.find((x) => x.id === m.modelId)
     return isDrawingModel(m.modelId, mConfig?.category)
   })
 
-  // 按历史延迟由低到高排序
-  candidates.sort((a, b) => {
-    const latA = storage.probeStats[a.fullId]?.latency || 9999
-    const latB = storage.probeStats[b.fullId]?.latency || 9999
-    return latA - latB
+  if (candidates.length === 0) return storage
+
+  // 限制单轮海选前 15 个绘图模型，防止死循环与请求过多
+  const candidatesToProbe = candidates.slice(0, 15)
+
+  // 3. 现场并发海选测速（绘图专用轻量握手探针）
+  const probeResults = await Promise.allSettled(
+    candidatesToProbe.map((item) => runSingleModelProbe(env, item.provider, item.modelId))
+  )
+
+  // 4. 严格过滤测通的模型，并组装实测成绩
+  const qualified: Array<{ item: typeof candidatesToProbe[0]; metric: ProbeMetric }> = []
+  probeResults.forEach((res, idx) => {
+    if (res.status === 'fulfilled' && res.value.success) {
+      qualified.push({
+        item: candidatesToProbe[idx],
+        metric: res.value,
+      })
+    }
   })
 
-  // 逐个择优秒级补位，不在此处阻塞等待远程网络测试
-  for (const item of candidates) {
-    // 达到绘图席位上限则停止补位
-    if (storage.tierDrawing.length >= TIER_DRAWING_MAX_SLOTS) break
+  // 5. 按本轮实测延迟从低到高严格择优录取
+  qualified.sort((a, b) => a.metric.latency - b.metric.latency)
 
-    // 立即入选绘图席位并记录上岗时间
+  // 6. 晋升入池并当场登记测速成绩
+  let slotsLeft = needed
+  for (const q of qualified) {
+    if (slotsLeft <= 0) break
     storage.tierDrawing.push({
-      providerId: item.provider.id,
-      modelId: item.modelId,
-      fullId: item.fullId,
+      providerId: q.item.provider.id,
+      modelId: q.item.modelId,
+      fullId: q.item.fullId,
       addedAt: Date.now(),
     })
+    // 同步记录延迟成绩单
+    storage.probeStats[q.item.fullId] = q.metric
+    slotsLeft--
   }
 
-  // 立即存入 KV，确保前端刷新秒级生效
+  // 7. 顺风车合并打包写入 KV
   await saveTierStorage(env, storage)
   return storage
 }
 
 /**
  * 确保梯队数据就绪（初始化/校验）
- * 平时纯读取与元数据校验，绝不进行耗时的外部网络 HTTP 探测，保障毫秒级瞬时响应。
+ * 平时纯读取与元数据校验，针对缺失探针数据的席位进行毫秒级并发探测补足。
  */
 export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   let existing = await getTierStorage(env)
@@ -1093,46 +1138,15 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
     existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
 
-    // 2. 检查专属梯队池是否达到新的席位上限（6 席），若有空位自动从可用候选中填满
-    if (existing.tierOpenclaw.length < TIER_OPENCLAW_MAX_SLOTS) {
-      const openclawExistingIds = new Set(existing.tierOpenclaw.map((m) => m.fullId))
-      for (const item of allModels) {
-        if (existing.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
-        if (openclawExistingIds.has(item.fullId)) continue
-        const mConfig = item.provider.models.find((x) => x.id === item.modelId)
-        const isMatch = mConfig?.openclawTested
-          ? mConfig.openclawCompatible
-          : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
-        if (isMatch) {
-          existing.tierOpenclaw.push({
-            providerId: item.provider.id,
-            modelId: item.modelId,
-            fullId: item.fullId,
-            addedAt: now,
-          })
-          openclawExistingIds.add(item.fullId)
-          changed = true
-        }
-      }
+    // 2. 检查专属梯队池席位（6 席），若不足调用补位逻辑（内部自动进行并发探针测速）
+    if ((existing.tierOpenclaw || []).length < TIER_OPENCLAW_MAX_SLOTS) {
+      existing = await backfillOpenclawTier(env, existing)
+      changed = true
     }
 
-    if (existing.tierDrawing.length < TIER_DRAWING_MAX_SLOTS) {
-      const drawingExistingIds = new Set(existing.tierDrawing.map((m) => m.fullId))
-      for (const item of allModels) {
-        if (existing.tierDrawing.length >= TIER_DRAWING_MAX_SLOTS) break
-        if (drawingExistingIds.has(item.fullId)) continue
-        const mConfig = item.provider.models.find((x) => x.id === item.modelId)
-        if (isDrawingModel(item.modelId, mConfig?.category)) {
-          existing.tierDrawing.push({
-            providerId: item.provider.id,
-            modelId: item.modelId,
-            fullId: item.fullId,
-            addedAt: now,
-          })
-          drawingExistingIds.add(item.fullId)
-          changed = true
-        }
-      }
+    if ((existing.tierDrawing || []).length < TIER_DRAWING_MAX_SLOTS) {
+      existing = await backfillDrawingTier(env, existing)
+      changed = true
     }
 
     // 3. 将新增的可用模型实时同步加入第二梯队待命
@@ -1150,13 +1164,14 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
+    // 4. 若产生元数据或席位变更，顺风车合并一次性落盘 KV
     if (changed) {
       await saveTierStorage(env, existing)
     }
     return existing
   }
 
-  // 没有任何历史梯队数据：采用轻量静态分配（前9个可用模型进tier1，其余进tier2），不发任何外部HTTP测试
+  // 没有任何历史梯队数据时的初始化分配
   const allModels = await getAllAvailableModels(env)
   const now = Date.now()
   const initialTier1 = allModels.slice(0, TIER_1_MAX_SLOTS).map((item) => ({
@@ -1182,7 +1197,7 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   }))
   const initialDrawing = allModels.filter((item) => {
     const m = item.provider.models.find((x) => x.id === item.modelId)
-    return m?.category === '绘图'
+    return isDrawingModel(item.modelId, m?.category)
   }).slice(0, TIER_DRAWING_MAX_SLOTS).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
@@ -1190,13 +1205,33 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     addedAt: now,
   }))
 
+  // 为初始各池席位并发补充探针数据
+  const initialSeats = [...initialTier1, ...initialOpenclaw, ...initialDrawing]
+  const initUnique: Array<{ provider: Provider; modelId: string; fullId: string }> = []
+  const seenInit = new Set<string>()
+  for (const seat of initialSeats) {
+    if (seenInit.has(seat.fullId)) continue
+    seenInit.add(seat.fullId)
+    const found = allModels.find((m) => m.fullId === seat.fullId)
+    if (found) initUnique.push(found)
+  }
+  const initProbeStats: Record<string, ProbeMetric> = {}
+  const probeRes = await Promise.allSettled(
+    initUnique.slice(0, 15).map((item) => runSingleModelProbe(env, item.provider, item.modelId))
+  )
+  probeRes.forEach((res, idx) => {
+    if (res.status === 'fulfilled') {
+      initProbeStats[initUnique[idx].fullId] = res.value
+    }
+  })
+
   const fresh: TierStorage = {
     tier1: initialTier1,
     tier2: initialTier2,
     tierOpenclaw: initialOpenclaw,
     tierDrawing: initialDrawing,
     lastProbeDate: new Date().toISOString().split('T')[0],
-    probeStats: {},
+    probeStats: initProbeStats,
     businessStats: {},
     updatedAt: new Date().toISOString(),
     modelCursors: {},

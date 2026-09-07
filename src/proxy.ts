@@ -4,7 +4,7 @@ import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './conf
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
 import { detectPermanentFailure } from './models'
-import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
+import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier, isDrawingModel } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
   try {
@@ -291,20 +291,62 @@ export async function testModelConnection(
       headers['Authorization'] = `Bearer ${apiKey}`
     }
 
-    const lowerModel = modelId.toLowerCase()
-    const isDrawing = category === '绘图' ||
-      /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|image|video)/i.test(modelId)
+    // 识别绘图模型与嵌入模型
+    const isDrawing = isDrawingModel(modelId, category)
     const isEmbedding = category === '嵌入' ||
       /^(text-embedding|embedding|bge-|rerank|clip)/i.test(modelId)
 
-    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针
+    // 1. 纯绘图/嵌入模型：发送轻量 0 成本网络握手探针，不消耗绘图或生成额度，测出真实网络延迟
     if (isDrawing || isEmbedding) {
       const assignedCategory = isDrawing ? '绘图' : '嵌入'
+      // 记录网络握手探测的真实物理延迟
+      let pingLatency = 100
+      let pingSuccess = true
+      let pingError = ''
+      try {
+        // 请求提供商的 /models 列表接口进行极速 Ping 测速 (带 3 秒超时控制)
+        const pingUrl = `${cleanBase}/models`
+        const pingResp = await fetch(pingUrl, {
+          method: 'GET',
+          headers,
+          signal: AbortSignal.timeout(3000),
+        })
+        pingLatency = Math.max(1, Date.now() - startTime)
+        if (pingResp.status === 401 || pingResp.status === 403) {
+          // Key 无效或权限不足
+          pingSuccess = false
+          pingError = `鉴权失败 (HTTP ${pingResp.status})`
+        } else if (pingResp.status === 402) {
+          // 账户欠费
+          pingSuccess = false
+          pingError = `账户欠费 (HTTP 402)`
+        } else {
+          // 正常连通
+          pingSuccess = true
+        }
+      } catch (e) {
+        pingLatency = Math.max(1, Date.now() - startTime)
+        // 若 /models 超时，尝试向 cleanBase 发送轻量握手
+        try {
+          const fallbackResp = await fetch(cleanBase, {
+            method: 'GET',
+            headers,
+            signal: AbortSignal.timeout(2000),
+          })
+          pingLatency = Math.max(1, Date.now() - startTime)
+          pingSuccess = fallbackResp.status < 500
+          if (!pingSuccess) pingError = `服务异常 (HTTP ${fallbackResp.status})`
+        } catch (e2) {
+          pingSuccess = false
+          pingError = (e2 as Error).message || '网络连接超时'
+        }
+      }
+
       return {
-        success: true,
-        message: `${assignedCategory}模型 (已标记分类，不适合智能体工具调用)`,
-        statusCode: 200,
-        latencyMs: 10,
+        success: pingSuccess,
+        message: pingSuccess ? `${assignedCategory}模型网络连通正常 (${pingLatency}ms)` : `${assignedCategory}模型连通失败: ${pingError}`,
+        statusCode: pingSuccess ? 200 : 502,
+        latencyMs: pingLatency,
         category: assignedCategory,
         openclaw: {
           tested: true,

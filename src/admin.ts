@@ -40,6 +40,8 @@ import {
   saveTierStorage,
   runSingleModelProbe,
   backfillTier1FromTier2,
+  backfillOpenclawTier,
+  backfillDrawingTier,
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
@@ -738,13 +740,15 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
     tierStorage.modelCursors = cursors
     tierStorage.lastProbeDate = new Date().toISOString().split('T')[0]
 
-    // 4. 释放互斥锁并平滑补齐第一梯队（按各家均匀配额补足）
+    // 4. 释放互斥锁并平滑补齐第一梯队、OpenClaw专属池与绘图专属池（补位自动进行轻量握手测速）
     isProbeRunning = false
-    const finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
+    let finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
+    finalTierData = await backfillOpenclawTier(c.env, finalTierData)
+    finalTierData = await backfillDrawingTier(c.env, finalTierData)
 
     return c.json<ApiResponse>({
       success: true,
-      message: `探测任务完成！已基于游标轮转抽测各提供商 1~2 个代表模型（本次共抽测 ${testedCount} 个模型：${successCount} 可用，${failedCount} 异常），下次将自动轮转下一批模型，第一梯队已同步就绪。`,
+      message: `探测任务完成！已基于游标轮转抽测各提供商代表模型（本次共抽测 ${testedCount} 个模型：${successCount} 可用，${failedCount} 异常），第一梯队、OpenClaw池与绘图池均已同步就绪并完成探测。`,
       data: { testedCount, successCount, failedCount, tierData: finalTierData },
     })
   } finally {
