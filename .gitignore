@@ -6,3 +6,6 @@ dist/
 worker-configuration.d.ts
 .zcode/
 docs/
+# 本地测试缓存与临时脚本目录（禁止推送到 GitHub，防止密钥泄露与体积过大）
+.data/
+tmp/

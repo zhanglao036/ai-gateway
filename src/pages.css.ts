@@ -255,33 +255,33 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
 
 .provider-card__body { padding: 1rem 1.125rem; }
 
-/* Models Grid */
-.models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }
+/* Models Grid - 紧凑响应式网格布局 */
+.models-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0.5rem; }
 
-/* Model Card - 上下两行清晰结构 */
-.model-card { display: flex; flex-direction: column; justify-content: space-between; gap: 0.5rem; padding: 0.625rem 0.875rem; border: .0625rem solid var(--color-rule-2, #e2e8f0); border-radius: 8px; background: var(--color-paper, #ffffff); cursor: pointer; transition: all var(--dur-fast) ease; min-height: 60px; }
-.model-card:hover { border-color: var(--color-focus, #3b82f6); background: var(--color-paper-2, #f8fafc); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); }
+/* Model Card - 上下两行紧凑小巧排版 */
+.model-card { display: flex; flex-direction: column; justify-content: space-between; gap: 0.25rem; padding: 0.375rem 0.625rem; border: .0625rem solid var(--color-rule-2, #e2e8f0); border-radius: 6px; background: var(--color-paper, #ffffff); cursor: pointer; transition: all var(--dur-fast) ease; min-height: unset; }
+.model-card:hover { border-color: var(--color-focus, #3b82f6); background: var(--color-paper-2, #f8fafc); box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04); }
 .model-card[data-state="success"] { border-color: #22c55e !important; background: #f0fdf4 !important; }
 
 /* 第一行：模型名称与复制按钮 */
-.model-card__header-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; width: 100%; min-width: 0; }
-.model-card__name { font-family: var(--font-mono, monospace); font-size: 0.8125rem; font-weight: 600; color: var(--color-ink, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.model-card__copy-btn { border: none; background: transparent; color: var(--color-muted, #94a3b8); padding: 2px 4px; font-size: 0.8125rem; cursor: pointer; flex-shrink: 0; transition: color var(--dur-fast) ease; }
+.model-card__header-row { display: flex; align-items: center; justify-content: space-between; gap: 0.375rem; width: 100%; min-width: 0; }
+.model-card__name { font-family: var(--font-mono, monospace); font-size: 0.775rem; font-weight: 600; color: var(--color-ink, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; line-height: 1.3; }
+.model-card__copy-btn { border: none; background: transparent; color: var(--color-muted, #94a3b8); padding: 1px 3px; font-size: 0.75rem; cursor: pointer; flex-shrink: 0; transition: color var(--dur-fast) ease; }
 .model-card:hover .model-card__copy-btn { color: var(--color-focus, #2563eb); }
 
 /* 第二行：各类标签栏 */
-.model-card__tags-row { display: flex; align-items: center; gap: 0.35rem; flex-wrap: wrap; width: 100%; min-width: 0; }
+.model-card__tags-row { display: flex; align-items: center; gap: 0.25rem; flex-wrap: wrap; width: 100%; min-width: 0; }
 
-/* Model Badges */
-.m-badge { display: inline-flex; align-items: center; gap: 0.2rem; font-size: 0.6875rem; padding: 1px 5px; border-radius: 4px; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+/* Model Badges - 紧凑标签徽章 */
+.m-badge { display: inline-flex; align-items: center; gap: 0.15rem; font-size: 0.625rem; padding: 1px 4px; border-radius: 3px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.2; }
 .m-badge--ok { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
 .m-badge--cd { background: #fefce8; color: #ca8a04; border: 1px solid #fef08a; }
 .m-badge--err { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
 
 /* 筛选分类组布局 */
-.filter-sections { display: flex; flex-direction: column; gap: 0.625rem; }
-.filter-group { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-.filter-group-title { font-size: 0.75rem; font-weight: 700; color: var(--color-muted, #64748b); white-space: nowrap; min-width: 48px; }
+.filter-sections { display: flex; flex-direction: column; gap: 0.5rem; }
+.filter-group { display: flex; align-items: center; gap: 0.375rem; flex-wrap: wrap; }
+.filter-group-title { font-size: 0.75rem; font-weight: 700; color: var(--color-muted, #64748b); white-space: nowrap; min-width: 44px; }
 
 /* Collapsed Models Visibility */
 .model-card.is-collapsed { display: none !important; }

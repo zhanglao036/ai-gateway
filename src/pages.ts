@@ -405,19 +405,44 @@ ${H('首页')}
         </label>
       </div>
 
-      <div class="filter-chips" id="filter-chips">
-        <button type="button" class="filter-chip is-active" data-status="all">
-          <i class="fas fa-cubes" aria-hidden="true"></i> 全部 (<span id="cnt-all">0</span>)
-        </button>
-        <button type="button" class="filter-chip" data-status="ok">
-          <i class="fas fa-check-circle" style="color:#16a34a;" aria-hidden="true"></i> 正常 (<span id="cnt-ok">0</span>)
-        </button>
-        <button type="button" class="filter-chip" data-status="cd">
-          <i class="fas fa-hourglass-half" style="color:#d97706;" aria-hidden="true"></i> 冷却 (<span id="cnt-cd">0</span>)
-        </button>
-        <button type="button" class="filter-chip" data-status="err">
-          <i class="fas fa-ban" style="color:#dc2626;" aria-hidden="true"></i> 失效 (<span id="cnt-err">0</span>)
-        </button>
+      <!-- 分类标签与健康状态多维筛选栏 -->
+      <div class="filter-sections" id="filter-sections">
+        <!-- 第一行：按类型分类标签 -->
+        <div class="filter-group">
+          <span class="filter-group-title"><i class="fas fa-shapes" style="color:#2563eb;"></i> 类型:</span>
+          <button type="button" class="filter-chip is-active" data-type="all">
+            <i class="fas fa-border-all" aria-hidden="true"></i> 全部类型 (<span id="cnt-type-all">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-type="chat">
+            <i class="fas fa-comment-alt" style="color:#2563eb;" aria-hidden="true"></i> 文本 (<span id="cnt-type-chat">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-type="openclaw">
+            <i class="fas fa-bolt" style="color:#16a34a;" aria-hidden="true"></i> OpenClaw (<span id="cnt-type-openclaw">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-type="drawing">
+            <i class="fas fa-palette" style="color:#d97706;" aria-hidden="true"></i> 绘图 (<span id="cnt-type-drawing">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-type="embedding">
+            <i class="fas fa-cube" style="color:#9333ea;" aria-hidden="true"></i> 嵌入 (<span id="cnt-type-embedding">0</span>)
+          </button>
+        </div>
+
+        <!-- 第二行：按健康状态分类标签 -->
+        <div class="filter-group">
+          <span class="filter-group-title"><i class="fas fa-heartbeat" style="color:#10b981;"></i> 状态:</span>
+          <button type="button" class="filter-chip is-active" data-status="all">
+            <i class="fas fa-cubes" aria-hidden="true"></i> 全部状态 (<span id="cnt-all">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-status="ok">
+            <i class="fas fa-check-circle" style="color:#16a34a;" aria-hidden="true"></i> 正常 (<span id="cnt-ok">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-status="cd">
+            <i class="fas fa-hourglass-half" style="color:#d97706;" aria-hidden="true"></i> 冷却 (<span id="cnt-cd">0</span>)
+          </button>
+          <button type="button" class="filter-chip" data-status="err">
+            <i class="fas fa-ban" style="color:#dc2626;" aria-hidden="true"></i> 失效 (<span id="cnt-err">0</span>)
+          </button>
+        </div>
       </div>
     </div>
 
