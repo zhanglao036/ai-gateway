@@ -500,6 +500,12 @@ ${H('首页')}
                     }
                   }
 
+                  let latencyBadgeHtml = ''
+                  const probeStat = tierData.probeStats?.[fullModel]
+                  if (probeStat && probeStat.success) {
+                    latencyBadgeHtml = `<span class="m-badge" style="background:#f0fdf4;color:#16a34a;font-size:0.65rem;border:1px solid #bbf7d0;font-weight:600;" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> ${probeStat.latency}ms</span>`
+                  }
+
                   const isHiddenInitially = idx >= INITIAL_LIMIT ? 'is-collapsed' : ''
 
                   return `<div class="model-card copy-control ${isHiddenInitially}" 
@@ -514,6 +520,7 @@ ${H('首页')}
                         ${categoryBadgeHtml}
                         ${openclawBadgeHtml}
                         ${statusBadgeHtml}
+                        ${latencyBadgeHtml}
                       </div>
                     </div>
                     <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
@@ -828,6 +835,8 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
   const logConfig = await getLogConfig(c.env)
   const customRoutes = await getCustomModelRoutes(c.env)
   const poolTimeouts = await getPoolTimeouts(c.env)
+  const tierData = await getTierStorage(c.env)
+  const probeStats = tierData?.probeStats || {}
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
   const modelsCount = providers.reduce((total, provider) => total + provider.models.length, 0)
@@ -1131,6 +1140,11 @@ ${H('管理')}
                       `<option value="其他" ${mCat === '其他' ? 'selected' : ''}>其他</option>` +
                       `</select>`;
 
+                    const fullModelKey = `${p.id}/${m.id}`;
+                    const mProbe = probeStats[fullModelKey];
+                    const latText = mProbe && mProbe.success ? `${mProbe.latency} ms` : '-- ms';
+                    const latClass = mProbe && mProbe.success ? 'latency-chip lat-ok' : 'latency-chip';
+
                     return `<div class="model-single-row" data-idx="${mi}">` +
                       `<div class="model-row-line-1">` +
                         `<input type="text" value="${escapePageHtml(m.id)}" class="model-id-input" id="mid-${escapePageHtml(p.id)}-${mi}" placeholder="模型 ID" ${styleAttr} title="${titleText}">` +
@@ -1143,7 +1157,7 @@ ${H('管理')}
                         catSelect +
                         statusBadge +
                         openclawBadge +
-                        `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>` +
+                        `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="${latClass}" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">${latText}</span></span>` +
                         unblockBtn +
                         `<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-idx="${mi}" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>` +
                       `</div>` +
@@ -1234,12 +1248,14 @@ ${H('管理')}
 
 <script id="init-providers-json" type="application/json">${JSON.stringify(providers).replace(/</g, '\\u003c')}</script>
 <script id="init-proxykeys-json" type="application/json">${JSON.stringify(proxyKeys).replace(/</g, '\\u003c')}</script>
+<script id="init-probestats-json" type="application/json">${JSON.stringify(probeStats).replace(/</g, '\\u003c')}</script>
 
 <script>${SHARED_JS}
 // 1. 内存临时状态（生命周期随 Worker 实例 / 页面会话有效，所有表单修改暂存于此，不单项操作 KV）
 // 注意：Cloudflare Workers 运行在无状态多实例 Serverless Container 环境，内存变量仅在单实例生命周期内生效。
 var draftProviders = JSON.parse(document.getElementById('init-providers-json').textContent || '[]');
 var draftProxyKeys = JSON.parse(document.getElementById('init-proxykeys-json').textContent || '[]');
+var draftProbeStats = JSON.parse(document.getElementById('init-probestats-json').textContent || '{}');
 var isDirty = false;
 
 function markDirty(dirty) {
@@ -2491,6 +2507,11 @@ function renderProviderList() {
         '<option value="其他" ' + (mCat === '其他' ? 'selected' : '') + '>其他</option>' +
         '</select>';
 
+      var fullModelKey = pId + '/' + (m.id || '');
+      var mProbe = (typeof draftProbeStats === 'object' && draftProbeStats) ? draftProbeStats[fullModelKey] : null;
+      var latText = mProbe && mProbe.success ? (mProbe.latency + ' ms') : '-- ms';
+      var latClass = mProbe && mProbe.success ? 'latency-chip lat-ok' : 'latency-chip';
+
       return '<div class="model-single-row" data-idx="' + mi + '">' +
         '<div class="model-row-line-1">' +
           '<input type="text" value="' + mId + '" class="model-id-input" id="mid-' + pId + '-' + mi + '" placeholder="模型 ID" ' + styleAttr + ' title="' + titleText + '">' +
@@ -2503,7 +2524,7 @@ function renderProviderList() {
           catSelect +
           statusBadge +
           openclawBadge +
-          '<span id="lat-' + pId + '-' + mi + '" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>' +
+          '<span id="lat-' + pId + '-' + mi + '" class="' + latClass + '" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">' + latText + '</span></span>' +
           unblockBtn +
           '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-idx="' + mi + '" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>' +
         '</div>' +
