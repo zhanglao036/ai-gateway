@@ -1101,14 +1101,22 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
     candidatesToProbe.map((item) => runSingleModelProbe(env, item.provider, item.modelId))
   )
 
-  // 4. 严格过滤测通的模型，并组装实测成绩
+  // 4. 严格过滤测通且通过 OpenClaw 智能体专属测试 (openclawCompatible === true) 的模型
   const qualified: Array<{ item: typeof candidatesToProbe[0]; metric: ProbeMetric }> = []
   probeResults.forEach((res, idx) => {
     if (res.status === 'fulfilled' && res.value.success) {
-      qualified.push({
-        item: candidatesToProbe[idx],
-        metric: res.value,
-      })
+      const candItem = candidatesToProbe[idx]
+      // 现场探针测试后获取模型最新资质
+      const isCompat = res.value.openclawCompatible === true || 
+        candItem.provider.models.find((x) => x.id === candItem.modelId)?.openclawCompatible === true
+
+      // 只有明确具备【🤖 OpenClaw 适合】认证的模型，才允许进入 OpenClaw 专属池合格候选单
+      if (isCompat) {
+        qualified.push({
+          item: candItem,
+          metric: res.value,
+        })
+      }
     }
   })
 

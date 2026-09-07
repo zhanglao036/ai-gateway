@@ -2,6 +2,7 @@ import type { Provider } from './types'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
+  version: 'v1.1.0',
   subtitle: '统一的 AI 管理平台',
   author: 'QingYun',
   authorUrl: 'https://github.com/yutian81/ai-gateway',

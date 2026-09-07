@@ -79,7 +79,7 @@ ${H('首页')}
     <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">API CONTROL PLANE</span>
+      <span class="brand__descriptor" style="display:flex;align-items:center;gap:4px;">CONTROL PLANE <small style="font-weight:700;color:var(--color-brand);background:rgba(37,99,235,0.1);padding:1px 5px;border-radius:4px;">${SITE_CONFIG.version}</small></span>
     </a>
     <nav class="topbar__actions" id="topbar-actions" aria-label="主导航">
       ${isLoggedIn
@@ -932,7 +932,7 @@ ${H('管理')}
   <aside class="admin-rail" aria-label="控制台导航">
     <a class="brand admin-rail__brand" href="/">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
-      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE</small></span>
+      <span><strong>${SITE_CONFIG.title}</strong><small style="display:flex;align-items:center;gap:4px;">CONTROL PLANE <span style="font-weight:700;color:var(--color-brand);">${SITE_CONFIG.version}</span></small></span>
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
