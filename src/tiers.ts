@@ -815,25 +815,35 @@ export async function backfillTier1FromTier2(
         hasMoreToTest = false
         const roundToTest: typeof candidates = []
 
-        // 各个提供商轮抽 1 个正常候选模型（若受配额控制，超额提供商本轮跳过）
+        // 动态决定每个提供商抽选数量：若提供商总数 <= 3 家则抽取 2 个模型；若 > 3 家则抽取 1 个模型
+        const sampleCountPerProvider = providerIds.length <= 3 ? 2 : 1
+
+        // 各个提供商轮流抽取候选模型（若受配额控制，超额提供商本轮跳过）
         for (const pid of providerIds) {
+          // 如果开启了配额限制，且该提供商在第一梯队席位已满，则跳过
           if (enforceQuota && getProviderTier1Count(pid) >= maxQuotaPerProvider) {
-            continue // 该提供商已达均匀配额
+            continue
           }
 
           const list = providerModelLists[pid] || []
-          const count = providerTestedCount[pid] || 0
-          if (count < list.length) {
-            hasMoreToTest = true
-            const cand = list[count]
-            providerTestedCount[pid] = count + 1
-            roundToTest.push(cand)
+          let count = providerTestedCount[pid] || 0
+          // 根据动态决定的数量，从该提供商名下切取 1~2 个候选模型
+          for (let pick = 0; pick < sampleCountPerProvider; pick++) {
+            if (count < list.length) {
+              hasMoreToTest = true
+              const cand = list[count]
+              count++
+              providerTestedCount[pid] = count
+              roundToTest.push(cand)
 
-            // 持久化更新该提供商的模型游标位置：计算当前模型在原始列表中的下一个索引
-            const origList = providerToModels[pid] || []
-            const origIdx = origList.findIndex((x) => x.fullId === cand.fullId)
-            if (origIdx !== -1 && origList.length > 0) {
-              storage.modelCursors[pid] = (origIdx + 1) % origList.length
+              // 持久化更新该提供商的名下模型游标位置：计算当前模型在原始列表中的下一个索引
+              const origList = providerToModels[pid] || []
+              const origIdx = origList.findIndex((x) => x.fullId === cand.fullId)
+              if (origIdx !== -1 && origList.length > 0) {
+                storage.modelCursors[pid] = (origIdx + 1) % origList.length
+              }
+              // 记录本次最后抽样的提供商，推进第一梯队的提供商游标
+              storage.lastCursorProviderId = pid
             }
           }
         }
@@ -957,11 +967,96 @@ export function isDrawingModel(modelId: string, category?: string): boolean {
 }
 
 /**
- * 为 OpenClaw 专属梯队池海选补位（严格统一海选流程）：
- * 1. 现场对候选模型执行轻量探针测速
- * 2. 严格筛选测通的模型 (success === true)
- * 3. 按照本轮实测延迟由低到高严格择优录取
- * 4. 入池同时立刻记录测速延迟成绩，杜绝事后二次补测
+ * 双重游标自适应候选模型抽样算法（支持 OpenClaw 池、绘图池等）：
+ * 1. 动态数量：根据有效候选提供商数量，若 <= 3 家，每家抽取 2 个候选模型；若 > 3 家，每家抽取 1 个候选模型。
+ * 2. 第一重游标（提供商游标）：根据各池子上次记录的提供商游标进行环形队列重排，上次测过的提供商往后排，上次未测到的排在最前。
+ * 3. 第二重游标（模型游标）：每个提供商记录名下模型的上次测试位置，本次从该位置接着往下切取，测试完毕后游标定位推进。
+ * 4. 抽样完毕后定位记录本轮最后处理的提供商 ID，供下次海选无缝接力。
+ */
+export function sampleCandidatesByProviderAndModelCursors<T extends { provider: Provider; modelId: string; fullId: string }>(
+  poolType: 'openclaw' | 'drawing',
+  candidates: T[],
+  storage: TierStorage,
+  maxTotalSamples = 15
+): T[] {
+  // 如果没有候选模型直接返回空
+  if (candidates.length === 0) return []
+
+  // 1. 将候选模型按 providerId 进行归类分组
+  const providerMap = new Map<string, T[]>()
+  for (const cand of candidates) {
+    const pid = cand.provider.id
+    if (!providerMap.has(pid)) {
+      providerMap.set(pid, [])
+    }
+    providerMap.get(pid)!.push(cand)
+  }
+
+  let providerIds = Array.from(providerMap.keys()).sort()
+  if (providerIds.length === 0) return []
+
+  // 2. 动态决定每个提供商抽几个：如果候选提供商总数 <= 3 则抽 2 个，否则抽 1 个
+  const samplePerProvider = providerIds.length <= 3 ? 2 : 1
+
+  // 3. 第一重游标（提供商游标）：读取该池子上一次记录的最后抽测提供商
+  const lastPid = poolType === 'openclaw' ? storage.lastOpenclawProviderId : storage.lastDrawingProviderId
+  const lastIdx = lastPid ? providerIds.indexOf(lastPid) : -1
+  if (lastIdx !== -1 && providerIds.length > 1) {
+    // 环形切分：将上次抽过的提供商之后的位置移到最前面，保证轮流坐庄
+    const nextStart = (lastIdx + 1) % providerIds.length
+    providerIds = [...providerIds.slice(nextStart), ...providerIds.slice(0, nextStart)]
+  }
+
+  // 4. 第二重游标（各提供商名下的模型游标）：顺序切出候选模型
+  storage.modelCursors = storage.modelCursors || {}
+  const sampled: T[] = []
+  let lastSampledPid: string | undefined
+
+  for (const pid of providerIds) {
+    const models = providerMap.get(pid) || []
+    if (models.length === 0) continue
+
+    // 各池子维护各自独立的提供商模型游标键名，互不干扰
+    const cursorKey = `${poolType}_${pid}`
+    let cursor = typeof storage.modelCursors[cursorKey] === 'number' ? storage.modelCursors[cursorKey] : 0
+    if (cursor < 0 || cursor >= models.length) {
+      cursor = 0
+    }
+
+    // 从游标位置顺延切取 samplePerProvider 个模型（支持环形取模）
+    const toPick = Math.min(samplePerProvider, models.length)
+    for (let i = 0; i < toPick; i++) {
+      const pickIdx = (cursor + i) % models.length
+      sampled.push(models[pickIdx])
+    }
+
+    // 更新该提供商名下的模型定位游标：记录下一次该从哪个索引继续
+    storage.modelCursors[cursorKey] = (cursor + toPick) % models.length
+    lastSampledPid = pid
+
+    // 单轮安全熔断上限（默认 15 个），防止一次性并发过多请求导致超时
+    if (sampled.length >= maxTotalSamples) break
+  }
+
+  // 5. 更新该池子的提供商定位游标（记录本次最后被抽选的提供商）
+  if (lastSampledPid) {
+    if (poolType === 'openclaw') {
+      storage.lastOpenclawProviderId = lastSampledPid
+    } else {
+      storage.lastDrawingProviderId = lastSampledPid
+    }
+  }
+
+  return sampled
+}
+
+/**
+ * 为 OpenClaw 专属梯队池海选补位（双重游标自适应海选流程）：
+ * 1. 按提供商与名下模型双重游标自适应抽选候选人（<=3家抽2个，>3家抽1个）
+ * 2. 现场并发执行轻量握手探针测速
+ * 3. 严格筛选测通的模型 (success === true)
+ * 4. 按照本轮实测延迟由低到高严格择优录取
+ * 5. 入池同时立刻记录测速延迟成绩与游标，顺风车打包 1 次写入 KV
  */
 export async function backfillOpenclawTier(env: Env, storage: TierStorage): Promise<TierStorage> {
   // 确保 tierOpenclaw 数组与探针成绩单已初始化
@@ -987,7 +1082,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 
   if (candidates.length === 0) return storage
 
-  // 优先排序候选人：已测试兼容的排前面，限制单轮海选前 15 个模型，防止死循环与卡顿
+  // 优先排序候选人：已测试兼容的排前面
   candidates.sort((a, b) => {
     const mA = a.provider.models.find((x) => x.id === a.modelId)
     const mB = b.provider.models.find((x) => x.id === b.modelId)
@@ -995,7 +1090,11 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
     const scoreB = mB?.openclawTested ? (mB.openclawCompatible ? 2 : 0) : 1
     return scoreB - scoreA
   })
-  const candidatesToProbe = candidates.slice(0, 15)
+
+  // 使用双重游标自适应抽样算法选取候选模型（提供商少于等于3家抽2个，多于3家抽1个，双重游标轮转）
+  const candidatesToProbe = sampleCandidatesByProviderAndModelCursors('openclaw', candidates, storage, 15)
+
+  if (candidatesToProbe.length === 0) return storage
 
   // 3. 现场并发海选测速（0成本轻量握手）
   const probeResults = await Promise.allSettled(
@@ -1031,17 +1130,18 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
     slotsLeft--
   }
 
-  // 7. 顺风车合并打包写入 KV
+  // 7. 顺风车合并打包写入 KV（包含双重游标、入池模型与测速成绩，0额外KV写入）
   await saveTierStorage(env, storage)
   return storage
 }
 
 /**
- * 为绘图专属梯队池海选补位（严格统一海选流程）：
- * 1. 现场对候选绘图模型执行轻量握手探针测速
- * 2. 严格筛选测通的模型 (success === true)
- * 3. 按照本轮实测延迟由低到高严格择优录取
- * 4. 入池同时立刻记录测速延迟成绩，杜绝事后二次补测
+ * 为绘图专属梯队池海选补位（双重游标自适应海选流程）：
+ * 1. 按提供商与名下模型双重游标自适应抽选绘图候选人（<=3家抽2个，>3家抽1个）
+ * 2. 现场并发对候选绘图模型执行轻量握手探针测速
+ * 3. 严格筛选测通的模型 (success === true)
+ * 4. 按照本轮实测延迟由低到高严格择优录取
+ * 5. 入池同时立刻记录测速延迟成绩与游标，顺风车打包 1 次写入 KV
  */
 export async function backfillDrawingTier(env: Env, storage: TierStorage): Promise<TierStorage> {
   // 确保 tierDrawing 数组与探针成绩单已初始化
@@ -1066,8 +1166,10 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
 
   if (candidates.length === 0) return storage
 
-  // 限制单轮海选前 15 个绘图模型，防止死循环与请求过多
-  const candidatesToProbe = candidates.slice(0, 15)
+  // 使用双重游标自适应抽样算法选取绘图候选模型（提供商少于等于3家抽2个，多于3家抽1个，双重游标轮转）
+  const candidatesToProbe = sampleCandidatesByProviderAndModelCursors('drawing', candidates, storage, 15)
+
+  if (candidatesToProbe.length === 0) return storage
 
   // 3. 现场并发海选测速（绘图专用轻量握手探针）
   const probeResults = await Promise.allSettled(
@@ -1103,7 +1205,7 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
     slotsLeft--
   }
 
-  // 7. 顺风车合并打包写入 KV
+  // 7. 顺风车合并打包写入 KV（包含双重游标、入池模型与测速成绩，0额外KV写入）
   await saveTierStorage(env, storage)
   return storage
 }

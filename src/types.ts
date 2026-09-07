@@ -146,8 +146,10 @@ export interface TierStorage {
   businessStats: Record<string, BusinessMetric>
   updatedAt: string
   lastProbeDate?: string
-  lastCursorProviderId?: string
-  modelCursors?: Record<string, number>
+  lastCursorProviderId?: string // 第一梯队上一次抽样的提供商游标
+  lastOpenclawProviderId?: string // OpenClaw梯队上一次抽样的提供商游标
+  lastDrawingProviderId?: string // 绘图梯队上一次抽样的提供商游标
+  modelCursors?: Record<string, number> // 各提供商名下的模型游标字典 (记录下次抽样的模型索引)
 }
 
 export interface ApiResponse<T = unknown> {
