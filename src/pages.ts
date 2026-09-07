@@ -507,25 +507,31 @@ ${H('首页')}
                   }
 
                   const isHiddenInitially = idx >= INITIAL_LIMIT ? 'is-collapsed' : ''
+                  const typeKey = cat === '绘图' ? 'drawing' : cat === '嵌入' ? 'embedding' : 'chat'
+                  const isOpenclaw = !!(model.openclawTested && model.openclawCompatible)
 
                   return `<div class="model-card copy-control ${isHiddenInitially}" 
                                data-copy="${escapePageHtml(fullModel)}" 
                                data-model-id="${escapePageHtml(model.id.toLowerCase())}" 
                                data-full-id="${escapePageHtml(fullModel.toLowerCase())}"
                                data-status="${statusKey}"
+                               data-type="${typeKey}"
+                               data-openclaw="${isOpenclaw ? '1' : '0'}"
                                data-index="${idx}">
-                    <div class="model-card__info">
+                    <!-- 第一行：模型完整名称与小巧复制按钮 -->
+                    <div class="model-card__header-row">
                       <code class="model-card__name" title="点击复制完整ID: ${escapePageHtml(fullModel)}">${escapePageHtml(model.id)}</code>
-                      <div style="display:flex;align-items:center;gap:0.25rem;flex-wrap:wrap;margin-top:0.25rem;">
-                        ${categoryBadgeHtml}
-                        ${openclawBadgeHtml}
-                        ${statusBadgeHtml}
-                        ${latencyBadgeHtml}
-                      </div>
+                      <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
+                        <i class="far fa-copy" aria-hidden="true"></i>
+                      </button>
                     </div>
-                    <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
-                      <i class="far fa-copy" aria-hidden="true"></i>
-                    </button>
+                    <!-- 第二行：各类状态、特性与延迟标签整齐排列 -->
+                    <div class="model-card__tags-row">
+                      ${categoryBadgeHtml}
+                      ${openclawBadgeHtml}
+                      ${statusBadgeHtml}
+                      ${latencyBadgeHtml}
+                    </div>
                   </div>`
                 }).join('')}
               </div>
@@ -613,33 +619,58 @@ ${renderSiteFooter(SITE_CONFIG.title)}
     });
   });
 
-  // 统计计算与实时搜索 / 状态过滤
+  // 统计计算与实时搜索 / 状态与类型多维过滤
   var searchInput = document.getElementById('model-search');
-  var filterChips = document.querySelectorAll('.filter-chip');
   var providerCards = Array.from(document.querySelectorAll('.provider-card'));
   var emptyState = document.getElementById('search-empty');
 
+  // 当前激活的健康状态筛选（all, ok, cd, err）
   var activeStatus = 'all';
+  // 当前激活的模型类型筛选（all, chat, openclaw, drawing, embedding）
+  var activeType = 'all';
 
+  // 动态更新各标签栏模型统计数量
   function updateCounts() {
     var cntAll = 0, cntOk = 0, cntCd = 0, cntErr = 0;
+    var cntTAll = 0, cntTChat = 0, cntTOc = 0, cntTDraw = 0, cntTEmb = 0;
+
     document.querySelectorAll('.model-card').forEach(function (m) {
       cntAll++;
+      cntTAll++;
+      // 状态统计
       var st = m.getAttribute('data-status');
       if (st === 'ok') cntOk++;
       else if (st === 'cd') cntCd++;
       else if (st === 'err') cntErr++;
+
+      // 类型统计
+      var tp = m.getAttribute('data-type');
+      var oc = m.getAttribute('data-openclaw');
+      if (tp === 'chat') cntTChat++;
+      else if (tp === 'drawing') cntTDraw++;
+      else if (tp === 'embedding') cntTEmb++;
+
+      if (oc === '1') cntTOc++;
     });
 
+    // 填充状态数量
     var elAll = document.getElementById('cnt-all'); if (elAll) elAll.textContent = cntAll;
     var elOk = document.getElementById('cnt-ok'); if (elOk) elOk.textContent = cntOk;
     var elCd = document.getElementById('cnt-cd'); if (elCd) elCd.textContent = cntCd;
     var elErr = document.getElementById('cnt-err'); if (elErr) elErr.textContent = cntErr;
+
+    // 填充类型数量
+    var elTAll = document.getElementById('cnt-type-all'); if (elTAll) elTAll.textContent = cntTAll;
+    var elTChat = document.getElementById('cnt-type-chat'); if (elTChat) elTChat.textContent = cntTChat;
+    var elTOc = document.getElementById('cnt-type-openclaw'); if (elTOc) elTOc.textContent = cntTOc;
+    var elTDraw = document.getElementById('cnt-type-drawing'); if (elTDraw) elTDraw.textContent = cntTDraw;
+    var elTEmb = document.getElementById('cnt-type-embedding'); if (elTEmb) elTEmb.textContent = cntTEmb;
   }
 
+  // 组合条件实时筛选（搜索关键字 + 类型分类 + 健康状态）
   function applyFilters() {
     var query = (searchInput ? searchInput.value : '').trim().toLowerCase();
-    var isSearching = query.length > 0 || activeStatus !== 'all';
+    var isSearching = query.length > 0 || activeStatus !== 'all' || activeType !== 'all';
 
     var totalVisibleModels = 0;
 
@@ -660,11 +691,18 @@ ${renderSiteFooter(SITE_CONFIG.title)}
         var mId = mCard.getAttribute('data-model-id') || '';
         var fId = mCard.getAttribute('data-full-id') || '';
         var st = mCard.getAttribute('data-status') || '';
+        var tp = mCard.getAttribute('data-type') || '';
+        var oc = mCard.getAttribute('data-openclaw') || '';
 
+        // 1. 关键字匹配
         var matchesSearch = !query || pName.includes(query) || pId.includes(query) || mId.includes(query) || fId.includes(query);
+        // 2. 状态匹配
         var matchesStatus = activeStatus === 'all' || st === activeStatus;
+        // 3. 类型匹配
+        var matchesType = activeType === 'all' ||
+                          (activeType === 'openclaw' ? oc === '1' : tp === activeType);
 
-        var isVisible = matchesSearch && matchesStatus;
+        var isVisible = matchesSearch && matchesStatus && matchesType;
         mCard.classList.toggle('hd', !isVisible);
 
         if (isVisible) {
@@ -673,36 +711,55 @@ ${renderSiteFooter(SITE_CONFIG.title)}
         }
       });
 
+      // 如果当前提供商下所有模型都被过滤，则自动隐藏该提供商卡片
       pCard.classList.toggle('hd', visibleInProvider === 0);
     });
 
     if (emptyState) {
-      emptyState.classList.toggle('hd', totalVisibleModels > 0 || (!query && activeStatus === 'all'));
+      emptyState.classList.toggle('hd', totalVisibleModels > 0 || (!query && activeStatus === 'all' && activeType === 'all'));
     }
   }
 
+  // 一键清空所有筛选条件与搜索
   window.resetSearch = function() {
     if (searchInput) searchInput.value = '';
     activeStatus = 'all';
-    filterChips.forEach(function(chip) {
+    activeType = 'all';
+    document.querySelectorAll('.filter-chip[data-status]').forEach(function(chip) {
       chip.classList.toggle('is-active', chip.getAttribute('data-status') === 'all');
+    });
+    document.querySelectorAll('.filter-chip[data-type]').forEach(function(chip) {
+      chip.classList.toggle('is-active', chip.getAttribute('data-type') === 'all');
     });
     applyFilters();
   };
 
+  // 监听搜索输入
   if (searchInput) {
     searchInput.addEventListener('input', applyFilters);
   }
 
-  filterChips.forEach(function (chip) {
+  // 监听健康状态标签点击
+  document.querySelectorAll('.filter-chip[data-status]').forEach(function (chip) {
     chip.addEventListener('click', function () {
-      filterChips.forEach(function (c) { c.classList.remove('is-active'); });
+      document.querySelectorAll('.filter-chip[data-status]').forEach(function (c) { c.classList.remove('is-active'); });
       chip.classList.add('is-active');
       activeStatus = chip.getAttribute('data-status') || 'all';
       applyFilters();
     });
   });
 
+  // 监听类型分类标签点击
+  document.querySelectorAll('.filter-chip[data-type]').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      document.querySelectorAll('.filter-chip[data-type]').forEach(function (c) { c.classList.remove('is-active'); });
+      chip.classList.add('is-active');
+      activeType = chip.getAttribute('data-type') || 'all';
+      applyFilters();
+    });
+  });
+
+  // 初始化计算数量
   updateCounts();
 })()
 </script>
@@ -907,17 +964,17 @@ ${H('管理')}
         </div>
       </section>
 
-      <!-- 各梯队池请求超时独立控制区 -->
+      <!-- 各梯队池请求超时与思考模式独立控制区 -->
       <section id="timeouts" class="workspace-section" aria-labelledby="timeouts-title">
         <div class="section-heading section-heading--admin">
           <div>
             <h2 id="timeouts-title" style="display:flex;align-items:center;gap:8px;">
-              <i class="fas fa-stopwatch" style="color:var(--color-brand);"></i>
-              各梯队池请求超时独立控制
+              <i class="fas fa-sliders" style="color:var(--color-brand);"></i>
+              各梯队池独立控制（超时与思考模式）
             </h2>
-            <p>为每个梯队池独立配置上游模型单次调用的超时等待时间。超时后自动无缝切换备用模型，彻底告别卡死。</p>
+            <p>为每个梯队池独立配置超时等待时间与思考模式（Thinking）开关。超时自动秒级换模，关闭思考杜绝智能体报错卡死。</p>
           </div>
-          <button type="button" class="btn btn-p" onclick="saveTimeoutsBtn()"><i class="fas fa-save" aria-hidden="true"></i> 💾 保存超时设置</button>
+          <button type="button" class="btn btn-p" onclick="saveTimeoutsBtn()"><i class="fas fa-save" aria-hidden="true"></i> 💾 保存梯队池配置</button>
         </div>
 
         <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;margin-bottom:20px;">
@@ -936,8 +993,21 @@ ${H('管理')}
               <input type="number" id="timeout-openclaw" class="form-input" min="5" max="600" value="${poolTimeouts.openclawTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #c4b5fd;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
             </div>
+            <!-- 关闭思考模式开关 -->
+            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #ddd6fe;display:flex;align-items:center;justify-content:space-between;">
+              <div>
+                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
+                  <i class="fas fa-brain" style="font-size:11px;color:#7c3aed;"></i> 关闭思考模式 (Thinking)
+                </span>
+                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">关闭内心独白，防止智能体报错崩溃</span>
+              </div>
+              <label class="tg">
+                <input type="checkbox" id="thinking-openclaw" ${poolTimeouts.disableThinkingOpenclaw !== false ? 'checked' : ''} aria-label="OpenClaw池关闭思考模式">
+                <span class="sl"></span>
+              </label>
+            </div>
             <div style="font-size:11px;color:#7c3aed;margin-top:8px;line-height:1.5;">
-              💡 保持默认 60 秒。若客户端频繁提示 Cause: timeout，建议您手动调为 20~25 秒。
+              💡 保持开启关思考（默认开启），可杜绝 <code>LLM request failed</code> 错误。
             </div>
           </div>
 
@@ -956,8 +1026,21 @@ ${H('管理')}
               <input type="number" id="timeout-general" class="form-input" min="5" max="600" value="${poolTimeouts.generalTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #fdba74;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
             </div>
+            <!-- 关闭思考模式开关 -->
+            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fed7aa;display:flex;align-items:center;justify-content:space-between;">
+              <div>
+                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
+                  <i class="fas fa-brain" style="font-size:11px;color:#ea580c;"></i> 关闭思考模式 (Thinking)
+                </span>
+                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">开启后极速吐字；关闭则保留模型深度推理</span>
+              </div>
+              <label class="tg">
+                <input type="checkbox" id="thinking-general" ${poolTimeouts.disableThinkingTier1 ? 'checked' : ''} aria-label="第一梯队通用池关闭思考模式">
+                <span class="sl"></span>
+              </label>
+            </div>
             <div style="font-size:11px;color:#ea580c;margin-top:8px;line-height:1.5;">
-              💡 保持默认 60 秒。兼顾深度推理与稳定性，可根据个人网络按需微调。
+              💡 默认关闭，保留大模型原生深度思考；若追求极速响应可随时开启。
             </div>
           </div>
 
@@ -975,6 +1058,19 @@ ${H('管理')}
             <div style="display:flex;align-items:center;gap:8px;">
               <input type="number" id="timeout-drawing" class="form-input" min="5" max="600" value="${poolTimeouts.drawingTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #f472b6;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
+            </div>
+            <!-- 关闭思考模式开关 -->
+            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fbcfe8;display:flex;align-items:center;justify-content:space-between;">
+              <div>
+                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
+                  <i class="fas fa-brain" style="font-size:11px;color:#db2777;"></i> 关闭思考模式 (Thinking)
+                </span>
+                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">专注生成图像，去除多余文字思考</span>
+              </div>
+              <label class="tg">
+                <input type="checkbox" id="thinking-drawing" ${poolTimeouts.disableThinkingDrawing ? 'checked' : ''} aria-label="绘图池关闭思考模式">
+                <span class="sl"></span>
+              </label>
             </div>
             <div style="font-size:11px;color:#db2777;margin-top:8px;line-height:1.5;">
               💡 保持默认 60 秒。由于 AI 画图耗时较长，建议保持 60 秒或更大数值。
@@ -2674,6 +2770,11 @@ async function saveTimeoutsBtn() {
   var gInput = document.getElementById('timeout-general');
   var dInput = document.getElementById('timeout-drawing');
 
+  // 获取三大池子各自独立的关闭思考开关状态
+  var oThink = document.getElementById('thinking-openclaw');
+  var gThink = document.getElementById('thinking-general');
+  var dThink = document.getElementById('thinking-drawing');
+
   var oVal = oInput ? parseInt(oInput.value, 10) : 60;
   var gVal = gInput ? parseInt(gInput.value, 10) : 60;
   var dVal = dInput ? parseInt(dInput.value, 10) : 60;
@@ -2691,8 +2792,9 @@ async function saveTimeoutsBtn() {
     return;
   }
 
-  toast('正在保存各梯队池超时设置...', 'info');
+  toast('正在保存各梯队池配置（超时与思考模式）...', 'info');
   try {
+    // 顺风车合包：将超时时间与三大池子关闭思考开关打包为 1 个请求，1 次性持久化至 KV
     var res = await fetch('/admin/api/timeouts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2700,16 +2802,19 @@ async function saveTimeoutsBtn() {
         openclawTimeout: oVal,
         generalTimeout: gVal,
         drawingTimeout: dVal,
+        disableThinkingOpenclaw: oThink ? oThink.checked : true,
+        disableThinkingTier1: gThink ? gThink.checked : false,
+        disableThinkingDrawing: dThink ? dThink.checked : false,
       })
     });
     var json = await res.json();
     if (json.success) {
-      toast('各梯队池超时设置已成功保存并立即生效！', 'success');
+      toast('各梯队池配置（超时与思考模式）已成功保存并立即生效！', 'success');
     } else {
-      toast(json.message || '保存超时设置失败', 'error');
+      toast(json.message || '保存梯队池配置失败', 'error');
     }
   } catch (err) {
-    toast('保存超时设置请求异常', 'error');
+    toast('保存梯队池配置请求异常', 'error');
   }
 }
 
