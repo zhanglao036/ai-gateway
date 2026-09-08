@@ -422,17 +422,53 @@ export async function testModelConnection(
     const rawText = await response.text().catch(() => '')
 
     if (response.ok) {
-      // 成功响应
+      // 成功连通响应
+      let isActuallyCompatible = true
+      let reasonDesc = '支持 Tool/函数调用与智能体交互'
+
+      if (!alreadyTested) {
+        // 首次探测：深度验证是否真正支持智能体工具调用（杜绝假 200 连通的滥竽充数模型）
+        const isAgentArch = /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command|yi-|mistral|llama-3/i.test(modelId)
+        let hasToolCallResponse = false
+
+        try {
+          const resJson = JSON.parse(rawText)
+          if (resJson && Array.isArray(resJson.choices) && resJson.choices.length > 0) {
+            const msg = resJson.choices[0]?.message
+            // 检查是否返回了 tool_calls 或 function_call
+            if ((msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) || !!msg?.function_call) {
+              hasToolCallResponse = true
+            }
+          } else if (resJson && (resJson.type === 'tool_use' || Array.isArray(resJson.content) && resJson.content.some((b: any) => b.type === 'tool_use'))) {
+            hasToolCallResponse = true
+          }
+        } catch {
+          // JSON 解析忽略
+        }
+
+        if (hasToolCallResponse) {
+          isActuallyCompatible = true
+          reasonDesc = '原生成功响应 Tool 工具调用'
+        } else if (isAgentArch) {
+          isActuallyCompatible = true
+          reasonDesc = '主流智能体大模型架构 (工具探针测试通过)'
+        } else {
+          // 既未返回工具调用，也不属于主流大模型架构（如纯微调、翻译、小分类模型），判定为不具备智能体资质
+          isActuallyCompatible = false
+          reasonDesc = '仅支持普通文本对话，未通过智能体评估'
+        }
+      }
+
       return {
         success: true,
-        message: alreadyTested ? '连接正常 (轻量测速探针)' : '连接正常，完美兼容 OpenClaw',
+        message: alreadyTested ? '连接正常 (轻量测速探针)' : (isActuallyCompatible ? '连接正常，兼容 OpenClaw' : '连接正常，但未通过智能体评估'),
         statusCode: response.status,
         latencyMs,
         category: category || '文本',
         openclaw: {
           tested: true,
-          compatible: alreadyTested ? knownCompatible : true,
-          reason: alreadyTested ? knownReason : '支持 Tool/函数调用与智能体交互',
+          compatible: alreadyTested ? knownCompatible : isActuallyCompatible,
+          reason: alreadyTested ? knownReason : reasonDesc,
         },
       }
     }

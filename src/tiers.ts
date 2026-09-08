@@ -207,13 +207,24 @@ export async function applyModelProbeResult(
     if (storage) {
       let changed = false
       const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
+      const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+      const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
 
+      // 如果模型被永久失效，立即从所有梯队池中清除
       if (isPermDisabled) {
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
+        if (storage.tierOpenclaw) storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        if (storage.tierDrawing) storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
         changed = true
-        console.log(`[applyModelProbeResult] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
+        console.log(`[applyModelProbeResult] 永久失效模型 ${fullId} 已从所有梯队池踢出，原因: ${actualDisabledReason}`)
+      } else if (inOpenclaw && extra?.openclawCompatible === false) {
+        // 如果在 OpenClaw 池中但探测结果为明确不兼容智能体，立即剔除并启动自动补位
+        console.log(`[applyModelProbeResult] OpenClaw 梯队模型 ${fullId} 探测不兼容智能体，立即剔除并启动自动补位`)
+        storage.tierOpenclaw = (storage.tierOpenclaw || []).filter((m) => m.fullId !== fullId)
+        changed = true
       } else if (!success && inTier1) {
+        // 第一梯队通用模型异常：踢出至第二梯队
         console.log(`[applyModelProbeResult] 第一梯队模型 ${fullId} 探测异常(${statusCode})，立即踢出至第二梯队并启动自动补位`)
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         const ref = { providerId, modelId, fullId, addedAt: Date.now() }
@@ -221,8 +232,19 @@ export async function applyModelProbeResult(
           storage.tier2.push(ref)
         }
         changed = true
+      } else if (!success && inOpenclaw) {
+        // OpenClaw 池中模型探测异常：立即踢出
+        console.log(`[applyModelProbeResult] OpenClaw 梯队模型 ${fullId} 探测异常(${statusCode})，立即踢出并启动自动补位`)
+        storage.tierOpenclaw = (storage.tierOpenclaw || []).filter((m) => m.fullId !== fullId)
+        changed = true
+      } else if (!success && inDrawing) {
+        // 绘图池中模型探测异常：立即踢出
+        console.log(`[applyModelProbeResult] 绘图梯队模型 ${fullId} 探测异常(${statusCode})，立即踢出并启动自动补位`)
+        storage.tierDrawing = (storage.tierDrawing || []).filter((m) => m.fullId !== fullId)
+        changed = true
       }
 
+      // 如果梯队结构发生变动，同步记录成绩单并启动自动补位
       if (changed) {
         storage.probeStats[fullId] = {
           success,
@@ -230,7 +252,11 @@ export async function applyModelProbeResult(
           lastTestedAt: Date.now(),
           error: success ? undefined : `HTTP ${statusCode}: ${errorMsg}`,
         }
-        await backfillTier1FromTier2(env, storage)
+        // 顺风车自愈补位并保存至 KV
+        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
+        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
+        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
+        await saveTierStorage(env, storage)
       }
     }
   }
@@ -258,6 +284,7 @@ export async function runSingleModelProbe(
 
   try {
     if (isOpenCodeProvider(provider.id)) {
+      // 探测 OpenCode 提供商
       const res = await testOpenCodeModel(
         provider.baseUrl,
         enabledKeys,
@@ -267,6 +294,8 @@ export async function runSingleModelProbe(
       success = res.success
       statusCode = res.statusCode || (success ? 200 : 500)
       errorMsg = res.message
+      openclawCompatible = res.openclaw?.compatible
+      openclawReason = res.openclaw?.reason
     } else {
       if (!apiKey) {
         return {
@@ -1054,7 +1083,7 @@ export function sampleCandidatesByProviderAndModelCursors<T extends { provider: 
  * 为 OpenClaw 专属梯队池海选补位（双重游标自适应海选流程）：
  * 1. 按提供商与名下模型双重游标自适应抽选候选人（<=3家抽2个，>3家抽1个）
  * 2. 现场并发执行轻量握手探针测速
- * 3. 严格筛选测通的模型 (success === true)
+ * 3. 严格筛选测通且通过智能体资质审核的模型 (success === true && openclawCompatible !== false)
  * 4. 按照本轮实测延迟由低到高严格择优录取
  * 5. 入池同时立刻记录测速延迟成绩与游标，顺风车打包 1 次写入 KV
  */
@@ -1065,29 +1094,41 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
-  // 1. 清理当前 OpenClaw 梯队中已下线或不可用的模型
-  storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => availableMap.has(m.fullId))
+  // 1. 清理当前 OpenClaw 梯队中已下线、不可用或已知不兼容智能体的模型
+  storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => {
+    if (!availableMap.has(m.fullId)) return false
+    const live = availableMap.get(m.fullId)
+    const mConfig = live?.provider.models.find((x) => x.id === live.modelId)
+    // 排除已测试但不兼容智能体的模型
+    if (mConfig?.openclawTested && !mConfig.openclawCompatible) return false
+    // 排除纯绘图模型
+    if (isDrawingModel(m.modelId, mConfig?.category)) return false
+    return true
+  })
   const needed = TIER_OPENCLAW_MAX_SLOTS - storage.tierOpenclaw.length
   if (needed <= 0) return storage
 
   const existingFullIds = new Set(storage.tierOpenclaw.map((m) => m.fullId))
 
-  // 2. 筛选出候选模型（未在 OpenClaw 池中的健康模型，且排除已知不兼容项）
+  // 2. 筛选出候选模型（未在 OpenClaw 池中的健康模型，且排除绘图/嵌入模型与已知不兼容项）
   const candidates = allModels.filter((m) => {
     if (existingFullIds.has(m.fullId)) return false
     const mConfig = m.provider.models.find((x) => x.id === m.modelId)
     if (mConfig?.openclawTested && !mConfig.openclawCompatible) return false
+    if (isDrawingModel(m.modelId, mConfig?.category)) return false
     return true
   })
 
   if (candidates.length === 0) return storage
 
-  // 优先排序候选人：已测试兼容的排前面
+  // 优先排序候选人：已测试兼容(3分) > 主流智能体命名(2分) > 未测其他模型(1分)
   candidates.sort((a, b) => {
     const mA = a.provider.models.find((x) => x.id === a.modelId)
     const mB = b.provider.models.find((x) => x.id === b.modelId)
-    const scoreA = mA?.openclawTested ? (mA.openclawCompatible ? 2 : 0) : 1
-    const scoreB = mB?.openclawTested ? (mB.openclawCompatible ? 2 : 0) : 1
+    const isAgentA = /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command|yi-|mistral|llama-3/i.test(a.modelId)
+    const isAgentB = /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command|yi-|mistral|llama-3/i.test(b.modelId)
+    const scoreA = mA?.openclawTested ? (mA.openclawCompatible ? 3 : 0) : (isAgentA ? 2 : 1)
+    const scoreB = mB?.openclawTested ? (mB.openclawCompatible ? 3 : 0) : (isAgentB ? 2 : 1)
     return scoreB - scoreA
   })
 
@@ -1096,19 +1137,22 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 
   if (candidatesToProbe.length === 0) return storage
 
-  // 3. 现场并发海选测速（0成本轻量握手）
+  // 3. 现场并发海选测速（0成本轻量握手探针）
   const probeResults = await Promise.allSettled(
     candidatesToProbe.map((item) => runSingleModelProbe(env, item.provider, item.modelId))
   )
 
-  // 4. 严格过滤测通的模型，并组装实测成绩
+  // 4. 严格过滤测通且具备智能体资质的模型，组装实测成绩
   const qualified: Array<{ item: typeof candidatesToProbe[0]; metric: ProbeMetric }> = []
   probeResults.forEach((res, idx) => {
     if (res.status === 'fulfilled' && res.value.success) {
-      qualified.push({
-        item: candidatesToProbe[idx],
-        metric: res.value,
-      })
+      // 严格要求：必须非明确不兼容 (openclawCompatible !== false)
+      if (res.value.openclawCompatible !== false) {
+        qualified.push({
+          item: candidatesToProbe[idx],
+          metric: res.value,
+        })
+      }
     }
   })
 
@@ -1224,7 +1268,7 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     let changed = false
     const now = Date.now()
 
-    // 1. 清除已不在可用列表中的模型（比如被删除、禁用、永久失效的模型）
+    // 1. 清除已不在可用列表中的模型，以及 OpenClaw 池中已明确不兼容或绘图的模型
     const prevTier1Length = existing.tier1.length
     existing.tier1 = existing.tier1.filter((m) => availableSet.has(m.fullId))
     if (existing.tier1.length !== prevTier1Length) {
@@ -1237,8 +1281,26 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       changed = true
     }
 
-    existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
+    // 严密清理 OpenClaw 池：排除离线、已知不兼容智能体、以及绘图模型
+    const prevOpenclawLen = (existing.tierOpenclaw || []).length
+    existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => {
+      if (!availableSet.has(m.fullId)) return false
+      const live = allModels.find((x) => x.fullId === m.fullId)
+      const mConfig = live?.provider.models.find((x) => x.id === live.modelId)
+      if (mConfig?.openclawTested && !mConfig.openclawCompatible) return false
+      if (isDrawingModel(m.modelId, mConfig?.category)) return false
+      return true
+    })
+    if ((existing.tierOpenclaw || []).length !== prevOpenclawLen) {
+      changed = true
+    }
+
+    // 严密清理绘图池：排除离线与非绘图模型
+    const prevDrawingLen = (existing.tierDrawing || []).length
     existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
+    if ((existing.tierDrawing || []).length !== prevDrawingLen) {
+      changed = true
+    }
 
     // 2. 检查专属梯队池席位（6 席），若不足调用补位逻辑（内部自动进行并发探针测速）
     if ((existing.tierOpenclaw || []).length < TIER_OPENCLAW_MAX_SLOTS) {
@@ -1290,7 +1352,8 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   }))
   const initialOpenclaw = allModels.filter((item) => {
     const m = item.provider.models.find((x) => x.id === item.modelId)
-    return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
+    if (isDrawingModel(item.modelId, m?.category)) return false
+    return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command/i.test(item.modelId)
   }).slice(0, TIER_OPENCLAW_MAX_SLOTS).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
