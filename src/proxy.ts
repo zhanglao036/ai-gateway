@@ -740,20 +740,17 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       const fBodyAny = forwardBody as Record<string, unknown>
 
-      // 智能处理思考模式参数：
+      // 智能处理思考模式参数与协议兼容：
       if (shouldDisableThinking) {
-        // 1. 通义千问 / 阿里云百炼 / SiliconFlow / 深度求索等大模型的标准关思考参数
+        // 1. 仅针对支持 enable_thinking 的模型设置布尔值
         fBodyAny.enable_thinking = false
-        // 2. Anthropic / Claude 协议兼容标准关思考参数
-        fBodyAny.thinking = { type: 'disabled' }
-        // 3. 浦语 InternLM / 百度千帆等开源模板关思考参数
-        fBodyAny.chat_template_kwargs = { thinking: false }
-        // 4. 清理会诱导模型开启内心深度思考的参数，彻底杜绝内心独白
+        // 2. 清理会诱发模型深层思考/卡顿的参数
         delete fBodyAny.reasoning_effort
         delete fBodyAny.disable_think
         delete fBodyAny.no_chain_of_thought
+        // 注意：不向上游盲目塞入非 OpenAI 标准的 thinking 对象或 chat_template_kwargs，以防部分上游报 400
       } else {
-        // 未开启“关闭思考”时：保留客户端原本的思考偏好，仅清理非标调试参数
+        // 未开启“关闭思考”时：保留客户端原本设置，仅清理容易冲突的非标调试参数
         delete fBodyAny.disable_think
         delete fBodyAny.no_chain_of_thought
       }

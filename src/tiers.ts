@@ -1406,7 +1406,17 @@ export async function selectAutoModel(
       const chosen = sorted[0]
       return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
     }
-    // 若 OpenClaw 专属池暂空，平滑降级至通用第一梯队
+    // 若 OpenClaw 专属池暂空，尝试从全部已启用的真实可用模型中挑选支持 Agent 的模型
+    const fallbackOpenclaw = allModels.filter((m) => {
+      const mConfig = m.provider.models.find((x) => x.id === m.modelId)
+      if (mConfig?.openclawTested && !mConfig.openclawCompatible) return false
+      return /deepseek|claude|gpt|gemini|qwen|glm|mimo/i.test(m.modelId)
+    })
+    if (fallbackOpenclaw.length > 0) {
+      const chosen = fallbackOpenclaw[0]
+      return { providerId: chosen.provider.id, modelId: chosen.modelId, fullId: chosen.fullId }
+    }
+    // 若依然没有，平滑降级至通用第一梯队
   }
 
   // 2. 绘图专属梯队池选择

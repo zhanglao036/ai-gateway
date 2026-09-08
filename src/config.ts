@@ -1,7 +1,11 @@
 import type { Provider } from './types'
 
+// 系统全局版本号 (每次更新严格递增版本号)
+export const CURRENT_VERSION = 'v1.18.0'
+
 export const SITE_CONFIG = {
   title: 'AI Gateway',
+  version: CURRENT_VERSION,
   subtitle: '统一的 AI 管理平台',
   author: 'QingYun',
   authorUrl: 'https://github.com/yutian81/ai-gateway',
