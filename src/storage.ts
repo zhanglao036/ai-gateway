@@ -491,12 +491,16 @@ export async function getPoolTimeouts(env: Env): Promise<PoolTimeoutConfig> {
         generalTimeout: typeof parsed.generalTimeout === 'number' && parsed.generalTimeout > 0 ? parsed.generalTimeout : DEFAULT_POOL_TIMEOUTS.generalTimeout,
         openclawTimeout: typeof parsed.openclawTimeout === 'number' && parsed.openclawTimeout > 0 ? parsed.openclawTimeout : DEFAULT_POOL_TIMEOUTS.openclawTimeout,
         drawingTimeout: typeof parsed.drawingTimeout === 'number' && parsed.drawingTimeout > 0 ? parsed.drawingTimeout : DEFAULT_POOL_TIMEOUTS.drawingTimeout,
+        // 读取各池子关闭思考模式开关（未设置时使用安全默认值）
+        disableThinkingTier1: typeof parsed.disableThinkingTier1 === 'boolean' ? parsed.disableThinkingTier1 : DEFAULT_POOL_TIMEOUTS.disableThinkingTier1,
+        disableThinkingOpenclaw: typeof parsed.disableThinkingOpenclaw === 'boolean' ? parsed.disableThinkingOpenclaw : DEFAULT_POOL_TIMEOUTS.disableThinkingOpenclaw,
+        disableThinkingDrawing: typeof parsed.disableThinkingDrawing === 'boolean' ? parsed.disableThinkingDrawing : DEFAULT_POOL_TIMEOUTS.disableThinkingDrawing,
       }
       cachedPoolTimeoutsTime = now
       return cachedPoolTimeouts
     }
   } catch (err) {
-    console.warn('[storage] 读取梯队池超时配置异常:', err instanceof Error ? err.message : String(err))
+    console.warn('[storage] 读取梯队池超时与思考配置异常:', err instanceof Error ? err.message : String(err))
   }
   cachedPoolTimeouts = { ...DEFAULT_POOL_TIMEOUTS }
   cachedPoolTimeoutsTime = now
@@ -504,7 +508,7 @@ export async function getPoolTimeouts(env: Env): Promise<PoolTimeoutConfig> {
 }
 
 /**
- * 保存各梯队池的请求超时配置（合包顺风车 1 次写入 KV）
+ * 保存各梯队池的请求超时与思考配置（合包顺风车 1 次写入 KV）
  */
 export async function savePoolTimeouts(env: Env, config: Partial<PoolTimeoutConfig>): Promise<PoolTimeoutConfig> {
   const current = await getPoolTimeouts(env)
@@ -513,6 +517,10 @@ export async function savePoolTimeouts(env: Env, config: Partial<PoolTimeoutConf
     generalTimeout: Math.max(5, Math.min(600, Number(config.generalTimeout) || current.generalTimeout || DEFAULT_POOL_TIMEOUTS.generalTimeout)),
     openclawTimeout: Math.max(5, Math.min(600, Number(config.openclawTimeout) || current.openclawTimeout || DEFAULT_POOL_TIMEOUTS.openclawTimeout)),
     drawingTimeout: Math.max(5, Math.min(600, Number(config.drawingTimeout) || current.drawingTimeout || DEFAULT_POOL_TIMEOUTS.drawingTimeout)),
+    // 顺风车打包保存三大池子的关闭思考模式开关
+    disableThinkingTier1: typeof config.disableThinkingTier1 === 'boolean' ? config.disableThinkingTier1 : (current.disableThinkingTier1 ?? false),
+    disableThinkingOpenclaw: typeof config.disableThinkingOpenclaw === 'boolean' ? config.disableThinkingOpenclaw : (current.disableThinkingOpenclaw ?? true),
+    disableThinkingDrawing: typeof config.disableThinkingDrawing === 'boolean' ? config.disableThinkingDrawing : (current.disableThinkingDrawing ?? false),
   }
   await kvPut(env, KV_KEYS.TIMEOUT_CONFIG, JSON.stringify(cleaned))
   await flushPendingWrites(env)

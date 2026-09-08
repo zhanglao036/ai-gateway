@@ -3,7 +3,7 @@ export const SITE_REPO_URL = 'https://github.com/yutian81/ai-gateway'
 export function renderSiteFooter(title: string): string {
   return `<footer class="site-footer">
   <div class="shell site-footer__inner">
-    <span>© ${new Date().getFullYear()} <a class="site-footer__link" href="${SITE_REPO_URL}" target="_blank" rel="noreferrer">${title}</a> <span class="badge-status badge-synced" style="margin-left:6px;font-size:11px;padding:1px 6px;border-radius:4px;font-weight:600;">v1.1.0</span></span>
+    <span>© ${new Date().getFullYear()} <a class="site-footer__link" href="${SITE_REPO_URL}" target="_blank" rel="noreferrer">${title}</a></span>
     <span>Cloudflare Workers · Hono · KV</span>
   </div>
 </footer>`

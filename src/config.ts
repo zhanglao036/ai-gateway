@@ -2,7 +2,6 @@ import type { Provider } from './types'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
-  version: 'v1.1.0',
   subtitle: '统一的 AI 管理平台',
   author: 'QingYun',
   authorUrl: 'https://github.com/yutian81/ai-gateway',
@@ -48,7 +47,7 @@ export const KV_KEYS = {
   TIMEOUT_CONFIG: 'system:timeout_config',
 } as const
 
-// 各梯队池独立超时配置
+// 各梯队池独立配置（包含超时时长与思考模式开关）
 export interface PoolTimeoutConfig {
   // 第一梯队（通用池）超时时长，单位秒，默认 60 秒
   generalTimeout: number
@@ -56,13 +55,22 @@ export interface PoolTimeoutConfig {
   openclawTimeout: number
   // 绘图专属池超时时长，单位秒，默认 60 秒
   drawingTimeout: number
+  // 第一梯队（通用池）是否强制关闭思考模式（默认 false：保留模型原生推理深度）
+  disableThinkingTier1?: boolean
+  // OpenClaw 专属池是否强制关闭思考模式（默认 true：防止智能体与思考模式冲突崩溃）
+  disableThinkingOpenclaw?: boolean
+  // 绘图专属池是否强制关闭思考模式（默认 false）
+  disableThinkingDrawing?: boolean
 }
 
-// 梯队池默认超时配置（各池独立 60 秒）
+// 梯队池默认配置（超时保持 60 秒，OpenClaw 默认关闭思考以确保绝对稳定）
 export const DEFAULT_POOL_TIMEOUTS: PoolTimeoutConfig = {
   generalTimeout: 60,
   openclawTimeout: 60,
   drawingTimeout: 60,
+  disableThinkingTier1: false,
+  disableThinkingOpenclaw: true, // 智能体专属池默认关闭内心戏，杜绝 LLM request failed
+  disableThinkingDrawing: false,
 }
 
 // 有效期选项（秒）
