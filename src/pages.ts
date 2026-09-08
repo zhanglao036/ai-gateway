@@ -4,7 +4,7 @@ import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env, TierStorage } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
-import { getTierStorage, ensureTierStorage } from './tiers'
+import { getTierStorage, ensureTierStorage, getCurrentAutoPointers } from './tiers'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -31,7 +31,12 @@ const H = (title: string) => `
 // ===== 首页 =====
 
 export async function renderHomePage(c: Context<{ Bindings: Env }>, isLoggedIn: boolean) {
-  const providers = await getProviders(c.env)
+  // 并发读取提供商数据与各 auto 路由当前实时指向（纯内存计算，0 KV 额外写入）
+  const [providers, activePointers] = await Promise.all([
+    getProviders(c.env),
+    getCurrentAutoPointers(c.env),
+  ])
+
   // 仅从 KV 快速读取已有数据，绝不发起任何外部网络测速，保证瞬间秒开
   const defaultTierData: TierStorage = {
     tier1: [],
@@ -134,6 +139,96 @@ ${H('首页')}
     <div class="metric"><span class="metric__value">${tierDrawingModels.length} / 6</span><span class="metric__label">绘图池席位</span></div>
   </section>
 
+  <!-- Auto 智能路由实时指向雷达看板 (直观展示各个 auto 正在派发到哪个具体模型) -->
+  <section class="shell auto-pointers-radar" style="margin-top:2rem;margin-bottom:1.5rem;" aria-label="Auto 路由实时指向雷达">
+    <div style="background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);border:1px solid #cbd5e1;border-radius:0.875rem;padding:1.25rem 1.5rem;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
+        <div style="display:flex;align-items:center;gap:0.6rem;">
+          <span style="display:inline-flex;align-items:center;justify-content:center;width:2.2rem;height:2.2rem;border-radius:0.5rem;background:#2563eb;color:#ffffff;font-size:1rem;box-shadow:0 2px 4px rgba(37,99,235,0.2);">
+            <i class="fas fa-radar"></i>
+          </span>
+          <div>
+            <h3 style="margin:0;font-size:1.15rem;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:0.5rem;">
+              Auto 智能路由实时指向看板
+              <span style="font-size:0.7rem;background:#22c55e;color:#ffffff;padding:0.15rem 0.5rem;border-radius:9999px;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;">
+                <span style="width:6px;height:6px;background:#ffffff;border-radius:50%;display:inline-block;"></span>实时当班接客
+              </span>
+            </h3>
+            <p style="margin:0.2rem 0 0 0;font-size:0.8rem;color:#64748b;">
+              展示当前网关 3 个 auto 调度模式实际派发的当班主力模型（毫秒级健康选优与动态轮询）
+            </p>
+          </div>
+        </div>
+        <span style="font-size:0.75rem;color:#475569;background:#ffffff;border:1px solid #e2e8f0;padding:0.25rem 0.65rem;border-radius:0.375rem;font-weight:500;">
+          <i class="fas fa-microchip" style="color:#2563eb;margin-right:0.25rem;"></i>内存实时计算 · 0 KV 写入
+        </span>
+      </div>
+
+      <!-- 3 个 Auto 指向卡片 -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:1rem;">
+        <!-- 1. 通用 auto -->
+        <div style="background:#ffffff;border:1.5px solid ${activePointers.general ? '#3b82f6' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(59,130,246,0.08);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+            <span style="font-size:0.75rem;font-weight:700;color:#1d4ed8;background:#dbeafe;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
+              <i class="fas fa-bolt"></i> 通用 auto
+            </span>
+            <span style="font-size:0.7rem;color:#15803d;font-weight:700;background:#dcfce7;padding:0.15rem 0.4rem;border-radius:0.25rem;">
+              ${activePointers.general ? (activePointers.general.latency ? `⚡ ${activePointers.general.latency} ms` : '🟢 在线当班') : '⚠️ 暂无就绪'}
+            </span>
+          </div>
+          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
+          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#f8fafc;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #e2e8f0;">
+            ${escapePageHtml(activePointers.general?.fullId || '暂无可用的第一梯队模型')}
+          </div>
+          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
+            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.general?.providerName || '-')}</strong></span>
+            <span>匹配: <code>model="auto"</code></span>
+          </div>
+        </div>
+
+        <!-- 2. 智能体 openclaw/auto -->
+        <div style="background:#ffffff;border:1.5px solid ${activePointers.openclaw ? '#8b5cf6' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(139,92,246,0.08);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+            <span style="font-size:0.75rem;font-weight:700;color:#7e22ce;background:#ede9fe;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
+              <i class="fas fa-robot"></i> openclaw/auto
+            </span>
+            <span style="font-size:0.7rem;color:#7e22ce;font-weight:700;background:#ede9fe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
+              ${activePointers.openclaw ? (activePointers.openclaw.latency ? `⚡ ${activePointers.openclaw.latency} ms` : '🟢 智能体当班') : '⚠️ 暂无就绪'}
+            </span>
+          </div>
+          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
+          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#faf5ff;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #f3e8ff;">
+            ${escapePageHtml(activePointers.openclaw?.fullId || '暂无可用的 OpenClaw 模型')}
+          </div>
+          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
+            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.openclaw?.providerName || '-')}</strong></span>
+            <span>匹配: <code>tools 或 openclaw</code></span>
+          </div>
+        </div>
+
+        <!-- 3. 绘图 drawing/auto -->
+        <div style="background:#ffffff;border:1.5px solid ${activePointers.drawing ? '#ec4899' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(236,72,153,0.08);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+            <span style="font-size:0.75rem;font-weight:700;color:#be185d;background:#fce7f3;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
+              <i class="fas fa-palette"></i> drawing/auto
+            </span>
+            <span style="font-size:0.7rem;color:#be185d;font-weight:700;background:#fce7f3;padding:0.15rem 0.4rem;border-radius:0.25rem;">
+              ${activePointers.drawing ? (activePointers.drawing.latency ? `⚡ ${activePointers.drawing.latency} ms` : '🟢 绘图当班') : '⚠️ 暂无就绪'}
+            </span>
+          </div>
+          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
+          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#fff5f7;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #ffe4e6;">
+            ${escapePageHtml(activePointers.drawing?.fullId || '暂无可用的绘图模型')}
+          </div>
+          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
+            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.drawing?.providerName || '-')}</strong></span>
+            <span>匹配: <code>生图接口 或 drawing</code></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="shell tier1-showcase" style="margin-top:2rem;margin-bottom:2rem;">
     <div class="section-heading" style="margin-bottom:1rem;">
       <div>
@@ -170,19 +265,26 @@ ${H('首页')}
       ${Array.from({ length: 9 }).map((_, idx) => {
         const item = tier1Models[idx]
         if (item) {
+          const isCurrentAutoTarget = activePointers.general?.fullId === item.fullId
           const probeStat = tierData.probeStats[item.fullId]
           const bStat = tierData.businessStats[item.fullId]
           const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
           const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
           return `
-          <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.625rem;padding:0.875rem;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+          <div style="background:#ffffff;border:${isCurrentAutoTarget ? '2px solid #2563eb' : '1px solid #e2e8f0'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentAutoTarget ? '0 4px 12px rgba(37,99,235,0.15)' : '0 1px 2px rgba(0,0,0,0.03)'};position:relative;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
               <span style="font-size:0.7rem;font-weight:700;color:#1e40af;background:#dbeafe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
                 席位 #${idx + 1}
               </span>
-              <span style="font-size:0.7rem;color:#15803d;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 第一梯队
-              </span>
+              <div style="display:flex;align-items:center;gap:0.35rem;">
+                ${isCurrentAutoTarget ? `
+                <span style="font-size:0.65rem;background:#dcfce7;color:#166534;border:1px solid #86efac;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
+                  <span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span>正在服务 auto
+                </span>` : ''}
+                <span style="font-size:0.7rem;color:#15803d;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 第一梯队
+                </span>
+              </div>
             </div>
             <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
               ${escapePageHtml(item.fullId)}
@@ -258,19 +360,26 @@ ${H('首页')}
       ${Array.from({ length: 6 }).map((_, idx) => {
         const item = tierOpenclawModels[idx]
         if (item) {
+          const isCurrentOpenclawTarget = activePointers.openclaw?.fullId === item.fullId
           const probeStat = tierData.probeStats[item.fullId]
           const bStat = tierData.businessStats[item.fullId]
           const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
           const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
           return `
-          <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.625rem;padding:0.875rem;box-shadow:0 1px 2px rgba(139,92,246,0.05);">
+          <div style="background:#ffffff;border:${isCurrentOpenclawTarget ? '2px solid #8b5cf6' : '1px solid #f3e8ff'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentOpenclawTarget ? '0 4px 12px rgba(139,92,246,0.15)' : '0 1px 2px rgba(139,92,246,0.05)'};position:relative;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
               <span style="font-size:0.7rem;font-weight:700;color:#6d28d9;background:#ede9fe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
                 OpenClaw 席位 #${idx + 1}
               </span>
-              <span style="font-size:0.7rem;color:#7c3aed;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 兼容智能体
-              </span>
+              <div style="display:flex;align-items:center;gap:0.35rem;">
+                ${isCurrentOpenclawTarget ? `
+                <span style="font-size:0.65rem;background:#fae8ff;color:#701a75;border:1px solid #f0abfc;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
+                  <span style="width:6px;height:6px;border-radius:50%;background:#a855f7;display:inline-block;"></span>正在服务 openclaw
+                </span>` : ''}
+                <span style="font-size:0.7rem;color:#7c3aed;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 兼容智能体
+                </span>
+              </div>
             </div>
             <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
               ${escapePageHtml(item.fullId)}
@@ -344,19 +453,26 @@ ${H('首页')}
       ${Array.from({ length: 6 }).map((_, idx) => {
         const item = tierDrawingModels[idx]
         if (item) {
+          const isCurrentDrawingTarget = activePointers.drawing?.fullId === item.fullId
           const probeStat = tierData.probeStats[item.fullId]
           const bStat = tierData.businessStats[item.fullId]
           const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
           const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
           return `
-          <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.625rem;padding:0.875rem;box-shadow:0 1px 2px rgba(236,72,153,0.05);">
+          <div style="background:#ffffff;border:${isCurrentDrawingTarget ? '2px solid #ec4899' : '1px solid #ffe4e6'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentDrawingTarget ? '0 4px 12px rgba(236,72,153,0.15)' : '0 1px 2px rgba(236,72,153,0.05)'};position:relative;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
               <span style="font-size:0.7rem;font-weight:700;color:#be185d;background:#fce7f3;padding:0.15rem 0.4rem;border-radius:0.25rem;">
                 绘图席位 #${idx + 1}
               </span>
-              <span style="font-size:0.7rem;color:#e11d48;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 绘图模型
-              </span>
+              <div style="display:flex;align-items:center;gap:0.35rem;">
+                ${isCurrentDrawingTarget ? `
+                <span style="font-size:0.65rem;background:#ffe4e6;color:#9f1239;border:1px solid #fda4af;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
+                  <span style="width:6px;height:6px;border-radius:50%;background:#f43f5e;display:inline-block;"></span>正在服务 drawing
+                </span>` : ''}
+                <span style="font-size:0.7rem;color:#e11d48;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 绘图模型
+                </span>
+              </div>
             </div>
             <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
               ${escapePageHtml(item.fullId)}
@@ -911,13 +1027,17 @@ ${H('登录')}
 // ===== 管理后台 =====
 
 export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
-  const providers = await getProviders(c.env)
-  const proxyKeys = await getProxyKeys(c.env)
-  const logs = await getLogs(c.env)
-  const logConfig = await getLogConfig(c.env)
-  const customRoutes = await getCustomModelRoutes(c.env)
-  const poolTimeouts = await getPoolTimeouts(c.env)
-  const tierData = await getTierStorage(c.env)
+  // 并发读取配置并计算当前各个 auto 路由实时指向（纯内存计算，0 KV 额外写入）
+  const [providers, proxyKeys, logs, logConfig, customRoutes, poolTimeouts, tierData, activePointers] = await Promise.all([
+    getProviders(c.env),
+    getProxyKeys(c.env),
+    getLogs(c.env),
+    getLogConfig(c.env),
+    getCustomModelRoutes(c.env),
+    getPoolTimeouts(c.env),
+    getTierStorage(c.env),
+    getCurrentAutoPointers(c.env),
+  ])
   const probeStats = tierData?.probeStats || {}
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
@@ -986,6 +1106,77 @@ ${H('管理')}
           <div><span>${modelsCount}</span><p>模型</p><small>${enabledModelsCount} 个可用</small></div>
           <div><span>${proxyKeys.length}</span><p>转发 Key</p><small>${enabledProxyKeysCount} 个可用</small></div>
           <div><span class="status-dot status-dot--online"><i aria-hidden="true"></i>已配置</span><p>存储</p><small>Cloudflare KV</small></div>
+        </div>
+
+        <!-- 管理后台 Auto 智能路由实时指向看板 -->
+        <div style="margin-top:1.25rem;background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);border:1px solid #cbd5e1;border-radius:0.875rem;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.875rem;flex-wrap:wrap;gap:0.5rem;">
+            <div style="display:flex;align-items:center;gap:0.5rem;">
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:1.8rem;height:1.8rem;border-radius:0.375rem;background:#2563eb;color:#ffffff;font-size:0.9rem;">
+                <i class="fas fa-radar"></i>
+              </span>
+              <span style="font-weight:700;font-size:0.95rem;color:#0f172a;">各 Auto 路由当前实时指向（当班接客模型）</span>
+            </div>
+            <span style="font-size:0.7rem;color:#475569;background:#ffffff;border:1px solid #e2e8f0;padding:0.2rem 0.5rem;border-radius:0.25rem;">
+              <i class="fas fa-microchip" style="color:#2563eb;"></i> 实时内存计算 · 0 KV 写入
+            </span>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:0.875rem;">
+            <!-- 1. 通用 auto -->
+            <div style="background:#ffffff;border:1px solid ${activePointers.general ? '#93c5fd' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
+                <span style="font-size:0.75rem;font-weight:700;color:#1d4ed8;display:inline-flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-bolt"></i> 通用 auto
+                </span>
+                <span style="font-size:0.65rem;color:#15803d;font-weight:700;background:#dcfce7;padding:0.1rem 0.35rem;border-radius:0.25rem;">
+                  ${activePointers.general ? (activePointers.general.latency ? `⚡ ${activePointers.general.latency} ms` : '🟢 在线当班') : '⚠️ 无'}
+                </span>
+              </div>
+              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#f8fafc;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #e2e8f0;">
+                ${escapePageHtml(activePointers.general?.fullId || '暂无可用的第一梯队模型')}
+              </div>
+              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
+                提供商: <strong>${escapePageHtml(activePointers.general?.providerName || '-')}</strong>
+              </div>
+            </div>
+
+            <!-- 2. 智能体 openclaw/auto -->
+            <div style="background:#ffffff;border:1px solid ${activePointers.openclaw ? '#d8b4fe' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
+                <span style="font-size:0.75rem;font-weight:700;color:#7e22ce;display:inline-flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-robot"></i> openclaw/auto
+                </span>
+                <span style="font-size:0.65rem;color:#7e22ce;font-weight:700;background:#ede9fe;padding:0.1rem 0.35rem;border-radius:0.25rem;">
+                  ${activePointers.openclaw ? (activePointers.openclaw.latency ? `⚡ ${activePointers.openclaw.latency} ms` : '🟢 智能体当班') : '⚠️ 无'}
+                </span>
+              </div>
+              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#faf5ff;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #f3e8ff;">
+                ${escapePageHtml(activePointers.openclaw?.fullId || '暂无可用的 OpenClaw 模型')}
+              </div>
+              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
+                提供商: <strong>${escapePageHtml(activePointers.openclaw?.providerName || '-')}</strong>
+              </div>
+            </div>
+
+            <!-- 3. 绘图 drawing/auto -->
+            <div style="background:#ffffff;border:1px solid ${activePointers.drawing ? '#fbcfe8' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
+                <span style="font-size:0.75rem;font-weight:700;color:#be185d;display:inline-flex;align-items:center;gap:0.25rem;">
+                  <i class="fas fa-palette"></i> drawing/auto
+                </span>
+                <span style="font-size:0.65rem;color:#be185d;font-weight:700;background:#fce7f3;padding:0.1rem 0.35rem;border-radius:0.25rem;">
+                  ${activePointers.drawing ? (activePointers.drawing.latency ? `⚡ ${activePointers.drawing.latency} ms` : '🟢 绘图当班') : '⚠️ 无'}
+                </span>
+              </div>
+              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#fff5f7;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #ffe4e6;">
+                ${escapePageHtml(activePointers.drawing?.fullId || '暂无可用的绘图模型')}
+              </div>
+              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
+                提供商: <strong>${escapePageHtml(activePointers.drawing?.providerName || '-')}</strong>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

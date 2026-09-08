@@ -1691,3 +1691,61 @@ export async function recordBusinessLatency(
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
 }
+
+/**
+ * 实时计算并获取当前各个 Auto 智能路由正在派发指向的具体模型信息：
+ * 1. 通用 auto (第一梯队黄金优选)
+ * 2. 智能体 openclaw/auto (OpenClaw专属池优选)
+ * 3. 绘图 drawing/auto (绘图专属池优选)
+ * 全程在内存中只读计算，0 额外 KV 写入！
+ */
+export async function getCurrentAutoPointers(env: Env): Promise<{
+  general: { fullId: string; providerName: string; latency?: number } | null
+  openclaw: { fullId: string; providerName: string; latency?: number } | null
+  drawing: { fullId: string; providerName: string; latency?: number } | null
+}> {
+  try {
+    // 并发在内存中选出当前 3 个 auto 路由首选模型并获取提供商信息
+    const [generalTarget, openclawTarget, drawingTarget, tierData, providers] = await Promise.all([
+      selectAutoModel(env, false, null, new Set(), 'general').catch(() => null),
+      selectAutoModel(env, false, null, new Set(), 'openclaw').catch(() => null),
+      selectAutoModel(env, true, null, new Set(), 'drawing').catch(() => null),
+      getTierStorage(env).catch(() => null),
+      getProviders(env).catch(() => []),
+    ])
+
+    const probeStats = tierData?.probeStats || {}
+    const providerMap = new Map((providers || []).map((p) => [p.id, p.name || p.id]))
+
+    return {
+      // 1. 通用 auto 智能路由当前指向
+      general: generalTarget
+        ? {
+            fullId: generalTarget.fullId,
+            providerName: providerMap.get(generalTarget.providerId) || generalTarget.providerId,
+            latency: probeStats[generalTarget.fullId]?.latency,
+          }
+        : null,
+      // 2. 智能体 openclaw/auto 路由当前指向
+      openclaw: openclawTarget
+        ? {
+            fullId: openclawTarget.fullId,
+            providerName: providerMap.get(openclawTarget.providerId) || openclawTarget.providerId,
+            latency: probeStats[openclawTarget.fullId]?.latency,
+          }
+        : null,
+      // 3. 绘图 drawing/auto 路由当前指向
+      drawing: drawingTarget
+        ? {
+            fullId: drawingTarget.fullId,
+            providerName: providerMap.get(drawingTarget.providerId) || drawingTarget.providerId,
+            latency: probeStats[drawingTarget.fullId]?.latency,
+          }
+        : null,
+    }
+  } catch (err) {
+    console.warn('[tiers] 获取 Auto 实时指向异常 (已安全降级):', err)
+    return { general: null, openclaw: null, drawing: null }
+  }
+}
+

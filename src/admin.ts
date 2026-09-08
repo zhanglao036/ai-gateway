@@ -45,6 +45,7 @@ import {
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
+  getCurrentAutoPointers,
 } from './tiers'
 import type {
   Env,
@@ -928,7 +929,7 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
   })
 }
 
-// ===== 获取梯队与探测数据 =====
+// ===== 获取梯队与探测数据 (同时附带当前 auto 实时指向) =====
 export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
   const defaultTierData: TierStorage = {
     tier1: [],
@@ -941,10 +942,18 @@ export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
     updatedAt: '',
     modelCursors: {},
   }
-  const tierData = (await getTierStorage(c.env)) || defaultTierData
+  // 并发从 KV 和内存计算当前梯队数据及 auto 实时指向
+  const [tierData, activePointers] = await Promise.all([
+    getTierStorage(c.env).then((res) => res || defaultTierData),
+    getCurrentAutoPointers(c.env),
+  ])
+
   return c.json<ApiResponse>({
     success: true,
-    data: tierData,
+    data: {
+      ...tierData,
+      activePointers, // 附带当前各个 auto 路由实时指向的模型信息
+    },
   })
 }
 
