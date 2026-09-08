@@ -724,57 +724,9 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       const enabledKeys = provider.apiKeys.filter(k => k.enabled)
       const forwardBody = { ...body, model: modelId }
-
-      // 判定当前调度池是否开启了【关闭思考模式】开关
-      let shouldDisableThinking = false
-      if (poolType === 'openclaw' && poolTimeouts.disableThinkingOpenclaw !== false) {
-        // OpenClaw 专属池默认开启关闭思考，防止智能体工具调用与思考模式产生冲突
-        shouldDisableThinking = true
-      } else if (poolType === 'general' && poolTimeouts.disableThinkingTier1 === true) {
-        // 第一梯队（通用池）按管理员配置决定是否关闭思考
-        shouldDisableThinking = true
-      } else if (poolType === 'drawing' && poolTimeouts.disableThinkingDrawing === true) {
-        // 绘图专属池按管理员配置决定是否关闭思考
-        shouldDisableThinking = true
-      }
-
       const fBodyAny = forwardBody as Record<string, unknown>
 
-      // 判断目标上游平台是否属于严格标准厂商（如 Groq、OpenAI 官方等）
-      // 检查 providerId 或 baseUrl 是否包含 groq 或 openai
-      const targetBaseUrl = (provider.baseUrl || '').toLowerCase()
-      const targetProviderId = (providerId || '').toLowerCase()
-      const isGroqOrOpenAI = targetProviderId.includes('groq') || targetBaseUrl.includes('groq.com') ||
-                             (targetProviderId.includes('openai') && !targetBaseUrl.includes('deepseek') && !targetBaseUrl.includes('siliconflow'))
-
-      // 智能处理思考模式参数：
-      if (shouldDisableThinking) {
-        // 1. 通义千问 / 阿里云百炼 / SiliconFlow / 深度求索等大模型的标准关思考参数
-        fBodyAny.enable_thinking = false
-        // 2. Anthropic / Claude 协议兼容标准关思考参数
-        fBodyAny.thinking = { type: 'disabled' }
-        // 3. 浦语 InternLM / 百度千帆等开源模板关思考参数（严格大厂如 Groq/OpenAI 不支持此参数，精准避开以免 400 报错）
-        if (!isGroqOrOpenAI) {
-          fBodyAny.chat_template_kwargs = { thinking: false }
-        } else {
-          delete fBodyAny.chat_template_kwargs
-        }
-        // 4. 清理会诱导模型开启内心深度思考的参数，彻底杜绝内心独白
-        delete fBodyAny.reasoning_effort
-        delete fBodyAny.disable_think
-        delete fBodyAny.no_chain_of_thought
-      } else {
-        // 未开启“关闭思考”时：保留客户端原本的思考偏好，仅清理非标调试参数
-        delete fBodyAny.disable_think
-        delete fBodyAny.no_chain_of_thought
-        // 如果发往 Groq 等严格上游，依然清理掉可能由客户端传入的不支持参数
-        if (isGroqOrOpenAI) {
-          delete fBodyAny.chat_template_kwargs
-        }
-      }
-      delete fBodyAny.do_sample
-
-      // OpenClaw / Agent 客户端参数平滑兼容处理：
+      // 仅进行标准 OpenAI 协议平滑兼容，不篡改思考模式参数：
       // 1. 如果带有新版 max_completion_tokens 而缺少 max_tokens，平滑转换
       if (fBodyAny.max_completion_tokens !== undefined && fBodyAny.max_tokens === undefined) {
         fBodyAny.max_tokens = fBodyAny.max_completion_tokens

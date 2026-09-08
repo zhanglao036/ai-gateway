@@ -1018,21 +1018,8 @@ ${H('管理')}
               <input type="number" id="timeout-openclaw" class="form-input" min="5" max="600" value="${poolTimeouts.openclawTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #c4b5fd;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
             </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #ddd6fe;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#7c3aed;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">关闭内心独白，防止智能体报错崩溃</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-openclaw" ${poolTimeouts.disableThinkingOpenclaw !== false ? 'checked' : ''} aria-label="OpenClaw池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#7c3aed;margin-top:8px;line-height:1.5;">
-              💡 保持开启关思考（默认开启），可杜绝 <code>LLM request failed</code> 错误。
+            <div style="font-size:11px;color:#7c3aed;margin-top:12px;line-height:1.5;">
+              💡 <strong>建议设置 20 ~ 25 秒</strong>。低于客户端总超时时间，保证机器人断开前能完成自动换模重试。
             </div>
           </div>
 
@@ -1051,21 +1038,8 @@ ${H('管理')}
               <input type="number" id="timeout-general" class="form-input" min="5" max="600" value="${poolTimeouts.generalTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #fdba74;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
             </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fed7aa;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#ea580c;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">开启后极速吐字；关闭则保留模型深度推理</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-general" ${poolTimeouts.disableThinkingTier1 ? 'checked' : ''} aria-label="第一梯队通用池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#ea580c;margin-top:8px;line-height:1.5;">
-              💡 默认关闭，保留大模型原生深度思考；若追求极速响应可随时开启。
+            <div style="font-size:11px;color:#ea580c;margin-top:12px;line-height:1.5;">
+              💡 保持默认 60 秒即可满足日常对话需求。
             </div>
           </div>
 
@@ -1084,20 +1058,7 @@ ${H('管理')}
               <input type="number" id="timeout-drawing" class="form-input" min="5" max="600" value="${poolTimeouts.drawingTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #f472b6;">
               <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
             </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fbcfe8;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#db2777;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">专注生成图像，去除多余文字思考</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-drawing" ${poolTimeouts.disableThinkingDrawing ? 'checked' : ''} aria-label="绘图池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#db2777;margin-top:8px;line-height:1.5;">
+            <div style="font-size:11px;color:#db2777;margin-top:12px;line-height:1.5;">
               💡 保持默认 60 秒。由于 AI 画图耗时较长，建议保持 60 秒或更大数值。
             </div>
           </div>
@@ -2795,11 +2756,6 @@ async function saveTimeoutsBtn() {
   var gInput = document.getElementById('timeout-general');
   var dInput = document.getElementById('timeout-drawing');
 
-  // 获取三大池子各自独立的关闭思考开关状态
-  var oThink = document.getElementById('thinking-openclaw');
-  var gThink = document.getElementById('thinking-general');
-  var dThink = document.getElementById('thinking-drawing');
-
   var oVal = oInput ? parseInt(oInput.value, 10) : 60;
   var gVal = gInput ? parseInt(gInput.value, 10) : 60;
   var dVal = dInput ? parseInt(dInput.value, 10) : 60;
@@ -2817,9 +2773,8 @@ async function saveTimeoutsBtn() {
     return;
   }
 
-  toast('正在保存各梯队池配置（超时与思考模式）...', 'info');
+  toast('正在保存各梯队池超时设置...', 'info');
   try {
-    // 顺风车合包：将超时时间与三大池子关闭思考开关打包为 1 个请求，1 次性持久化至 KV
     var res = await fetch('/admin/api/timeouts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2827,19 +2782,16 @@ async function saveTimeoutsBtn() {
         openclawTimeout: oVal,
         generalTimeout: gVal,
         drawingTimeout: dVal,
-        disableThinkingOpenclaw: oThink ? oThink.checked : true,
-        disableThinkingTier1: gThink ? gThink.checked : false,
-        disableThinkingDrawing: dThink ? dThink.checked : false,
       })
     });
     var json = await res.json();
     if (json.success) {
-      toast('各梯队池配置（超时与思考模式）已成功保存并立即生效！', 'success');
+      toast('各梯队池超时设置已成功保存并立即生效！', 'success');
     } else {
-      toast(json.message || '保存梯队池配置失败', 'error');
+      toast(json.message || '保存梯队池超时失败', 'error');
     }
   } catch (err) {
-    toast('保存梯队池配置请求异常', 'error');
+    toast('保存梯队池超时请求异常', 'error');
   }
 }
 
