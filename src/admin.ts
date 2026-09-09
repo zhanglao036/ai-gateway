@@ -481,17 +481,33 @@ export async function handleGetDebugMode(c: Context<{ Bindings: Env }>) {
 }
 
 export async function handleToggleDebugMode(c: Context<{ Bindings: Env }>) {
-  const body = await c.req.json<{ debugMode?: boolean }>().catch(() => ({} as { debugMode?: boolean }))
-  await saveLogConfig(c.env, {
-    debugMode: !!body.debugMode,
+  const body = await c.req.json<{
+    debugMode?: boolean
+    logSaveMode?: 'eco' | 'batch' | 'realtime'
+    flushThreshold?: number
+    flushIntervalSec?: number
+  }>().catch(() => ({}))
+
+  const saved = await saveLogConfig(c.env, {
+    debugMode: typeof body.debugMode === 'boolean' ? body.debugMode : undefined,
+    logSaveMode: body.logSaveMode,
+    flushThreshold: body.flushThreshold,
+    flushIntervalSec: body.flushIntervalSec,
   })
-  const updatedConfig = await getLogConfig(c.env)
+
+  let modeDesc = '极速省流模式 (仅错误落盘+内存直读，0多余KV写入)'
+  if (saved.logSaveMode === 'batch') {
+    modeDesc = `批量缓冲模式 (每满 ${saved.flushThreshold} 条或每隔 ${saved.flushIntervalSec} 秒打包写入一次)`
+  } else if (saved.logSaveMode === 'realtime') {
+    modeDesc = '实时全存模式 (每条日志即时写入 KV)'
+  }
+
   return c.json<ApiResponse>({
     success: true,
-    data: { debugMode: updatedConfig.debugMode, config: updatedConfig },
-    message: body.debugMode
-      ? '调试模式已开启：请求日志将即时同步写入 KV，点击【刷新日志】可实时查看'
-      : '调试模式已关闭：请求日志已停用（0 KV 写入消耗）',
+    data: { debugMode: saved.debugMode, config: saved },
+    message: saved.debugMode
+      ? `日志调试模式已生效：当前运行在【${modeDesc}】`
+      : '日志调试已关闭：正常成功请求不记录日志，0 KV 写入消耗',
   })
 }
 

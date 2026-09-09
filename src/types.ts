@@ -98,8 +98,15 @@ export interface RequestLog {
 
 export interface LogConfig {
   debugMode: boolean
-  bufferMaxCount: number
-  flushIntervalSeconds: number
+  // 日志存储模式: 'eco'(极速省流-错误即存+内存直读), 'batch'(批量缓冲落盘), 'realtime'(逐条即时落盘)
+  logSaveMode?: 'eco' | 'batch' | 'realtime'
+  // 批量缓冲模式下的打包条数阈值 (默认 15 条，范围 5~50)
+  flushThreshold?: number
+  // 批量缓冲模式下的最大时间间隔阈值 (默认 60 秒，范围 10~300)
+  flushIntervalSec?: number
+  // 兼容老字段
+  bufferMaxCount?: number
+  flushIntervalSeconds?: number
 }
 
 export interface CustomModelRoute {

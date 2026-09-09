@@ -28,36 +28,62 @@ const pendingWrites = new Map<string, { value: string; options?: { expirationTtl
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
 // 动态调试模式与日志参数控制
-let dynamicDebugMode: boolean | null = null
+let dynamicLogConfig: LogConfig | null = null
 
 export function isDebugMode(env?: Env): boolean {
-  if (dynamicDebugMode !== null) return dynamicDebugMode
+  if (dynamicLogConfig?.debugMode !== undefined) return dynamicLogConfig.debugMode
   if (env?.MODE === 'debug' || env?.DEBUG === true || env?.DEBUG === 'true') return true
   if (typeof process !== 'undefined' && process.env && (process.env.MODE === 'debug' || process.env.DEBUG === 'true')) return true
   return false
 }
 
-export async function getLogConfig(env: Env): Promise<{ debugMode: boolean }> {
-  let debug = dynamicDebugMode
+export async function getLogConfig(env: Env): Promise<LogConfig> {
+  if (dynamicLogConfig !== null) {
+    return dynamicLogConfig
+  }
 
-  if (debug === null) {
+  let debug = false
+  let logSaveMode: 'eco' | 'batch' | 'realtime' = 'eco'
+  let flushThreshold = 15
+  let flushIntervalSec = 60
+
+  try {
     const raw = await getKV(env).get(KV_KEYS.LOG_CONFIG)
     if (raw) {
-      try {
-        const parsed = JSON.parse(raw)
-        if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
-      } catch {}
+      const parsed = JSON.parse(raw)
+      if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
+      if (parsed.logSaveMode === 'eco' || parsed.logSaveMode === 'batch' || parsed.logSaveMode === 'realtime') {
+        logSaveMode = parsed.logSaveMode
+      }
+      if (typeof parsed.flushThreshold === 'number' && parsed.flushThreshold >= 5 && parsed.flushThreshold <= 50) {
+        flushThreshold = parsed.flushThreshold
+      } else if (typeof parsed.bufferMaxCount === 'number' && parsed.bufferMaxCount >= 5) {
+        flushThreshold = Math.min(parsed.bufferMaxCount, 50)
+      }
+      if (typeof parsed.flushIntervalSec === 'number' && parsed.flushIntervalSec >= 10 && parsed.flushIntervalSec <= 300) {
+        flushIntervalSec = parsed.flushIntervalSec
+      } else if (typeof parsed.flushIntervalSeconds === 'number' && parsed.flushIntervalSeconds >= 10) {
+        flushIntervalSec = Math.min(parsed.flushIntervalSeconds, 300)
+      }
+    } else {
+      // 兼容旧版单一开关
+      const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
+      debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
+      logSaveMode = debug ? 'eco' : 'eco'
     }
+  } catch (err) {
+    console.warn('[storage] 读取日志配置异常:', err instanceof Error ? err.message : String(err))
+    debug = isDebugMode(env)
   }
 
-  if (debug === null) {
-    const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
-    debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
+  dynamicLogConfig = {
+    debugMode: debug,
+    logSaveMode,
+    flushThreshold,
+    flushIntervalSec,
   }
 
-  dynamicDebugMode = debug
-
-  return { debugMode: !!debug }
+  return dynamicLogConfig
 }
 
 export async function getDebugMode(env: Env): Promise<boolean> {
@@ -67,21 +93,42 @@ export async function getDebugMode(env: Env): Promise<boolean> {
 
 export async function saveLogConfig(
   env: Env,
-  config: { debugMode: boolean }
-): Promise<void> {
-  const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : false
-  dynamicDebugMode = newDebug
+  config: Partial<LogConfig>
+): Promise<LogConfig> {
+  const current = await getLogConfig(env)
+  const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : current.debugMode
+  const newMode = (config.logSaveMode === 'eco' || config.logSaveMode === 'batch' || config.logSaveMode === 'realtime')
+    ? config.logSaveMode
+    : (current.logSaveMode || 'eco')
 
-  const configObj = {
+  let newThreshold = typeof config.flushThreshold === 'number' ? config.flushThreshold : current.flushThreshold || 15
+  if (newThreshold < 5) newThreshold = 5
+  if (newThreshold > 50) newThreshold = 50
+
+  let newIntervalSec = typeof config.flushIntervalSec === 'number' ? config.flushIntervalSec : current.flushIntervalSec || 60
+  if (newIntervalSec < 10) newIntervalSec = 10
+  if (newIntervalSec > 300) newIntervalSec = 300
+
+  const fullConfig: LogConfig = {
     debugMode: newDebug,
+    logSaveMode: newMode,
+    flushThreshold: newThreshold,
+    flushIntervalSec: newIntervalSec,
   }
 
+  dynamicLogConfig = fullConfig
+
   try {
-    await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
-    await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
+    // 顺风车双键同步更新，避免多余请求
+    await Promise.all([
+      getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(fullConfig)),
+      getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false'),
+    ])
   } catch (err) {
     console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
+
+  return fullConfig
 }
 
 export async function setDebugMode(env: Env, enabled: boolean): Promise<void> {
