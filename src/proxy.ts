@@ -431,18 +431,22 @@ export async function testModelConnection(
     }
   } catch (err) {
     const error = err as Error
+    let errText = error.message || '未知错误'
+    if (errText.includes('subrequests') || errText.includes('Too many subrequests')) {
+      errText = '触发单次测试上限(CF免费额度保护)，请稍后分批测试'
+    }
     const alreadyTested = !!existingOpenClaw?.openclawTested
     const knownCompatible = !!existingOpenClaw?.openclawCompatible
     const knownReason = existingOpenClaw?.openclawReason || (knownCompatible ? '已确认兼容 OpenClaw' : '已确认不兼容 OpenClaw')
     return {
       success: false,
-      message: `连接失败: ${error.message?.substring(0, 200) || '未知错误'}`,
+      message: `连接失败: ${errText.substring(0, 200)}`,
       latencyMs: Date.now() - startTime,
       category: category || '文本',
       openclaw: {
         tested: alreadyTested,
         compatible: alreadyTested ? knownCompatible : false,
-        reason: alreadyTested ? knownReason : (error.message || '网络连接超时'),
+        reason: alreadyTested ? knownReason : (errText.includes('CF') ? errText : (error.message || '网络连接超时')),
       },
     }
   }

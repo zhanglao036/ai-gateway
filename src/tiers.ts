@@ -4,7 +4,19 @@ import { testModelConnection } from './proxy'
 import { isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
 import { detectPermanentFailure } from './models'
 import { getIsProbeRunning, setIsProbeRunning } from './admin'
-import type { Env, Provider, Model, TierStorage, TierModelRef, ProbeMetric, BusinessMetric } from './types'
+import type { Env, Provider, Model, TierStorage, TierModelRef, ProbeMetric, BusinessMetric, TierSlotsConfig } from './types'
+
+/**
+ * 获取当前各梯队池的有效席位配置（若用户未自定义设置则自动回退至系统默认配置）
+ */
+export function getTierSlotsConfig(storage?: TierStorage | null): Required<TierSlotsConfig> {
+  const cfg = storage?.slotsConfig
+  return {
+    tier1Slots: Math.max(1, Math.min(30, cfg?.tier1Slots ?? TIER_1_MAX_SLOTS)),
+    tierOpenclawSlots: Math.max(1, Math.min(20, cfg?.tierOpenclawSlots ?? TIER_OPENCLAW_MAX_SLOTS)),
+    tierDrawingSlots: Math.max(1, Math.min(20, cfg?.tierDrawingSlots ?? TIER_DRAWING_MAX_SLOTS)),
+  }
+}
 
 /**
  * 获取 KV 中的梯队存储数据
@@ -30,6 +42,51 @@ export async function saveTierStorage(env: Env, data: TierStorage): Promise<void
   } catch (err) {
     console.warn('[tiers] 保存梯队数据异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
+}
+
+/**
+ * 更新梯队池席位自定义配置，并按需自动裁剪或标记补位
+ */
+export async function updateTierSlotsConfig(
+  env: Env,
+  newConfig: Partial<TierSlotsConfig>
+): Promise<{ storage: TierStorage; slotsConfig: Required<TierSlotsConfig> }> {
+  let storage = (await getTierStorage(env)) || (await ensureTierStorage(env))
+  storage.slotsConfig = {
+    ...(storage.slotsConfig || {}),
+    ...newConfig,
+  }
+
+  const effectiveSlots = getTierSlotsConfig(storage)
+  storage.slotsConfig.tier1Slots = effectiveSlots.tier1Slots
+  storage.slotsConfig.tierOpenclawSlots = effectiveSlots.tierOpenclawSlots
+  storage.slotsConfig.tierDrawingSlots = effectiveSlots.tierDrawingSlots
+
+  // 1. 如果第一梯队席位缩减，将多出的模型平滑移动到第二梯队
+  if (storage.tier1.length > effectiveSlots.tier1Slots) {
+    const keep = storage.tier1.slice(0, effectiveSlots.tier1Slots)
+    const excess = storage.tier1.slice(effectiveSlots.tier1Slots)
+    storage.tier1 = keep
+    storage.tier2 = storage.tier2 || []
+    for (const item of excess) {
+      if (!storage.tier2.some((m) => m.fullId === item.fullId)) {
+        storage.tier2.push(item)
+      }
+    }
+  }
+
+  // 2. 如果 OpenClaw 专属池席位缩减，保留前 N 个
+  if (Array.isArray(storage.tierOpenclaw) && storage.tierOpenclaw.length > effectiveSlots.tierOpenclawSlots) {
+    storage.tierOpenclaw = storage.tierOpenclaw.slice(0, effectiveSlots.tierOpenclawSlots)
+  }
+
+  // 3. 如果绘图专属池席位缩减，保留前 N 个
+  if (Array.isArray(storage.tierDrawing) && storage.tierDrawing.length > effectiveSlots.tierDrawingSlots) {
+    storage.tierDrawing = storage.tierDrawing.slice(0, effectiveSlots.tierDrawingSlots)
+  }
+
+  await saveTierStorage(env, storage)
+  return { storage, slotsConfig: effectiveSlots }
 }
 
 /**
@@ -772,12 +829,13 @@ export async function validateAndRebuildHistoryTier1(
   env: Env,
   existing: TierStorage
 ): Promise<TierStorage> {
+  const slotsConfig = getTierSlotsConfig(existing)
   const allModels = await getAllAvailableModels(env)
   const modelMap = new Map(allModels.map((item) => [item.fullId, item]))
 
   // 获取所有活跃提供商数量并计算均匀配额
   const activeProviders = new Set(allModels.map((item) => item.provider.id))
-  const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.size, TIER_1_MAX_SLOTS)
+  const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.size, slotsConfig.tier1Slots)
 
   const probeStats: Record<string, ProbeMetric> = { ...(existing.probeStats || {}) }
   const businessStats: Record<string, BusinessMetric> = { ...(existing.businessStats || {}) }
@@ -855,14 +913,15 @@ export async function validateAndRebuildHistoryTier1(
   let updatedStorage: TierStorage = {
     tier1: newTier1,
     tier2: newTier2,
+    slotsConfig: existing.slotsConfig,
     probeStats,
     businessStats,
     updatedAt: new Date().toISOString(),
     lastProbeDate: new Date().toISOString().split('T')[0],
   }
 
-  // 3. 运行空位补位海选规则（如果 Tier 1 不足 9 个）
-  if (updatedStorage.tier1.length < TIER_1_MAX_SLOTS) {
+  // 3. 运行空位补位海选规则（如果 Tier 1 不足设置的席位上限）
+  if (updatedStorage.tier1.length < slotsConfig.tier1Slots) {
     updatedStorage = await backfillTier1FromTier2(env, updatedStorage)
   } else {
     await saveTierStorage(env, updatedStorage)
@@ -873,20 +932,14 @@ export async function validateAndRebuildHistoryTier1(
 
 /**
  * 补位海选逻辑 (Backfill Tier 1 from Tier 2):
- * 当第一梯队有空位时，从第二梯队候选池中选拔模型填满 9 席。
- * 
- * 1. 探测执行必须经过块4的探测互斥锁，不可并发执行补位探测。
- * 2. 均匀分布保障：严格计算单提供商席位配额（Quota），优先给第一梯队中席位较少/为0的提供商补位。
- * 3. 探测优先遍历第二梯队内标记【文本】分类的模型；各个提供商轮抽模型交叉测试；
- * 4. 探测游标持久化存KV：每次探测结束记录当前游标位置；下一次补位探测从上一次游标下一个模型继续遍历。
- * 5. 每一轮探测结束，选取本轮探测延迟最低的可用模型晋升进入第一梯队（不超过单厂家配额）。
- * 6. 全部状态、游标、梯队变更，落盘严格遵守块1调试/正式模式KV策略。
+ * 当第一梯队有空位时，从第二梯队候选池中选拔模型填满自定义席位。
  */
 export async function backfillTier1FromTier2(
   env: Env,
   storage: TierStorage
 ): Promise<TierStorage> {
-  const slotsNeeded = TIER_1_MAX_SLOTS - storage.tier1.length
+  const slotsConfig = getTierSlotsConfig(storage)
+  const slotsNeeded = slotsConfig.tier1Slots - storage.tier1.length
   if (slotsNeeded <= 0 || storage.tier2.length === 0) {
     await saveTierStorage(env, storage)
     return storage
@@ -918,7 +971,7 @@ export async function backfillTier1FromTier2(
       if (!isOpenCodeProvider(p.id) && keys.length === 0) return false
       return true
     })
-    const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.length, TIER_1_MAX_SLOTS)
+    const maxQuotaPerProvider = calculateProviderMaxQuota(activeProviders.length, slotsConfig.tier1Slots)
 
     // 区分【文本】模型优先：优先遍历第二梯队内标记【文本】分类的模型
     const textCandidates: typeof candidates = []
@@ -937,7 +990,7 @@ export async function backfillTier1FromTier2(
       }
     }
 
-    let currentSlotsNeeded = TIER_1_MAX_SLOTS - storage.tier1.length
+    let currentSlotsNeeded = slotsConfig.tier1Slots - storage.tier1.length
 
     // 辅助函数：针对候选模型组运行轮询交叉探测
     const runWheelForGroup = async (groupCandidates: typeof candidates, enforceQuota: boolean) => {
@@ -1172,13 +1225,14 @@ export function isDrawingModel(modelId: string, category?: string): boolean {
  * 7. 严格控制 Cloudflare 免费配额：全程内存计算，整轮结束顺风车单次写入 KV！
  */
 export async function backfillOpenclawTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+  const slotsConfig = getTierSlotsConfig(storage)
   storage.tierOpenclaw = storage.tierOpenclaw || []
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
   // 1. 清理当前 OpenClaw 梯队中已下线、永久停用或被删除的模型
   storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => availableMap.has(m.fullId))
-  const needed = TIER_OPENCLAW_MAX_SLOTS - storage.tierOpenclaw.length
+  const needed = slotsConfig.tierOpenclawSlots - storage.tierOpenclaw.length
   if (needed <= 0) return storage // 席位已满，无需测试
 
   // 初始化专属游标与扫描状态字典
@@ -1214,7 +1268,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
   if (!allUnverifiedScanned) {
     // ===== 阶段一：全量未打标模型顺序大轮询（严格执行 OpenClaw 专属工具调用测试） =====
     for (const pid of activeProviderIds) {
-      if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+      if (storage.tierOpenclaw.length >= slotsConfig.tierOpenclawSlots) break
 
       const p = providersMap.get(pid)!
       const allPModels = providerModelsMap.get(pid) || []
@@ -1254,7 +1308,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 
       // 逐个执行 OpenClaw 专属测试（带真实工具调用检验）
       for (const candidate of batchToTest) {
-        if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+        if (storage.tierOpenclaw.length >= slotsConfig.tierOpenclawSlots) break
 
         const metric = await runOpenclawSpecificProbe(env, candidate.provider, candidate.modelId)
         storage.probeStats[candidate.fullId] = metric
@@ -1275,9 +1329,9 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 
   // 如果阶段一测完后仍有空缺，或者已经完成了一整轮全量轮询：
   // ===== 阶段二：从已有认证标签的模型库中按顺序测试（普通轻量快测）+ 游标推进 =====
-  if (storage.tierOpenclaw.length < TIER_OPENCLAW_MAX_SLOTS) {
+  if (storage.tierOpenclaw.length < slotsConfig.tierOpenclawSlots) {
     for (const pid of activeProviderIds) {
-      if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+      if (storage.tierOpenclaw.length >= slotsConfig.tierOpenclawSlots) break
 
       const p = providersMap.get(pid)!
       const allPModels = providerModelsMap.get(pid) || []
@@ -1304,7 +1358,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
       storage.openclawVerifiedCursors[pid] = vCursor
 
       for (const item of vBatch) {
-        if (storage.tierOpenclaw.length >= TIER_OPENCLAW_MAX_SLOTS) break
+        if (storage.tierOpenclaw.length >= slotsConfig.tierOpenclawSlots) break
 
         // 已打标模型只做普通轻量快测，节省流量与时间
         const metric = await runSingleModelProbe(env, item.provider, item.modelId)
@@ -1334,16 +1388,17 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
 /**
  * 为绘图专属梯队池补位：
  * 筛选全系统中标记或识别为【绘图】的健康模型，
- * 补足到 TIER_DRAWING_MAX_SLOTS (默认 5 席)
+ * 补足到自定义席位 (默认 6 席)
  */
 export async function backfillDrawingTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+  const slotsConfig = getTierSlotsConfig(storage)
   storage.tierDrawing = storage.tierDrawing || []
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
   // 1. 清理当前绘图梯队中已下线或不可用的模型
   storage.tierDrawing = storage.tierDrawing.filter((m) => availableMap.has(m.fullId))
-  const needed = TIER_DRAWING_MAX_SLOTS - storage.tierDrawing.length
+  const needed = slotsConfig.tierDrawingSlots - storage.tierDrawing.length
   if (needed <= 0) return storage
 
   const existingFullIds = new Set(storage.tierDrawing.map((m) => m.fullId))
@@ -1364,7 +1419,7 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
 
   // 探测并择优补位
   for (const item of candidates) {
-    if (storage.tierDrawing.length >= TIER_DRAWING_MAX_SLOTS) break
+    if (storage.tierDrawing.length >= slotsConfig.tierDrawingSlots) break
 
     const metric = await runSingleModelProbe(env, item.provider, item.modelId)
     storage.probeStats[item.fullId] = metric
@@ -1434,16 +1489,17 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     return existing
   }
 
-  // 没有任何历史梯队数据：采用轻量静态分配（前9个可用模型进tier1，其余进tier2），不发任何外部HTTP测试
+  // 没有任何历史梯队数据：采用轻量静态分配，不发任何外部HTTP测试
+  const slotsConfig = getTierSlotsConfig(null)
   const allModels = await getAllAvailableModels(env)
   const now = Date.now()
-  const initialTier1 = allModels.slice(0, TIER_1_MAX_SLOTS).map((item) => ({
+  const initialTier1 = allModels.slice(0, slotsConfig.tier1Slots).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
     fullId: item.fullId,
     addedAt: now,
   }))
-  const initialTier2 = allModels.slice(TIER_1_MAX_SLOTS).map((item) => ({
+  const initialTier2 = allModels.slice(slotsConfig.tier1Slots).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
     fullId: item.fullId,
@@ -1452,7 +1508,7 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   const initialOpenclaw = allModels.filter((item) => {
     const m = item.provider.models.find((x) => x.id === item.modelId)
     return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
-  }).slice(0, TIER_OPENCLAW_MAX_SLOTS).map((item) => ({
+  }).slice(0, slotsConfig.tierOpenclawSlots).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
     fullId: item.fullId,
@@ -1461,7 +1517,7 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   const initialDrawing = allModels.filter((item) => {
     const m = item.provider.models.find((x) => x.id === item.modelId)
     return m?.category === '绘图'
-  }).slice(0, TIER_DRAWING_MAX_SLOTS).map((item) => ({
+  }).slice(0, slotsConfig.tierDrawingSlots).map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
     fullId: item.fullId,
@@ -1473,6 +1529,7 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
     tier2: initialTier2,
     tierOpenclaw: initialOpenclaw,
     tierDrawing: initialDrawing,
+    slotsConfig,
     lastProbeDate: new Date().toISOString().split('T')[0],
     probeStats: {},
     businessStats: {},

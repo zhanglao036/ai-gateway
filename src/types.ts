@@ -144,11 +144,19 @@ export interface BusinessMetric {
   lastUsedAt: number
 }
 
+// 梯队池自定义席位配置
+export interface TierSlotsConfig {
+  tier1Slots?: number       // 第一梯队池席位（默认 9）
+  tierOpenclawSlots?: number // OpenClaw 专属池席位（默认 6）
+  tierDrawingSlots?: number  // 绘图专属池席位（默认 6）
+}
+
 export interface TierStorage {
   tier1: TierModelRef[]
   tier2: TierModelRef[]
   tierOpenclaw?: TierModelRef[]
   tierDrawing?: TierModelRef[]
+  slotsConfig?: TierSlotsConfig
   probeStats: Record<string, ProbeMetric>
   businessStats: Record<string, BusinessMetric>
   updatedAt: string

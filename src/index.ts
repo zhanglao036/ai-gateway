@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.0.2
- * 更新说明: 首页模型展示支持鉴权隐藏；提供更完善的 Cookie 与 Token 登录态解析
+ * 版本号: v1.0.6
+ * 更新说明: 支持各梯队池（第一梯队、OpenClaw专属池、绘图专属池）自定义席位数设置
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -40,6 +40,7 @@ import {
   handleUpdateModelStatus,
   handleTestOpenclawModel,
   handleGetTiers,
+  handleUpdateTierSlots,
   handleTestBlockedModels,
 } from './admin'
 import { renderHomePage, renderLoginPage, renderAdminPage } from './pages'
@@ -133,6 +134,7 @@ app.patch('/admin/api/proxy-keys/:id', handleUpdateProxyKey)
 
 // 探测任务与全局重置
 app.get('/admin/api/tiers', handleGetTiers)
+app.post('/admin/api/tiers/slots', handleUpdateTierSlots)
 app.post('/admin/api/probe', handleRunProbe)
 app.post('/admin/api/reset-cooldowns', handleResetCooldowns)
 app.post('/admin/api/reset-all-models', handleResetAllModels)

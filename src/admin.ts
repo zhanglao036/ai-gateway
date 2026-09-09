@@ -42,6 +42,8 @@ import {
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
+  updateTierSlotsConfig,
+  getTierSlotsConfig,
 } from './tiers'
 import type {
   Env,
@@ -54,6 +56,7 @@ import type {
   Model,
   CustomModelRoute,
   TierStorage,
+  TierSlotsConfig,
 } from './types'
 
 // ===== 系统状态 =====
@@ -429,6 +432,7 @@ export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
       providers?: Provider[]
       proxyKeys?: import('./types').ProxyKey[]
       customRoutes?: import('./types').CustomModelRoute[]
+      slotsConfig?: TierSlotsConfig
     }>()
 
     await saveAllUnifiedConfig(c.env, {
@@ -437,9 +441,13 @@ export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
       customRoutes: body?.customRoutes,
     })
 
+    if (body?.slotsConfig) {
+      await updateTierSlotsConfig(c.env, body.slotsConfig)
+    }
+
     return c.json<ApiResponse>({
       success: true,
-      message: '全部配置（提供商、转发Key、指定路由）已一次性成功保存至 KV！',
+      message: '全部配置（提供商、转发Key、指定路由、梯队席位）已一次性成功保存至 KV！',
     })
   } catch (err) {
     return c.json<ApiResponse>({
@@ -1004,6 +1012,17 @@ export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
   return c.json<ApiResponse>({
     success: true,
     data: tierData,
+  })
+}
+
+// ===== 自定义更新梯队席位数 =====
+export async function handleUpdateTierSlots(c: Context<{ Bindings: Env }>) {
+  const body = await c.req.json<Partial<TierSlotsConfig>>().catch(() => ({} as Partial<TierSlotsConfig>))
+  const { storage, slotsConfig } = await updateTierSlotsConfig(c.env, body)
+  return c.json<ApiResponse>({
+    success: true,
+    message: `梯队席位设置已生效（第一梯队: ${slotsConfig.tier1Slots} 席，OpenClaw 池: ${slotsConfig.tierOpenclawSlots} 席，绘图池: ${slotsConfig.tierDrawingSlots} 席）`,
+    data: { tierData: storage, slotsConfig },
   })
 }
 

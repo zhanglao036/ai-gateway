@@ -1,14 +1,14 @@
 /**
- * 版本号: v1.0.4
- * 更新说明: OpenClaw 专属实机工具调用测试打标系统、游标记忆轮询补位与用户自定义标签管理
+ * 版本号: v1.0.6
+ * 更新说明: 各梯队池支持自定义席位设置与调节、模型卡片视觉紧凑优化、各梯队池实时展示当前主力模型
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
-import type { Env, TierStorage } from './types'
+import type { Env, TierStorage, TierSlotsConfig } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
-import { getTierStorage } from './tiers'
+import { getTierStorage, getTierSlotsConfig } from './tiers'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -52,7 +52,7 @@ ${H('首页')}
     <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">API CONTROL PLANE · v1.0.4</span>
+      <span class="brand__descriptor">API CONTROL PLANE · v1.0.6</span>
     </a>
     <nav class="topbar__actions" id="topbar-actions" aria-label="主导航">
       ${isLoggedIn
@@ -604,6 +604,12 @@ function renderAdminTierPools(tierData: TierStorage): string {
   const tier2Count = (tierData.tier2 || []).length
   const totalTierOnlineCount = tier1Models.length + tierOpenclawModels.length + tierDrawingModels.length
 
+  // 获取动态席位配置（默认：第一梯队 9 席，OpenClaw 6 席，绘图 6 席）
+  const slotsConfig: TierSlotsConfig = getTierSlotsConfig(tierData)
+  const tier1Slots: number = slotsConfig.tier1Slots ?? 9
+  const tierOpenclawSlots: number = slotsConfig.tierOpenclawSlots ?? 6
+  const tierDrawingSlots: number = slotsConfig.tierDrawingSlots ?? 6
+
   // 辅助函数：渲染单个梯队池的席位卡片网格
   function renderPoolCards(
     models: typeof tier1Models,
@@ -614,9 +620,10 @@ function renderAdminTierPools(tierData: TierStorage): string {
     borderColor: string,
     badgeBg: string,
     badgeText: string,
-    extraBadgeText: string
+    extraBadgeText: string,
+    poolId: string
   ): string {
-    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:0.875rem;">'
+    let html = '<div id="' + poolId + '-cards-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:0.55rem;">'
     // 遍历每一个固定席位
     for (let idx = 0; idx < maxSlots; idx++) {
       const item = models[idx]
@@ -625,49 +632,48 @@ function renderAdminTierPools(tierData: TierStorage): string {
         const probeStat = tierData.probeStats[item.fullId]
         const bStat = tierData.businessStats[item.fullId]
         const probeLatText = probeStat && probeStat.success ? probeStat.latency + ' ms' : '海选中'
-        const busLatText = bStat && bStat.totalRequests > 0 ? bStat.avgLatency + ' ms (' + bStat.totalRequests + '次)' : '暂无业务请求'
+        const busLatText = bStat && bStat.totalRequests > 0 ? bStat.avgLatency + ' ms' : '暂无请求'
         const providerPart = item.fullId.split('/')[0] || '默认'
         const safeFullId = escapePageHtml(item.fullId)
         const safeProvider = escapePageHtml(providerPart)
         const categoryText = escapePageHtml(probeStat?.category || '通用模型')
 
-        html += '<div style="background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:space-between;">'
+        html += '<div style="background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:0.5rem;padding:0.5rem 0.65rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 1px 2px rgba(0,0,0,0.02);">'
         html += '  <div>'
-        html += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">'
-        html += '      <span style="font-size:0.75rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.15rem 0.45rem;border-radius:0.25rem;">'
+        html += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">'
+        html += '      <span style="font-size:0.7rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.1rem 0.35rem;border-radius:0.2rem;">'
         html += '        ' + slotPrefix + ' #' + (idx + 1)
         html += '      </span>'
-        html += '      <span style="font-size:0.725rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.3rem;">'
-        html += '        <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#16a34a;"></span>'
-        html += '        已连接运行'
+        html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.25rem;">'
+        html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
+        html += '        运行中'
         html += '      </span>'
         html += '    </div>'
-        html += '    <div style="margin-bottom:0.5rem;">'
-        html += '      <div style="font-size:0.7rem;color:#64748b;margin-bottom:0.15rem;">当前连接模型：</div>'
-        html += '      <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #e2e8f0;padding:0.35rem 0.5rem;border-radius:0.375rem;gap:0.5rem;">'
-        html += '        <code style="font-weight:700;font-size:0.825rem;color:#0f172a;word-break:break-all;font-family:monospace;">' + safeFullId + '</code>'
-        html += '        <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText(\'' + safeFullId + '\');toast(\'已复制模型ID\',\'success\')" title="复制模型ID" style="padding:2px 4px;font-size:0.75rem;"><i class="far fa-copy"></i></button>'
+        html += '    <div style="margin-bottom:0.35rem;">'
+        html += '      <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #e2e8f0;padding:0.2rem 0.35rem;border-radius:0.3rem;gap:0.35rem;">'
+        html += '        <code style="font-weight:700;font-size:0.75rem;color:#0f172a;word-break:break-all;font-family:monospace;line-height:1.2;" title="' + safeFullId + '">' + safeFullId + '</code>'
+        html += '        <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText(\'' + safeFullId + '\');toast(\'已复制模型ID\',\'success\')" title="复制模型ID" style="padding:1px 3px;font-size:0.7rem;flex-shrink:0;"><i class="far fa-copy"></i></button>'
         html += '      </div>'
         html += '    </div>'
-        html += '    <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.65rem;flex-wrap:wrap;">'
-        html += '      <span style="font-size:0.7rem;background:#e0f2fe;color:#0369a1;padding:0.1rem 0.4rem;border-radius:0.25rem;font-weight:600;"><i class="fas fa-server"></i> 渠道: ' + safeProvider + '</span>'
-        html += '      <span style="font-size:0.7rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.4rem;border-radius:0.25rem;">' + categoryText + '</span>'
+        html += '    <div style="display:flex;gap:0.25rem;align-items:center;margin-bottom:0.4rem;flex-wrap:wrap;">'
+        html += '      <span style="font-size:0.65rem;background:#e0f2fe;color:#0369a1;padding:0.05rem 0.3rem;border-radius:0.2rem;font-weight:600;"><i class="fas fa-server"></i> ' + safeProvider + '</span>'
+        html += '      <span style="font-size:0.65rem;background:#f1f5f9;color:#475569;padding:0.05rem 0.3rem;border-radius:0.2rem;">' + categoryText + '</span>'
         if (extraBadgeText) {
-          html += '      <span style="font-size:0.7rem;background:' + badgeBg + ';color:' + badgeText + ';padding:0.1rem 0.4rem;border-radius:0.25rem;font-weight:600;">' + extraBadgeText + '</span>'
+          html += '      <span style="font-size:0.65rem;background:' + badgeBg + ';color:' + badgeText + ';padding:0.05rem 0.3rem;border-radius:0.2rem;font-weight:600;">' + extraBadgeText + '</span>'
         }
         html += '    </div>'
         html += '  </div>'
-        html += '  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#ffffff;padding:0.4rem 0.5rem;border-radius:0.375rem;border:1px solid #e2e8f0;">'
-        html += '    <div><div style="color:#64748b;font-size:0.65rem;">探测延迟</div><div style="font-weight:600;color:' + themeColor + ';">' + probeLatText + '</div></div>'
-        html += '    <div><div style="color:#64748b;font-size:0.65rem;">业务平均延迟</div><div style="font-weight:600;color:#16a34a;">' + busLatText + '</div></div>'
+        html += '  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.25rem;font-size:0.6875rem;background:#ffffff;padding:0.25rem 0.35rem;border-radius:0.3rem;border:1px solid #e2e8f0;">'
+        html += '    <div><div style="color:#64748b;font-size:0.6rem;">探测</div><div style="font-weight:600;color:' + themeColor + ';">' + probeLatText + '</div></div>'
+        html += '    <div><div style="color:#64748b;font-size:0.6rem;">业务</div><div style="font-weight:600;color:#16a34a;">' + busLatText + '</div></div>'
         html += '  </div>'
         html += '</div>'
       } else {
         // 席位空置状态
-        html += '<div style="background:' + bgColor + ';border:1px dashed ' + borderColor + ';border-radius:0.625rem;padding:1rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:120px;text-align:center;">'
-        html += '  <span style="font-size:0.75rem;font-weight:600;color:#94a3b8;margin-bottom:0.25rem;">' + slotPrefix + ' #' + (idx + 1) + '</span>'
-        html += '  <div style="font-size:0.85rem;color:#64748b;display:flex;align-items:center;gap:0.375rem;margin-bottom:0.35rem;"><i class="fas fa-clock" style="color:#94a3b8;"></i> 待调度补位</div>'
-        html += '  <span style="font-size:0.7rem;color:#94a3b8;">点击上方“即刻探测刷新”从候选池中选拔入驻</span>'
+        html += '<div style="background:' + bgColor + ';border:1px dashed ' + borderColor + ';border-radius:0.5rem;padding:0.65rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:85px;text-align:center;">'
+        html += '  <span style="font-size:0.7rem;font-weight:600;color:#94a3b8;margin-bottom:0.15rem;">' + slotPrefix + ' #' + (idx + 1) + '</span>'
+        html += '  <div style="font-size:0.75rem;color:#64748b;display:flex;align-items:center;gap:0.25rem;margin-bottom:0.15rem;"><i class="fas fa-clock" style="color:#94a3b8;"></i> 待调度补位</div>'
+        html += '  <span style="font-size:0.65rem;color:#94a3b8;">轻量探针海选补位</span>'
         html += '</div>'
       }
     }
@@ -686,7 +692,7 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '          共 ' + totalTierOnlineCount + ' 个模型服务中'
   out += '        </span>'
   out += '      </h2>'
-  out += '      <p>实时监控三大梯队池当前连接的模型。高可用智能路由在各个池内执行毫秒级选优与故障自愈。</p>'
+  out += '      <p>实时监控三大梯队池当前连接的模型。支持在各池标题栏自定义调整席位上限，高可用智能路由在池内选优与自愈。</p>'
   out += '    </div>'
   out += '    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">'
   out += '      <button class="btn btn-p btn-s" onclick="triggerProbe()"><i class="fas fa-radar" aria-hidden="true"></i>即刻探测刷新</button>'
@@ -712,46 +718,84 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '    </div>'
   out += '  </div>'
 
+  // 第一梯队主力模型高亮
+  const tier1PrimaryModel = tier1Models[0] ? escapePageHtml(tier1Models[0].fullId) : '暂无连接模型'
+  const tierOpenclawPrimaryModel = tierOpenclawModels[0] ? escapePageHtml(tierOpenclawModels[0].fullId) : '暂无连接模型'
+  const tierDrawingPrimaryModel = tierDrawingModels[0] ? escapePageHtml(tierDrawingModels[0].fullId) : '暂无连接模型'
+
   // 第一梯队黄金模型池
-  out += '  <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,0.02);">'
-  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #f1f5f9;padding-bottom:0.75rem;">'
-  out += '      <div>'
-  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#0f172a;display:flex;align-items:center;gap:0.5rem;">'
+  out += '  <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.02);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #f1f5f9;padding-bottom:0.5rem;">'
+  out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
+  out += '        <h3 style="font-size:1.05rem;font-weight:700;margin:0;color:#0f172a;display:flex;align-items:center;gap:0.35rem;">'
   out += '          <span style="color:#2563eb;">👑 第一梯队 (Tier 1) 黄金模型池</span>'
-  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#dbeafe;color:#1e40af;border-radius:0.25rem;font-weight:600;">已连接 ' + tier1Models.length + ' / 9 席</span>'
+  out += '          <span id="tier1-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#dbeafe;color:#1e40af;border-radius:0.25rem;font-weight:600;">已连接 ' + tier1Models.length + ' / ' + tier1Slots + ' 席</span>'
   out += '        </h3>'
-  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">负责 auto/auto 智能分流。由轻量探针持续从 ' + tier2Count + ' 个候选模型中海选选优。</p>'
+  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-bolt" style="color:#059669;"></i> 当前主力: <code id="tier1-primary-model" style="font-weight:700;font-family:monospace;">' + tier1PrimaryModel + '</code></span>'
+  out += '      </div>'
+  out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
+  out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#f8fafc;padding:0.2rem 0.45rem;border:1px solid #cbd5e1;border-radius:0.375rem;font-size:0.75rem;">'
+  out += '          <span style="color:#475569;font-weight:600;"><i class="fas fa-sliders-h" style="color:#2563eb;"></i> 席位上限:</span>'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'tier1\', -1)" title="减少 1 席">-</button>'
+  out += '          <input type="number" id="tier-slots-tier1" value="' + tier1Slots + '" min="1" max="30" style="width:42px;text-align:center;font-weight:700;padding:1px 2px;border:1px solid #cbd5e1;border-radius:0.25rem;font-size:0.75rem;" onchange="onTierSlotsInput(\'tier1\', this.value)">'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'tier1\', 1)" title="增加 1 席">+</button>'
+  out += '          <span style="color:#64748b;">席</span>'
+  out += '          <button type="button" class="btn btn-p btn-xs" style="padding:1px 6px;font-size:0.7rem;margin-left:2px;" onclick="applySingleTierSlots(\'tier1\')" title="保存席位设置">应用</button>'
+  out += '        </div>'
+  out += '        <p style="margin:0;font-size:0.75rem;color:#64748b;">由轻量探针从 ' + tier2Count + ' 个候选模型中海选补位</p>'
   out += '      </div>'
   out += '    </div>'
-  out += renderPoolCards(tier1Models, 9, '席位', '#0284c7', '#f8fafc', '#cbd5e1', '#dbeafe', '#1e40af', '<i class="fas fa-bolt"></i> 黄金席位')
+  out += renderPoolCards(tier1Models, tier1Slots, '席位', '#0284c7', '#f8fafc', '#cbd5e1', '#dbeafe', '#1e40af', '<i class="fas fa-bolt"></i> 黄金席位', 'tier1')
   out += '  </div>'
 
   // OpenClaw 专属智能体池
-  out += '  <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(139,92,246,0.03);">'
-  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #faf5ff;padding-bottom:0.75rem;">'
-  out += '      <div>'
-  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#581c87;display:flex;align-items:center;gap:0.5rem;">'
+  out += '  <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(139,92,246,0.03);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #faf5ff;padding-bottom:0.5rem;">'
+  out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
+  out += '        <h3 style="font-size:1.05rem;font-weight:700;margin:0;color:#581c87;display:flex;align-items:center;gap:0.35rem;">'
   out += '          <span style="color:#9333ea;">🤖 OpenClaw 专属智能体梯队池</span>'
-  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:0.25rem;font-weight:600;">已连接 ' + tierOpenclawModels.length + ' / 6 席</span>'
+  out += '          <span id="tier-openclaw-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#ede9fe;color:#6d28d9;border-radius:0.25rem;font-weight:600;">已连接 ' + tierOpenclawModels.length + ' / ' + tierOpenclawSlots + ' 席</span>'
   out += '        </h3>'
-  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">专供 openclaw/auto 与复杂智能体任务。仅由通过实机工具调用专属测试打标的模型入选；每轮按提供商抽 1~2 个微批次探测，自动带游标断点续测。</p>'
+  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#faf5ff;color:#6b21a8;border:1px solid #e9d5ff;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-robot" style="color:#9333ea;"></i> 当前主力: <code id="tier-openclaw-primary-model" style="font-weight:700;font-family:monospace;">' + tierOpenclawPrimaryModel + '</code></span>'
+  out += '      </div>'
+  out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
+  out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#faf5ff;padding:0.2rem 0.45rem;border:1px solid #d8b4fe;border-radius:0.375rem;font-size:0.75rem;">'
+  out += '          <span style="color:#6b21a8;font-weight:600;"><i class="fas fa-sliders-h" style="color:#9333ea;"></i> 席位上限:</span>'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'openclaw\', -1)" title="减少 1 席">-</button>'
+  out += '          <input type="number" id="tier-slots-openclaw" value="' + tierOpenclawSlots + '" min="1" max="20" style="width:42px;text-align:center;font-weight:700;padding:1px 2px;border:1px solid #d8b4fe;border-radius:0.25rem;font-size:0.75rem;" onchange="onTierSlotsInput(\'openclaw\', this.value)">'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'openclaw\', 1)" title="增加 1 席">+</button>'
+  out += '          <span style="color:#7e22ce;">席</span>'
+  out += '          <button type="button" class="btn btn-p btn-xs" style="padding:1px 6px;font-size:0.7rem;margin-left:2px;background:#9333ea;border-color:#7e22ce;" onclick="applySingleTierSlots(\'openclaw\')" title="保存席位设置">应用</button>'
+  out += '        </div>'
+  out += '        <p style="margin:0;font-size:0.75rem;color:#64748b;">专供 openclaw/auto 与复杂 Agent 工具调用任务</p>'
   out += '      </div>'
   out += '    </div>'
-  out += renderPoolCards(tierOpenclawModels, 6, 'OpenClaw 席位', '#9333ea', '#faf5ff', '#d8b4fe', '#ede9fe', '#6d28d9', '<i class="fas fa-check-double"></i> 工具调用实测认证')
+  out += renderPoolCards(tierOpenclawModels, tierOpenclawSlots, 'OpenClaw 席位', '#9333ea', '#faf5ff', '#d8b4fe', '#ede9fe', '#6d28d9', '<i class="fas fa-check-double"></i> 工具调用实测认证', 'openclaw')
   out += '  </div>'
 
   // 绘图专属池
-  out += '  <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(236,72,153,0.03);">'
-  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #fff1f2;padding-bottom:0.75rem;">'
-  out += '      <div>'
-  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#881337;display:flex;align-items:center;gap:0.5rem;">'
+  out += '  <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(236,72,153,0.03);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #fff1f2;padding-bottom:0.5rem;">'
+  out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
+  out += '        <h3 style="font-size:1.05rem;font-weight:700;margin:0;color:#881337;display:flex;align-items:center;gap:0.35rem;">'
   out += '          <span style="color:#e11d48;">🎨 绘图专属梯队池 (Drawing Tier)</span>'
-  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ffe4e6;color:#9f1239;border-radius:0.25rem;font-weight:600;">已连接 ' + tierDrawingModels.length + ' / 6 席</span>'
+  out += '          <span id="tier-drawing-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#ffe4e6;color:#9f1239;border-radius:0.25rem;font-weight:600;">已连接 ' + tierDrawingModels.length + ' / ' + tierDrawingSlots + ' 席</span>'
   out += '        </h3>'
-  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">专用于图像生成接口 /v1/images/generations 或指定 model: &quot;drawing/auto&quot;。</p>'
+  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#fff1f2;color:#9f1239;border:1px solid #fecdd3;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-palette" style="color:#e11d48;"></i> 当前主力: <code id="tier-drawing-primary-model" style="font-weight:700;font-family:monospace;">' + tierDrawingPrimaryModel + '</code></span>'
+  out += '      </div>'
+  out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
+  out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#fff1f2;padding:0.2rem 0.45rem;border:1px solid #fecdd3;border-radius:0.375rem;font-size:0.75rem;">'
+  out += '          <span style="color:#9f1239;font-weight:600;"><i class="fas fa-sliders-h" style="color:#e11d48;"></i> 席位上限:</span>'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'drawing\', -1)" title="减少 1 席">-</button>'
+  out += '          <input type="number" id="tier-slots-drawing" value="' + tierDrawingSlots + '" min="1" max="20" style="width:42px;text-align:center;font-weight:700;padding:1px 2px;border:1px solid #fecdd3;border-radius:0.25rem;font-size:0.75rem;" onchange="onTierSlotsInput(\'drawing\', this.value)">'
+  out += '          <button type="button" class="btn btn-gh btn-xs" style="padding:1px 6px;line-height:1;font-weight:bold;" onclick="changeTierSlots(\'drawing\', 1)" title="增加 1 席">+</button>'
+  out += '          <span style="color:#be123c;">席</span>'
+  out += '          <button type="button" class="btn btn-p btn-xs" style="padding:1px 6px;font-size:0.7rem;margin-left:2px;background:#e11d48;border-color:#be123c;" onclick="applySingleTierSlots(\'drawing\')" title="保存席位设置">应用</button>'
+  out += '        </div>'
+  out += '        <p style="margin:0;font-size:0.75rem;color:#64748b;">专用于图像生成接口 /v1/images/generations 或 drawing/auto</p>'
   out += '      </div>'
   out += '    </div>'
-  out += renderPoolCards(tierDrawingModels, 6, '绘图席位', '#e11d48', '#fff5f7', '#fecdd3', '#ffe4e6', '#be123c', '<i class="fas fa-palette"></i> 绘画生图')
+  out += renderPoolCards(tierDrawingModels, tierDrawingSlots, '绘图席位', '#e11d48', '#fff5f7', '#fecdd3', '#ffe4e6', '#be123c', '<i class="fas fa-palette"></i> 绘画生图', 'drawing')
   out += '  </div>'
 
   out += '</section>'
@@ -798,7 +842,7 @@ ${H('管理')}
   <aside class="admin-rail" aria-label="控制台导航">
     <a class="brand admin-rail__brand" href="/">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
-      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.3</small></span>
+      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.6</small></span>
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
@@ -1124,13 +1168,70 @@ ${H('管理')}
 
 <script id="init-providers-json" type="application/json">${JSON.stringify(providers).replace(/</g, '\\u003c')}</script>
 <script id="init-proxykeys-json" type="application/json">${JSON.stringify(proxyKeys).replace(/</g, '\\u003c')}</script>
+<script id="init-tiers-json" type="application/json">${JSON.stringify(tierData).replace(/</g, '\\u003c')}</script>
 
 <script>${SHARED_JS}
 // 1. 内存临时状态（生命周期随 Worker 实例 / 页面会话有效，所有表单修改暂存于此，不单项操作 KV）
 // 注意：Cloudflare Workers 运行在无状态多实例 Serverless Container 环境，内存变量仅在单实例生命周期内生效。
 var draftProviders = JSON.parse(document.getElementById('init-providers-json').textContent || '[]');
 var draftProxyKeys = JSON.parse(document.getElementById('init-proxykeys-json').textContent || '[]');
+var initTierData = JSON.parse(document.getElementById('init-tiers-json').textContent || '{}');
+var draftTierSlots = Object.assign({
+  tier1Slots: 9,
+  tierOpenclawSlots: 6,
+  tierDrawingSlots: 6
+}, initTierData.slotsConfig || {});
 var isDirty = false;
+
+// 梯队池席位调节与交互逻辑
+function changeTierSlots(poolType, delta) {
+  var inputId = poolType === 'tier1' ? 'tier-slots-tier1' : (poolType === 'openclaw' ? 'tier-slots-openclaw' : 'tier-slots-drawing');
+  var inputEl = document.getElementById(inputId);
+  if (!inputEl) return;
+  var currentVal = parseInt(inputEl.value, 10) || 1;
+  var maxLimit = poolType === 'tier1' ? 30 : 20;
+  var newVal = Math.max(1, Math.min(maxLimit, currentVal + delta));
+  inputEl.value = newVal;
+  onTierSlotsInput(poolType, newVal);
+}
+
+function onTierSlotsInput(poolType, val) {
+  var num = parseInt(val, 10);
+  var maxLimit = poolType === 'tier1' ? 30 : 20;
+  if (isNaN(num) || num < 1) num = 1;
+  if (num > maxLimit) num = maxLimit;
+
+  if (poolType === 'tier1') {
+    draftTierSlots.tier1Slots = num;
+  } else if (poolType === 'openclaw') {
+    draftTierSlots.tierOpenclawSlots = num;
+  } else if (poolType === 'drawing') {
+    draftTierSlots.tierDrawingSlots = num;
+  }
+  markDirty(true);
+}
+
+// 单独应用保存当前池子席位（支持快捷单项生效或统一保存）
+async function applySingleTierSlots(poolType) {
+  try {
+    var resp = await fetch('/admin/api/tiers/slots', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draftTierSlots)
+    });
+    var data = await resp.json();
+    if (data && data.success) {
+      toast('梯队池席位配置已更新！', 'success');
+      setTimeout(function() {
+        window.location.reload();
+      }, 500);
+    } else {
+      aM('更新席位失败：' + ((data && data.message) || '未知错误'), 'error');
+    }
+  } catch (err) {
+    aM('请求异常：' + String(err), 'error');
+  }
+}
 
 function markDirty(dirty) {
   isDirty = dirty;
@@ -1199,13 +1300,14 @@ async function saveAllConfig() {
         providers: draftProviders,
         proxyKeys: draftProxyKeys,
         customRoutes: customRoutesData,
+        slotsConfig: draftTierSlots,
       })
     });
 
     var data = await resp.json();
 
     if (data && data.success) {
-      toast('保存成功！所有提供商、Key及指定路由配置已合包一次性写入 KV。', 'success');
+      toast('保存成功！所有提供商、Key、指定路由及梯队池席位已合包一次性写入 KV。', 'success');
       markDirty(false);
       renderProviderList();
       renderProxyKeyList();
