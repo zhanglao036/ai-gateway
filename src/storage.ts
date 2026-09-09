@@ -119,11 +119,8 @@ export async function saveLogConfig(
   dynamicLogConfig = fullConfig
 
   try {
-    // 顺风车双键同步更新，避免多余请求
-    await Promise.all([
-      getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(fullConfig)),
-      getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false'),
-    ])
+    // 写入统一配置对象至 KV（单键持久化，节约 50% 写入开销）
+    await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(fullConfig))
   } catch (err) {
     console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }

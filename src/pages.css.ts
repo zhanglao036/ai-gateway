@@ -559,12 +559,26 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
   --control-h-sm: 1.75rem;
 }
 
-.admin-page input,
+.admin-page input:not([type="checkbox"]):not([type="radio"]),
 .admin-page select,
 .admin-page textarea {
   height: var(--control-h);
   font-size: 0.8125rem;
   padding-inline: 0.625rem;
+}
+
+.admin-page input[type="radio"],
+.admin-page input[type="checkbox"] {
+  width: 14px !important;
+  height: 14px !important;
+  min-height: 14px !important;
+  max-height: 14px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  accent-color: #2563eb;
+  cursor: pointer;
+  vertical-align: middle;
+  flex-shrink: 0;
 }
 
 .admin-page .btn {

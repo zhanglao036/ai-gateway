@@ -1543,84 +1543,90 @@ ${H('管理')}
           </div>
         </div>
 
-        <!-- KV 写入保护与多档位日志缓冲设置控制卡片 -->
-        <div style="background:#ffffff;border:1px solid var(--color-rule);border-radius:var(--radius-panel);padding:18px 20px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,0.03);">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:14px;">
-            <div>
-              <h3 style="margin:0 0 4px 0;font-size:14px;font-weight:700;color:var(--color-ink);display:flex;align-items:center;gap:8px;">
-                <i class="fas fa-shield-alt" style="color:#2563eb;"></i> Cloudflare KV 写入防超标与日志缓冲控制
-              </h3>
-              <p style="margin:0;font-size:12px;color:var(--color-muted);line-height:1.5;">
-                Cloudflare 免费版每日仅 1,000 次 KV 写入配额。通过智能内存缓冲与顺风车打包机制，可节约 95% 以上的写入消耗。
-              </p>
+        <!-- KV 写入保护与多档位日志缓冲设置控制卡片 (精致紧凑版) -->
+        <div style="background:var(--color-paper);border:1px solid var(--color-rule);border-radius:var(--radius-panel);padding:14px 16px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--color-rule);">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;background:#eff6ff;color:#2563eb;font-size:12px;">
+                <i class="fas fa-shield-alt"></i>
+              </span>
+              <div>
+                <span style="font-size:13px;font-weight:700;color:var(--color-ink);">Cloudflare KV 写入防超标与日志缓冲控制</span>
+                <span style="display:inline-block;margin-left:6px;font-size:11.5px;color:var(--color-muted);">(每日 1,000 次写入配额保护 · 顺风车打包节约 95%+)</span>
+              </div>
             </div>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <label class="switch-label" style="background:var(--color-paper-2);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="开启后记录调试日志；关闭后仅保存异常报错">
-                <span style="font-size:var(--text-xs);font-weight:700;">调试日志总开关</span>
-                <span class="tg"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="updateLogConfigUI()"><span class="sl"></span></span>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <label class="switch-label" style="background:var(--color-paper-2);padding:4px 8px;border-radius:var(--radius-control);border:1px solid var(--color-rule);cursor:pointer;" title="开启后记录调试日志；关闭后仅保存异常报错">
+                <span style="font-size:11.5px;font-weight:600;color:var(--color-ink-2);">调试日志总开关</span>
+                <span class="tg" style="transform:scale(0.85);margin-left:4px;"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="updateLogConfigUI()"><span class="sl"></span></span>
               </label>
-              <button class="btn btn-p btn-s" onclick="saveLogConfigBtn()"><i class="fas fa-save"></i> 保存日志设置</button>
+              <button class="btn btn-p btn-xs" style="padding:4px 10px;font-size:11.5px;height:28px;" onclick="saveLogConfigBtn()"><i class="fas fa-save"></i> 保存日志设置</button>
             </div>
           </div>
 
-          <!-- 三大模式单选卡片 -->
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:12px;margin-bottom:14px;">
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? '#2563eb;background:#eff6ff;' : 'var(--color-rule);background:var(--color-paper);'}border-radius:var(--radius-control);padding:12px;cursor:pointer;display:block;" id="mode-card-eco">
-              <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;color:#1e40af;margin-bottom:4px;">
-                <input type="radio" name="logSaveMode" value="eco" ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? 'checked' : ''} onchange="onLogModeChange(this.value)">
-                <span>🚀 极速省流模式 (推荐)</span>
+          <!-- 三大模式紧凑卡片排版 -->
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:10px;margin-bottom:10px;">
+            <label style="border:1.5px solid ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-eco">
+              <div style="display:flex;align-items:center;justify-content:space-between;">
+                <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
+                  <input type="radio" name="logSaveMode" value="eco" ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
+                  <span>🚀 极速省流模式</span>
+                </div>
+                <span style="font-size:10.5px;background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:4px;font-weight:600;">推荐</span>
               </div>
-              <div style="font-size:11.5px;color:#475569;line-height:1.45;padding-left:22px;">
+              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
                 • <strong>0 额外 KV 写入</strong>：正常成功请求仅在内存中流转，打开后台时直接直读展示；<br>
                 • <strong>错误 100% 直存</strong>：一旦发生 4xx/5xx/超时等报错，立即打包落盘，绝不漏掉排查线索。
               </div>
             </label>
 
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'batch' ? '#2563eb;background:#eff6ff;' : 'var(--color-rule);background:var(--color-paper);'}border-radius:var(--radius-control);padding:12px;cursor:pointer;display:block;" id="mode-card-batch">
-              <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;color:#1e40af;margin-bottom:4px;">
-                <input type="radio" name="logSaveMode" value="batch" ${logConfig.logSaveMode === 'batch' ? 'checked' : ''} onchange="onLogModeChange(this.value)">
+            <label style="border:1.5px solid ${logConfig.logSaveMode === 'batch' ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-batch">
+              <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
+                <input type="radio" name="logSaveMode" value="batch" ${logConfig.logSaveMode === 'batch' ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
                 <span>📦 批量顺风车落盘模式</span>
               </div>
-              <div style="font-size:11.5px;color:#475569;line-height:1.45;padding-left:22px;">
+              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
                 • <strong>按量打包</strong>：每积攒满下方设定的条数，或达到最大等待秒数后，才打包写入 1 次 KV；<br>
                 • <strong>适合轻度调试</strong>：既能完整持久化成功日志，又能节省 90%+ 写入额度。
               </div>
             </label>
 
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'realtime' ? '#2563eb;background:#eff6ff;' : 'var(--color-rule);background:var(--color-paper);'}border-radius:var(--radius-control);padding:12px;cursor:pointer;display:block;" id="mode-card-realtime">
-              <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;color:#1e40af;margin-bottom:4px;">
-                <input type="radio" name="logSaveMode" value="realtime" ${logConfig.logSaveMode === 'realtime' ? 'checked' : ''} onchange="onLogModeChange(this.value)">
+            <label style="border:1.5px solid ${logConfig.logSaveMode === 'realtime' ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-realtime">
+              <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
+                <input type="radio" name="logSaveMode" value="realtime" ${logConfig.logSaveMode === 'realtime' ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
                 <span>🔥 实时全量落盘模式</span>
               </div>
-              <div style="font-size:11.5px;color:#475569;line-height:1.45;padding-left:22px;">
+              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
                 • <strong>每条请求必写 KV</strong>：100 次请求 = 100 次 KV 写入；<br>
                 • <strong>警告</strong>：仅适合高强度短期联调（5~10分钟），调试完毕后请务必切回省流模式。
               </div>
             </label>
           </div>
 
-          <!-- 批量模式下的自定义阈值调节面板 -->
-          <div id="batch-params-panel" style="${logConfig.logSaveMode === 'batch' ? '' : 'display:none;'}background:var(--color-paper-2);border:1px solid var(--color-rule);border-radius:var(--radius-control);padding:12px 16px;margin-bottom:12px;">
-            <div style="font-size:12px;font-weight:700;color:var(--color-ink);margin-bottom:8px;display:flex;align-items:center;gap:6px;">
-              <i class="fas fa-sliders-h" style="color:#2563eb;"></i> 自定义批量缓冲触发阈值设置
-            </div>
-            <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;">
-              <div style="display:flex;align-items:center;gap:8px;">
-                <label for="log-flush-threshold" style="font-size:12px;color:var(--color-ink);font-weight:600;">满多少条打包写入:</label>
-                <input type="number" id="log-flush-threshold" value="${logConfig.flushThreshold || 15}" min="5" max="50" step="1" style="width:70px;height:30px;padding:4px 8px;font-size:12px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
-                <span style="font-size:11px;color:var(--color-muted);">条 (建议 15~20)</span>
+          <!-- 批量模式下的自定义阈值调节面板 (精简条状) -->
+          <div id="batch-params-panel" style="${logConfig.logSaveMode === 'batch' ? '' : 'display:none;'}background:var(--color-paper-2);border:1px dashed #93c5fd;border-radius:var(--radius-control);padding:8px 14px;margin-bottom:10px;">
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
+              <div style="font-size:11.5px;font-weight:700;color:var(--color-ink);display:flex;align-items:center;gap:5px;">
+                <i class="fas fa-sliders-h" style="color:#2563eb;"></i> 批量缓冲触发阈值设置:
               </div>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <label for="log-flush-interval" style="font-size:12px;color:var(--color-ink);font-weight:600;">最长等待刷新间隔:</label>
-                <input type="number" id="log-flush-interval" value="${logConfig.flushIntervalSec || 60}" min="10" max="300" step="5" style="width:70px;height:30px;padding:4px 8px;font-size:12px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
-                <span style="font-size:11px;color:var(--color-muted);">秒 (建议 60 秒)</span>
+              <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <label for="log-flush-threshold" style="font-size:11.5px;color:var(--color-ink-2);">满多少条打包写入:</label>
+                  <input type="number" id="log-flush-threshold" value="${logConfig.flushThreshold || 15}" min="5" max="50" step="1" style="width:58px;height:24px;padding:2px 6px;font-size:11.5px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
+                  <span style="font-size:11px;color:var(--color-muted);">条 (5~50)</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <label for="log-flush-interval" style="font-size:11.5px;color:var(--color-ink-2);">最长等待刷新间隔:</label>
+                  <input type="number" id="log-flush-interval" value="${logConfig.flushIntervalSec || 60}" min="10" max="300" step="5" style="width:58px;height:24px;padding:2px 6px;font-size:11.5px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
+                  <span style="font-size:11px;color:var(--color-muted);">秒 (10~300)</span>
+                </div>
               </div>
             </div>
           </div>
 
-          <!-- 顺风车机制小白说明条 -->
-          <div style="font-size:11.5px;color:#0369a1;background:#f0f9ff;border:1px solid #bae6fd;padding:8px 12px;border-radius:4px;display:flex;align-items:center;gap:6px;">
-            <i class="fas fa-magic"></i>
+          <!-- 顺风车机制小白说明条 (精简平整) -->
+          <div style="font-size:11px;color:#0369a1;background:#f0f9ff;border:1px solid #bae6fd;padding:6px 10px;border-radius:4px;display:flex;align-items:center;gap:6px;line-height:1.4;">
+            <i class="fas fa-magic" style="font-size:10.5px;"></i>
             <span><strong>顺风车收割机制</strong>：当您在任何时候打开或刷新本日志面板，系统会自动收割当前内存中所有未存日志并打包展示，<strong>即使 Workers 闲置释放内存，您也绝不会丢失任何刚刚发生的调用与报错记录！</strong></span>
           </div>
         </div>
@@ -3054,10 +3060,10 @@ function onLogModeChange(mode) {
     if (card) {
       if (m === mode) {
         card.style.borderColor = '#2563eb';
-        card.style.background = '#eff6ff';
+        card.style.background = '#f8faff';
       } else {
         card.style.borderColor = 'var(--color-rule)';
-        card.style.background = 'var(--color-paper)';
+        card.style.background = 'var(--color-paper-2)';
       }
     }
   });
