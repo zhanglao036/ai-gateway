@@ -1,3 +1,7 @@
+/**
+ * 版本号: v1.0.2
+ * 更新说明: 首页模型展示支持鉴权隐藏；提供更完善的 Cookie 与 Token 登录态解析
+ */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
@@ -34,10 +38,9 @@ import {
   handleImportModels,
   handleClearProviderModels,
   handleUpdateModelStatus,
+  handleTestOpenclawModel,
   handleGetTiers,
   handleTestBlockedModels,
-  handleGetTimeouts,
-  handleSaveTimeouts,
 } from './admin'
 import { renderHomePage, renderLoginPage, renderAdminPage } from './pages'
 import { seedInitialData, getSession } from './storage'
@@ -76,54 +79,31 @@ app.use('*', async (c, next) => {
   return next()
 })
 
-// ===== 首页（需登录才能查看，未登录重定向至登录页） =====
+// ===== 首页 =====
 app.get('/', async (c) => {
-  const { getCookie, deleteCookie } = await import('hono/cookie')
-  const url = new URL(c.req.url)
+  const { getCookie } = await import('hono/cookie')
   let sessionId = getCookie(c, 'session_id')
+  // 如果 Cookie 不存在，尝试获取 URL 参数中的 token（便于跨页面跳转或直接携带授权访问）
   if (!sessionId) {
-    const authHeader = c.req.header('Authorization')
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      sessionId = authHeader.slice(7)
+    const urlToken = c.req.query('token')
+    if (urlToken) sessionId = urlToken
+  }
+
+  let isLoggedIn = false
+  if (sessionId) {
+    // 校验会话有效性或是否为管理员密码
+    if (c.env.ADMIN_PASSWORD && sessionId === c.env.ADMIN_PASSWORD) {
+      isLoggedIn = true
     } else {
-      sessionId = url.searchParams.get('token') || url.searchParams.get('session_id') || undefined
+      const session = await getSession(c.env, sessionId)
+      isLoggedIn = session !== null
     }
   }
-
-  if (!sessionId) {
-    return c.redirect('/admin/login')
-  }
-
-  const session = await getSession(c.env, sessionId)
-  if (!session) {
-    deleteCookie(c, 'session_id')
-    return c.redirect('/admin/login')
-  }
-
-  return renderHomePage(c, true)
+  return renderHomePage(c, isLoggedIn)
 })
 
 // ===== 登录/退出 =====
-app.get('/admin/login', async (c) => {
-  const { getCookie } = await import('hono/cookie')
-  const url = new URL(c.req.url)
-  let sessionId = getCookie(c, 'session_id')
-  if (!sessionId) {
-    const authHeader = c.req.header('Authorization')
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      sessionId = authHeader.slice(7)
-    } else {
-      sessionId = url.searchParams.get('token') || url.searchParams.get('session_id') || undefined
-    }
-  }
-  if (sessionId) {
-    const session = await getSession(c.env, sessionId)
-    if (session) {
-      return c.redirect('/admin')
-    }
-  }
-  return renderLoginPage(c)
-})
+app.get('/admin/login', async (c) => renderLoginPage(c))
 app.post('/admin/login', handleLogin)
 app.get('/admin/logout', handleLogout)
 app.get('/admin/api/auth-check', handleCheckAuth)
@@ -164,6 +144,7 @@ app.post('/admin/api/providers/:id/fetch-models', handleFetchUpstreamModels)
 app.post('/admin/api/providers/:id/import-models', handleImportModels)
 app.delete('/admin/api/providers/:id/models', handleClearProviderModels)
 app.patch('/admin/api/providers/:id/models/:modelId', handleUpdateModelStatus)
+app.post('/admin/api/providers/:id/test-openclaw', handleTestOpenclawModel)
 
 // 批量统一保存配置 (一次性写入 KV)
 app.post('/admin/api/save-all', handleSaveAll)
@@ -173,10 +154,6 @@ app.get('/admin/api/logs', handleGetLogs)
 app.delete('/admin/api/logs', handleClearLogs)
 app.get('/admin/api/debug-mode', handleGetDebugMode)
 app.post('/admin/api/debug-mode', handleToggleDebugMode)
-
-// 各梯队池独立超时设置
-app.get('/admin/api/timeouts', handleGetTimeouts)
-app.post('/admin/api/timeouts', handleSaveTimeouts)
 
 // 自定义指定模型路由
 app.get('/admin/api/custom-routes', handleGetCustomRoutes)
@@ -189,36 +166,13 @@ app.get('/v1/models', handleModels)
 app.all('/v1/*', handleProxy)
 
 // ===== 404 处理 =====
-app.notFound(async (c) => {
-  const url = new URL(c.req.url)
-  const path = url.pathname
-  // 如果是试图请求 API 相关的路径打错了，记录日志以便排查
-  if (path.startsWith('/v1/') || path.startsWith('/chat/') || path.startsWith('/api/')) {
-    try {
-      const { recordLog, getClientIp } = await import('./proxy')
-      await recordLog(c.env, Date.now(), '路径错误(404)', 404, `请求了不存在的接口: ${path}`, {
-        routePath: path,
-        clientIp: getClientIp(c),
-      })
-    } catch {}
-  }
-  return c.json({ error: { message: `接口不存在: ${path}`, type: 'not_found' } }, 404)
+app.notFound((c) => {
+  return c.json({ error: { message: '接口不存在', type: 'not_found' } }, 404)
 })
 
 // ===== 错误处理 =====
-app.onError(async (err, c) => {
+app.onError((err, c) => {
   console.error('未捕获的错误:', err)
-  const url = new URL(c.req.url)
-  const path = url.pathname
-  if (path.startsWith('/v1/')) {
-    try {
-      const { recordLog, getClientIp } = await import('./proxy')
-      await recordLog(c.env, Date.now(), '服务内部错误(500)', 500, err instanceof Error ? err.message : String(err), {
-        routePath: path,
-        clientIp: getClientIp(c),
-      })
-    } catch {}
-  }
   return c.json({ error: { message: '服务器内部错误', type: 'server_error' } }, 500)
 })
 

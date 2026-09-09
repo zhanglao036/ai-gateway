@@ -1,5 +1,4 @@
-import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS, DEFAULT_POOL_TIMEOUTS } from './config'
-import type { PoolTimeoutConfig } from './config'
+import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
 import { createLocalKV } from './localKv'
 
@@ -28,62 +27,46 @@ const pendingWrites = new Map<string, { value: string; options?: { expirationTtl
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
 // 动态调试模式与日志参数控制
-let dynamicLogConfig: LogConfig | null = null
+let dynamicDebugMode: boolean | null = null
+let dynamicBufferMaxCount: number | null = null
+let dynamicFlushIntervalSeconds: number | null = null
 
 export function isDebugMode(env?: Env): boolean {
-  if (dynamicLogConfig?.debugMode !== undefined) return dynamicLogConfig.debugMode
+  if (dynamicDebugMode !== null) return dynamicDebugMode
   if (env?.MODE === 'debug' || env?.DEBUG === true || env?.DEBUG === 'true') return true
   if (typeof process !== 'undefined' && process.env && (process.env.MODE === 'debug' || process.env.DEBUG === 'true')) return true
   return false
 }
 
-export async function getLogConfig(env: Env): Promise<LogConfig> {
-  if (dynamicLogConfig !== null) {
-    return dynamicLogConfig
-  }
+export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; bufferMaxCount: number; flushIntervalSeconds: number }> {
+  let debug = dynamicDebugMode
+  let maxCount = dynamicBufferMaxCount
+  let intervalSec = dynamicFlushIntervalSeconds
 
-  let debug = false
-  let logSaveMode: 'eco' | 'batch' | 'realtime' = 'eco'
-  let flushThreshold = 15
-  let flushIntervalSec = 60
-
-  try {
+  if (debug === null || maxCount === null || intervalSec === null) {
     const raw = await getKV(env).get(KV_KEYS.LOG_CONFIG)
     if (raw) {
-      const parsed = JSON.parse(raw)
-      if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
-      if (parsed.logSaveMode === 'eco' || parsed.logSaveMode === 'batch' || parsed.logSaveMode === 'realtime') {
-        logSaveMode = parsed.logSaveMode
-      }
-      if (typeof parsed.flushThreshold === 'number' && parsed.flushThreshold >= 5 && parsed.flushThreshold <= 50) {
-        flushThreshold = parsed.flushThreshold
-      } else if (typeof parsed.bufferMaxCount === 'number' && parsed.bufferMaxCount >= 5) {
-        flushThreshold = Math.min(parsed.bufferMaxCount, 50)
-      }
-      if (typeof parsed.flushIntervalSec === 'number' && parsed.flushIntervalSec >= 10 && parsed.flushIntervalSec <= 300) {
-        flushIntervalSec = parsed.flushIntervalSec
-      } else if (typeof parsed.flushIntervalSeconds === 'number' && parsed.flushIntervalSeconds >= 10) {
-        flushIntervalSec = Math.min(parsed.flushIntervalSeconds, 300)
-      }
-    } else {
-      // 兼容旧版单一开关
-      const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
-      debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
-      logSaveMode = debug ? 'eco' : 'eco'
+      try {
+        const parsed = JSON.parse(raw)
+        if (typeof parsed.debugMode === 'boolean') debug = parsed.debugMode
+        if (typeof parsed.bufferMaxCount === 'number' && parsed.bufferMaxCount > 0) maxCount = parsed.bufferMaxCount
+        if (typeof parsed.flushIntervalSeconds === 'number' && parsed.flushIntervalSeconds > 0) intervalSec = parsed.flushIntervalSeconds
+      } catch {}
     }
-  } catch (err) {
-    console.warn('[storage] 读取日志配置异常:', err instanceof Error ? err.message : String(err))
-    debug = isDebugMode(env)
   }
 
-  dynamicLogConfig = {
-    debugMode: debug,
-    logSaveMode,
-    flushThreshold,
-    flushIntervalSec,
+  if (debug === null) {
+    const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
+    debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
   }
+  if (maxCount === null) maxCount = 5 // 默认 5 条批量落盘，节约 80% 写入
+  if (intervalSec === null) intervalSec = 15 // 默认 15 秒定时合并
 
-  return dynamicLogConfig
+  dynamicDebugMode = debug
+  dynamicBufferMaxCount = maxCount
+  dynamicFlushIntervalSeconds = intervalSec
+
+  return { debugMode: debug, bufferMaxCount: maxCount, flushIntervalSeconds: intervalSec }
 }
 
 export async function getDebugMode(env: Env): Promise<boolean> {
@@ -93,51 +76,44 @@ export async function getDebugMode(env: Env): Promise<boolean> {
 
 export async function saveLogConfig(
   env: Env,
-  config: Partial<LogConfig>
-): Promise<LogConfig> {
+  config: { debugMode: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }
+): Promise<void> {
   const current = await getLogConfig(env)
   const newDebug = typeof config.debugMode === 'boolean' ? config.debugMode : current.debugMode
-  const newMode = (config.logSaveMode === 'eco' || config.logSaveMode === 'batch' || config.logSaveMode === 'realtime')
-    ? config.logSaveMode
-    : (current.logSaveMode || 'eco')
+  const newMaxCount = typeof config.bufferMaxCount === 'number' && config.bufferMaxCount > 0 ? config.bufferMaxCount : current.bufferMaxCount
+  const newInterval = typeof config.flushIntervalSeconds === 'number' && config.flushIntervalSeconds > 0 ? config.flushIntervalSeconds : current.flushIntervalSeconds
 
-  let newThreshold = typeof config.flushThreshold === 'number' ? config.flushThreshold : current.flushThreshold || 15
-  if (newThreshold < 5) newThreshold = 5
-  if (newThreshold > 50) newThreshold = 50
+  dynamicDebugMode = newDebug
+  dynamicBufferMaxCount = newMaxCount
+  dynamicFlushIntervalSeconds = newInterval
 
-  let newIntervalSec = typeof config.flushIntervalSec === 'number' ? config.flushIntervalSec : current.flushIntervalSec || 60
-  if (newIntervalSec < 10) newIntervalSec = 10
-  if (newIntervalSec > 300) newIntervalSec = 300
-
-  const fullConfig: LogConfig = {
+  const configObj = {
     debugMode: newDebug,
-    logSaveMode: newMode,
-    flushThreshold: newThreshold,
-    flushIntervalSec: newIntervalSec,
+    bufferMaxCount: newMaxCount,
+    flushIntervalSeconds: newInterval,
   }
 
-  dynamicLogConfig = fullConfig
-
   try {
-    // 写入统一配置对象至 KV（单键持久化，节约 50% 写入开销）
-    await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(fullConfig))
+    await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
+    await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
   } catch (err) {
     console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
 
-  return fullConfig
+  // 切换配置或调试模式瞬间，未落地日志及缓存强制落盘
+  try {
+    await flushPendingLogs(env)
+    await flushPendingWrites(env)
+  } catch (err) {
+    console.warn('[storage] 强制落盘异常 (已静默降级):', err instanceof Error ? err.message : String(err))
+  }
 }
 
 export async function setDebugMode(env: Env, enabled: boolean): Promise<void> {
   await saveLogConfig(env, { debugMode: enabled })
 }
 
-// 记录最近一次落盘到 KV 的内容指纹，如果新写入内容完全一致，则直接拦截，节省 KV 写入额度
-const lastWrittenContent = new Map<string, string>()
-
-// 获取 KV 键对应的值，优先读取内存缓存以减少 KV 读操作
 export async function kvGet(env: Env, key: string): Promise<string | null> {
-  // 检查内存中是否存在未过期数据
   const mem = memoryCache.get(key)
   if (mem) {
     if (!mem.expiresAt || mem.expiresAt > Date.now()) {
@@ -146,7 +122,6 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
       memoryCache.delete(key)
     }
   }
-  // 内存未命中，从 Cloudflare KV 读取
   const val = await getKV(env).get(key)
   if (val !== null) {
     memoryCache.set(key, { value: val })
@@ -154,38 +129,27 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
   return val
 }
 
-// 写入数据：更新内存，并加入待写入暂存箱，支持顺风车打包落盘
 export async function kvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {
   const expiresAt = options?.expirationTtl ? Date.now() + options.expirationTtl * 1000 : undefined
-  // 同步更新内存缓存，确保读取立即可见
   memoryCache.set(key, { value, expiresAt })
-
-  // 内容比对：如果与上次成功落盘的内容完全一致，无需重复写入 KV，0 次消耗
-  if (lastWrittenContent.get(key) === value) {
-    pendingWrites.delete(key)
-    return
-  }
 
   if (isDebugMode(env)) {
     // 调试模式：立即直接落盘 KV
     try {
       await getKV(env).put(key, value, options)
-      lastWrittenContent.set(key, value)
     } catch (err) {
       console.warn(`[storage] 调试模式写入 KV 异常 (key: ${key}, 已静默降级):`, err instanceof Error ? err.message : String(err))
     }
     return
   }
 
-  // 正式模式：加入暂存箱，等待顺风车批量落盘，降低 KV 写入频率
+  // 正式模式：合并内存批量/延迟落盘，降低 KV 写入频率
   pendingWrites.set(key, { value, options, isDelete: false })
   scheduleFlush(env)
 }
 
-// 删除数据：清除内存并记录待删除操作
 export async function kvDelete(env: Env, key: string): Promise<void> {
   memoryCache.delete(key)
-  lastWrittenContent.delete(key)
   if (isDebugMode(env)) {
     await getKV(env).delete(key)
     return
@@ -194,7 +158,6 @@ export async function kvDelete(env: Env, key: string): Promise<void> {
   scheduleFlush(env)
 }
 
-// 调度后台延迟刷盘定时器
 function scheduleFlush(env: Env) {
   if (flushTimer) return
   flushTimer = setTimeout(() => {
@@ -203,44 +166,19 @@ function scheduleFlush(env: Env) {
   }, 1000)
 }
 
-/**
- * 顺风车批量打包刷盘函数：
- * 一次性将暂存箱（pendingWrites）中的所有待写入数据同步写入 KV，
- * 避免各自单独发起写操作，最大化节省 Cloudflare KV 每天 1000 次的写入限额。
- */
 export async function flushPendingWrites(env: Env): Promise<void> {
-  // 如果暂存箱为空，直接退出
   if (pendingWrites.size === 0) return
-
-  // 清除定时器，避免重复执行
-  if (flushTimer) {
-    clearTimeout(flushTimer)
-    flushTimer = null
-  }
-
-  // 取出当前所有待写入项并清空暂存箱
   const entries = Array.from(pendingWrites.entries())
   pendingWrites.clear()
-
-  // 循环逐项写入 Cloudflare KV
   for (const [key, item] of entries) {
     try {
       if (item.isDelete) {
-        // 执行删除操作
         await getKV(env).delete(key)
-        lastWrittenContent.delete(key)
       } else {
-        // 再次检查内容指纹，完全一致则跳过写入
-        if (lastWrittenContent.get(key) === item.value) {
-          continue
-        }
-        // 执行写入操作
         await getKV(env).put(key, item.value, item.options)
-        // 记录最新指纹
-        lastWrittenContent.set(key, item.value)
       }
     } catch (err) {
-      console.error(`[storage] KV 顺风车刷盘异常 (key: ${key}):`, err)
+      console.error(`[storage] KV flush error for key ${key}:`, err)
     }
   }
 }
@@ -444,133 +382,50 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 (开启调试模式即时同步写入 KV，关闭调试模式完全不产生日志与写入) =====
+// ===== 网关请求日志管理 (纯内存高速队列，0 KV 写入消耗) =====
 
-const MAX_LOG_COUNT = 100
+const MAX_MEMORY_LOGS = 150
+const inMemoryLogs: RequestLog[] = []
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
+  // 优先直接返回内存中的实时请求日志
+  if (inMemoryLogs.length > 0) {
+    return inMemoryLogs.slice(0, 100)
+  }
+  // 仅在首次启动且内存为空时，尝试从 KV 读取一次历史日志缓存填充内存
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
       if (Array.isArray(storedLogs)) {
-        return storedLogs.slice(0, MAX_LOG_COUNT)
+        inMemoryLogs.push(...storedLogs.slice(0, MAX_MEMORY_LOGS))
       }
     }
-  } catch (err) {
-    console.warn('[storage] 读取 KV 日志异常:', err instanceof Error ? err.message : String(err))
-  }
-  return []
+  } catch {}
+  return inMemoryLogs.slice(0, 100)
 }
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    // 检查是否为异常/报错请求 (HTTP 状态码非 200，或者包含错误原因)
-    const isErrorLog = (log.status !== undefined && log.status !== 200) || !!log.error
-
-    // 检查调试模式是否开启（支持 KV 配置和环境变量）
-    const isDbg = await getDebugMode(env)
-
-    // 成功请求在关闭调试模式时：彻底不记录日志，0 性能损耗，0 KV 写入消耗
-    // 报错请求特权通道：只要模型报错，不受调试开关影响，100% 立即存入日志便于排查
-    if (!isErrorLog && !isDbg) {
-      return
+    // 纯内存维护滚动队列，零网络耗时、永远不消耗 KV 写入额度！
+    inMemoryLogs.unshift(log)
+    if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+      inMemoryLogs.length = MAX_MEMORY_LOGS
     }
-
-    // 即时同步落盘写入 KV，绝不丢失任何异常报错或排查记录
-    const kv = getKV(env)
-    let logs: RequestLog[] = []
-    try {
-      const raw = await kv.get(KV_KEYS.REQUEST_LOGS)
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed)) logs = parsed
-      }
-    } catch {}
-
-    // 新日志置顶
-    logs.unshift(log)
-    if (logs.length > MAX_LOG_COUNT) {
-      logs = logs.slice(0, MAX_LOG_COUNT)
-    }
-
-    await kv.put(KV_KEYS.REQUEST_LOGS, JSON.stringify(logs))
   } catch (err) {
-    console.warn('[storage] 写入请求日志至 KV 异常:', err instanceof Error ? err.message : String(err))
+    console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
   }
 }
 
-export async function flushPendingLogs(_env: Env): Promise<void> {
-  // 即时落盘模式无需后台定时器刷写
+export async function flushPendingLogs(env: Env): Promise<void> {
+  // 保留接口兼容，不再主动向 KV 刷写普通日志
 }
 
 export async function clearLogs(env: Env): Promise<void> {
+  inMemoryLogs.length = 0
   try {
     await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
-  } catch (err) {
-    console.warn('[storage] 清空 KV 日志异常:', err instanceof Error ? err.message : String(err))
-  }
-}
-
-// ===== 各梯队池独立请求超时配置管理 =====
-
-// 单实例内存缓存（1分钟有效，避免重复查询 KV）
-let cachedPoolTimeouts: PoolTimeoutConfig | null = null
-let cachedPoolTimeoutsTime = 0
-
-/**
- * 获取各梯队池的请求超时配置（秒）
- */
-export async function getPoolTimeouts(env: Env): Promise<PoolTimeoutConfig> {
-  const now = Date.now()
-  // 内存缓存优先：60秒内直接从内存读取，减少对 Cloudflare KV 的并发读取
-  if (cachedPoolTimeouts && now - cachedPoolTimeoutsTime < 60000) {
-    return cachedPoolTimeouts
-  }
-  try {
-    const raw = await kvGet(env, KV_KEYS.TIMEOUT_CONFIG)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      cachedPoolTimeouts = {
-        generalTimeout: typeof parsed.generalTimeout === 'number' && parsed.generalTimeout > 0 ? parsed.generalTimeout : DEFAULT_POOL_TIMEOUTS.generalTimeout,
-        openclawTimeout: typeof parsed.openclawTimeout === 'number' && parsed.openclawTimeout > 0 ? parsed.openclawTimeout : DEFAULT_POOL_TIMEOUTS.openclawTimeout,
-        drawingTimeout: typeof parsed.drawingTimeout === 'number' && parsed.drawingTimeout > 0 ? parsed.drawingTimeout : DEFAULT_POOL_TIMEOUTS.drawingTimeout,
-        // 读取各池子关闭思考模式开关（未设置时使用安全默认值）
-        disableThinkingTier1: typeof parsed.disableThinkingTier1 === 'boolean' ? parsed.disableThinkingTier1 : DEFAULT_POOL_TIMEOUTS.disableThinkingTier1,
-        disableThinkingOpenclaw: typeof parsed.disableThinkingOpenclaw === 'boolean' ? parsed.disableThinkingOpenclaw : DEFAULT_POOL_TIMEOUTS.disableThinkingOpenclaw,
-        disableThinkingDrawing: typeof parsed.disableThinkingDrawing === 'boolean' ? parsed.disableThinkingDrawing : DEFAULT_POOL_TIMEOUTS.disableThinkingDrawing,
-      }
-      cachedPoolTimeoutsTime = now
-      return cachedPoolTimeouts
-    }
-  } catch (err) {
-    console.warn('[storage] 读取梯队池超时与思考配置异常:', err instanceof Error ? err.message : String(err))
-  }
-  cachedPoolTimeouts = { ...DEFAULT_POOL_TIMEOUTS }
-  cachedPoolTimeoutsTime = now
-  return cachedPoolTimeouts
-}
-
-/**
- * 保存各梯队池的请求超时与思考配置（合包顺风车 1 次写入 KV）
- */
-export async function savePoolTimeouts(env: Env, config: Partial<PoolTimeoutConfig>): Promise<PoolTimeoutConfig> {
-  const current = await getPoolTimeouts(env)
-  const cleaned: PoolTimeoutConfig = {
-    // 限制单次超时在 5 秒 ~ 600 秒之间，防止异常过小或过大值
-    generalTimeout: Math.max(5, Math.min(600, Number(config.generalTimeout) || current.generalTimeout || DEFAULT_POOL_TIMEOUTS.generalTimeout)),
-    openclawTimeout: Math.max(5, Math.min(600, Number(config.openclawTimeout) || current.openclawTimeout || DEFAULT_POOL_TIMEOUTS.openclawTimeout)),
-    drawingTimeout: Math.max(5, Math.min(600, Number(config.drawingTimeout) || current.drawingTimeout || DEFAULT_POOL_TIMEOUTS.drawingTimeout)),
-    // 顺风车打包保存三大池子的关闭思考模式开关
-    disableThinkingTier1: typeof config.disableThinkingTier1 === 'boolean' ? config.disableThinkingTier1 : (current.disableThinkingTier1 ?? false),
-    disableThinkingOpenclaw: typeof config.disableThinkingOpenclaw === 'boolean' ? config.disableThinkingOpenclaw : (current.disableThinkingOpenclaw ?? true),
-    disableThinkingDrawing: typeof config.disableThinkingDrawing === 'boolean' ? config.disableThinkingDrawing : (current.disableThinkingDrawing ?? false),
-  }
-  await kvPut(env, KV_KEYS.TIMEOUT_CONFIG, JSON.stringify(cleaned))
-  await flushPendingWrites(env)
-  cachedPoolTimeouts = cleaned
-  cachedPoolTimeoutsTime = Date.now()
-  return cleaned
+  } catch {}
 }
 
 export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]> {

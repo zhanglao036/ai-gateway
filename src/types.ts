@@ -12,6 +12,9 @@ export interface Model {
   openclawCompatible?: boolean
   openclawReason?: string | null
   openclawTestedAt?: number
+  openclawVerified?: boolean
+  openclawCustomTagged?: boolean
+  openclawVerifiedAt?: number
 }
 
 export interface ApiKeyEntry {
@@ -98,15 +101,8 @@ export interface RequestLog {
 
 export interface LogConfig {
   debugMode: boolean
-  // 日志存储模式: 'eco'(极速省流-错误即存+内存直读), 'batch'(批量缓冲落盘), 'realtime'(逐条即时落盘)
-  logSaveMode?: 'eco' | 'batch' | 'realtime'
-  // 批量缓冲模式下的打包条数阈值 (默认 15 条，范围 5~50)
-  flushThreshold?: number
-  // 批量缓冲模式下的最大时间间隔阈值 (默认 60 秒，范围 10~300)
-  flushIntervalSec?: number
-  // 兼容老字段
-  bufferMaxCount?: number
-  flushIntervalSeconds?: number
+  bufferMaxCount: number
+  flushIntervalSeconds: number
 }
 
 export interface CustomModelRoute {
@@ -133,6 +129,11 @@ export interface ProbeMetric {
   category?: string
   openclawCompatible?: boolean
   openclawReason?: string
+  // OpenClaw 专属实机测试认证标签（必须通过实际专属测试或用户自定义指定）
+  openclawVerified?: boolean
+  openclawVerifiedAt?: number
+  // 是否由用户在管理控制台手动自定义修改覆盖
+  openclawCustomTagged?: boolean
 }
 
 export interface BusinessMetric {
@@ -141,7 +142,6 @@ export interface BusinessMetric {
   successCount: number
   failureCount: number
   lastUsedAt: number
-  lastPersistedAt?: number
 }
 
 export interface TierStorage {
@@ -153,10 +153,16 @@ export interface TierStorage {
   businessStats: Record<string, BusinessMetric>
   updatedAt: string
   lastProbeDate?: string
-  lastCursorProviderId?: string // 第一梯队上一次抽样的提供商游标
-  lastOpenclawProviderId?: string // OpenClaw梯队上一次抽样的提供商游标
-  lastDrawingProviderId?: string // 绘图梯队上一次抽样的提供商游标
-  modelCursors?: Record<string, number> // 各提供商名下的模型游标字典 (记录下次抽样的模型索引)
+  lastCursorProviderId?: string
+  modelCursors?: Record<string, number>
+  // OpenClaw 专属测试每个提供商的轮询游标定位（每次补位从每个提供商抽 1-2 个模型）
+  openclawCursors?: Record<string, number>
+  // 记录每个提供商是否已将未打标模型全量轮询完毕（全量轮询后转入已打标模型按顺序测试）
+  openclawScannedProviders?: Record<string, boolean>
+  // 已拥有认证标签模型的维护测试游标定位
+  openclawVerifiedCursors?: Record<string, number>
+  // 已知模型列表指纹（用于识别新添加的提供商或新模型，以优先插队测试）
+  knownModelKeys?: string[]
 }
 
 export interface ApiResponse<T = unknown> {

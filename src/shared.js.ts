@@ -1,11 +1,9 @@
-import { CURRENT_VERSION } from './config'
-
 // 公共页脚渲染函数 — 主页与 /admin 页复用，保证两处页脚一致
 export const SITE_REPO_URL = 'https://github.com/yutian81/ai-gateway'
 export function renderSiteFooter(title: string): string {
   return `<footer class="site-footer">
   <div class="shell site-footer__inner">
-    <span>© ${new Date().getFullYear()} <a class="site-footer__link" href="${SITE_REPO_URL}" target="_blank" rel="noreferrer">${title}</a> (${CURRENT_VERSION})</span>
+    <span>© ${new Date().getFullYear()} <a class="site-footer__link" href="${SITE_REPO_URL}" target="_blank" rel="noreferrer">${title}</a></span>
     <span>Cloudflare Workers · Hono · KV</span>
   </div>
 </footer>`

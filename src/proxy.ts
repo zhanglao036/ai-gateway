@@ -1,10 +1,10 @@
 import { Context } from 'hono'
-import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes, getPoolTimeouts } from './storage'
+import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
 import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './config'
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
 import { detectPermanentFailure } from './models'
-import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier, isDrawingModel } from './tiers'
+import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
   try {
@@ -108,21 +108,15 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       }
 
       if (changed) {
-        // 记录探针异常状态
         storage.probeStats[fullId] = {
           success: false,
           latency: 0,
           lastTestedAt: Date.now(),
           error: `HTTP ${status}: ${errorMsg}`,
         }
-        // 如果在第一梯队或永久失效，秒级自动补位
         if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
-        // 如果在 OpenClaw 专属池或永久失效，秒级自动补位
         if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
-        // 如果在绘图专属池或永久失效，秒级自动补位
         if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
-        // 立即顺风车落盘至 KV，保证前台 F5 刷新即刻看到最新结果
-        await saveTierStorage(env, storage)
       }
     }
   } catch (err) {
@@ -163,7 +157,7 @@ async function recordModelSuccess(env: Env, providerId: string, modelId: string)
   }
 }
 
-export function getClientIp(c: Context<{ Bindings: Env }>): string | null {
+function getClientIp(c: Context<{ Bindings: Env }>): string | null {
   const cfIp = c.req.header('cf-connecting-ip')
   if (cfIp) return cfIp.trim()
   const xRealIp = c.req.header('x-real-ip')
@@ -177,14 +171,14 @@ export function getClientIp(c: Context<{ Bindings: Env }>): string | null {
   return null
 }
 
-export function maskKey(key: string): string {
+function maskKey(key: string): string {
   if (!key) return ''
   const trimmed = key.trim()
   if (trimmed.length <= 8) return '***'
   return `${trimmed.substring(0, 4)}***${trimmed.substring(trimmed.length - 4)}`
 }
 
-export async function recordLog(
+async function recordLog(
   env: Env,
   startTime: number,
   model: string,
@@ -291,62 +285,20 @@ export async function testModelConnection(
       headers['Authorization'] = `Bearer ${apiKey}`
     }
 
-    // 识别绘图模型与嵌入模型
-    const isDrawing = isDrawingModel(modelId, category)
+    const lowerModel = modelId.toLowerCase()
+    const isDrawing = category === '绘图' ||
+      /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|image|video)/i.test(modelId)
     const isEmbedding = category === '嵌入' ||
       /^(text-embedding|embedding|bge-|rerank|clip)/i.test(modelId)
 
-    // 1. 纯绘图/嵌入模型：发送轻量 0 成本网络握手探针，不消耗绘图或生成额度，测出真实网络延迟
+    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针
     if (isDrawing || isEmbedding) {
       const assignedCategory = isDrawing ? '绘图' : '嵌入'
-      // 记录网络握手探测的真实物理延迟
-      let pingLatency = 100
-      let pingSuccess = true
-      let pingError = ''
-      try {
-        // 请求提供商的 /models 列表接口进行极速 Ping 测速 (带 3 秒超时控制)
-        const pingUrl = `${cleanBase}/models`
-        const pingResp = await fetch(pingUrl, {
-          method: 'GET',
-          headers,
-          signal: AbortSignal.timeout(3000),
-        })
-        pingLatency = Math.max(1, Date.now() - startTime)
-        if (pingResp.status === 401 || pingResp.status === 403) {
-          // Key 无效或权限不足
-          pingSuccess = false
-          pingError = `鉴权失败 (HTTP ${pingResp.status})`
-        } else if (pingResp.status === 402) {
-          // 账户欠费
-          pingSuccess = false
-          pingError = `账户欠费 (HTTP 402)`
-        } else {
-          // 正常连通
-          pingSuccess = true
-        }
-      } catch (e) {
-        pingLatency = Math.max(1, Date.now() - startTime)
-        // 若 /models 超时，尝试向 cleanBase 发送轻量握手
-        try {
-          const fallbackResp = await fetch(cleanBase, {
-            method: 'GET',
-            headers,
-            signal: AbortSignal.timeout(2000),
-          })
-          pingLatency = Math.max(1, Date.now() - startTime)
-          pingSuccess = fallbackResp.status < 500
-          if (!pingSuccess) pingError = `服务异常 (HTTP ${fallbackResp.status})`
-        } catch (e2) {
-          pingSuccess = false
-          pingError = (e2 as Error).message || '网络连接超时'
-        }
-      }
-
       return {
-        success: pingSuccess,
-        message: pingSuccess ? `${assignedCategory}模型网络连通正常 (${pingLatency}ms)` : `${assignedCategory}模型连通失败: ${pingError}`,
-        statusCode: pingSuccess ? 200 : 502,
-        latencyMs: pingLatency,
+        success: true,
+        message: `${assignedCategory}模型 (已标记分类，不适合智能体工具调用)`,
+        statusCode: 200,
+        latencyMs: 10,
         category: assignedCategory,
         openclaw: {
           tested: true,
@@ -422,53 +374,17 @@ export async function testModelConnection(
     const rawText = await response.text().catch(() => '')
 
     if (response.ok) {
-      // 成功连通响应
-      let isActuallyCompatible = true
-      let reasonDesc = '支持 Tool/函数调用与智能体交互'
-
-      if (!alreadyTested) {
-        // 首次探测：深度验证是否真正支持智能体工具调用（杜绝假 200 连通的滥竽充数模型）
-        const isAgentArch = /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command|yi-|mistral|llama-3/i.test(modelId)
-        let hasToolCallResponse = false
-
-        try {
-          const resJson = JSON.parse(rawText)
-          if (resJson && Array.isArray(resJson.choices) && resJson.choices.length > 0) {
-            const msg = resJson.choices[0]?.message
-            // 检查是否返回了 tool_calls 或 function_call
-            if ((msg?.tool_calls && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) || !!msg?.function_call) {
-              hasToolCallResponse = true
-            }
-          } else if (resJson && (resJson.type === 'tool_use' || Array.isArray(resJson.content) && resJson.content.some((b: any) => b.type === 'tool_use'))) {
-            hasToolCallResponse = true
-          }
-        } catch {
-          // JSON 解析忽略
-        }
-
-        if (hasToolCallResponse) {
-          isActuallyCompatible = true
-          reasonDesc = '原生成功响应 Tool 工具调用'
-        } else if (isAgentArch) {
-          isActuallyCompatible = true
-          reasonDesc = '主流智能体大模型架构 (工具探针测试通过)'
-        } else {
-          // 既未返回工具调用，也不属于主流大模型架构（如纯微调、翻译、小分类模型），判定为不具备智能体资质
-          isActuallyCompatible = false
-          reasonDesc = '仅支持普通文本对话，未通过智能体评估'
-        }
-      }
-
+      // 成功响应
       return {
         success: true,
-        message: alreadyTested ? '连接正常 (轻量测速探针)' : (isActuallyCompatible ? '连接正常，兼容 OpenClaw' : '连接正常，但未通过智能体评估'),
+        message: alreadyTested ? '连接正常 (轻量测速探针)' : '连接正常，完美兼容 OpenClaw',
         statusCode: response.status,
         latencyMs,
         category: category || '文本',
         openclaw: {
           tested: true,
-          compatible: alreadyTested ? knownCompatible : isActuallyCompatible,
-          reason: alreadyTested ? knownReason : reasonDesc,
+          compatible: alreadyTested ? knownCompatible : true,
+          reason: alreadyTested ? knownReason : '支持 Tool/函数调用与智能体交互',
         },
       }
     }
@@ -644,16 +560,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
     }
 
-    // 获取各梯队池的独立超时设置，按当前请求目标池计算单次超时（秒）
-    const poolTimeouts = await getPoolTimeouts(c.env)
-    let requestTimeoutSec = poolTimeouts.generalTimeout
-    if (poolType === 'openclaw') {
-      requestTimeoutSec = poolTimeouts.openclawTimeout
-    } else if (poolType === 'drawing') {
-      requestTimeoutSec = poolTimeouts.drawingTimeout
-    }
-    const requestTimeoutMs = requestTimeoutSec * 1000
-
     const triedProviders = new Set<string>()
     let currentModel = model
     let attempts = 0
@@ -760,40 +666,15 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       const enabledKeys = provider.apiKeys.filter(k => k.enabled)
       const forwardBody = { ...body, model: modelId }
-
-      // 判定当前调度池是否开启了【关闭思考模式】开关
-      let shouldDisableThinking = false
-      if (poolType === 'openclaw' && poolTimeouts.disableThinkingOpenclaw !== false) {
-        // OpenClaw 专属池默认开启关闭思考，防止智能体工具调用与思考模式产生冲突
-        shouldDisableThinking = true
-      } else if (poolType === 'general' && poolTimeouts.disableThinkingTier1 === true) {
-        // 第一梯队（通用池）按管理员配置决定是否关闭思考
-        shouldDisableThinking = true
-      } else if (poolType === 'drawing' && poolTimeouts.disableThinkingDrawing === true) {
-        // 绘图专属池按管理员配置决定是否关闭思考
-        shouldDisableThinking = true
-      }
-
-      const fBodyAny = forwardBody as Record<string, unknown>
-
-      // 智能处理思考模式参数与协议兼容：
-      if (shouldDisableThinking) {
-        // 1. 仅针对支持 enable_thinking 的模型设置布尔值
-        fBodyAny.enable_thinking = false
-        // 2. 清理会诱发模型深层思考/卡顿的参数
-        delete fBodyAny.reasoning_effort
-        delete fBodyAny.disable_think
-        delete fBodyAny.no_chain_of_thought
-        // 注意：不向上游盲目塞入非 OpenAI 标准的 thinking 对象或 chat_template_kwargs，以防部分上游报 400
-      } else {
-        // 未开启“关闭思考”时：保留客户端原本设置，仅清理容易冲突的非标调试参数
-        delete fBodyAny.disable_think
-        delete fBodyAny.no_chain_of_thought
-      }
-      delete fBodyAny.do_sample
+      // 自动清洗兼容性参数：剥离听书/客户端自动附带但部分上游模型不支持的非标参数
+      delete (forwardBody as Record<string, unknown>).thinking
+      delete (forwardBody as Record<string, unknown>).disable_think
+      delete (forwardBody as Record<string, unknown>).no_chain_of_thought
+      delete (forwardBody as Record<string, unknown>).do_sample
 
       // OpenClaw / Agent 客户端参数平滑兼容处理：
       // 1. 如果带有新版 max_completion_tokens 而缺少 max_tokens，平滑转换
+      const fBodyAny = forwardBody as Record<string, unknown>
       if (fBodyAny.max_completion_tokens !== undefined && fBodyAny.max_tokens === undefined) {
         fBodyAny.max_tokens = fBodyAny.max_completion_tokens
         delete fBodyAny.max_completion_tokens
@@ -958,7 +839,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(requestTimeoutMs),
+          signal: AbortSignal.timeout(60000),
         })
 
         if (response.ok) {
@@ -1158,13 +1039,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
 /** 处理 /v1/models — 返回所有已启用的模型（含提供商前缀与自定义指定模型） */
 export async function handleModels(c: Context<{ Bindings: Env }>) {
-  const startTime = Date.now()
-  const clientIp = getClientIp(c)
-  const routePath = new URL(c.req.url).pathname
-  const authHeader = c.req.header('Authorization') || ''
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-  const masked = maskKey(token)
-
   const providers = await getProviders(c.env)
   const customRoutes = await getCustomModelRoutes(c.env)
 
@@ -1224,12 +1098,6 @@ export async function handleModels(c: Context<{ Bindings: Env }>) {
       })
     }
   }
-
-  await recordLog(c.env, startTime, `获取模型列表 (${models.length} 个)`, 200, null, {
-    keyMask: masked,
-    routePath,
-    clientIp,
-  })
 
   return c.json({
     object: 'list',

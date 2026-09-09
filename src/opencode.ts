@@ -248,9 +248,6 @@ export async function proxyOpenCodeRequest(options: OpenCodeRequestOptions): Pro
   return transportErrorResponse(lastTransportError)
 }
 
-/**
- * 测试 OpenCode 模型连通性与 OpenClaw 智能体兼容性
- */
 export async function testOpenCodeModel(
   baseUrl: string,
   apiKeys: ApiKeyEntry[],
@@ -259,7 +256,6 @@ export async function testOpenCodeModel(
   fetcher?: typeof fetch
 ): Promise<OpenCodeTestResult> {
   const startTime = Date.now()
-  // 发送极简测试请求探针
   const response = await proxyOpenCodeRequest({
     baseUrl,
     apiKeys,
@@ -275,10 +271,8 @@ export async function testOpenCodeModel(
   })
   const latencyMs = Date.now() - startTime
 
-  // 如果请求成功连通
   if (response.ok) {
-    // 严格评估是否属于支持 Tools/Agent 的主流智能体模型架构
-    const isAgent = /claude|gpt|gemini|deepseek|qwen|coder|glm|mimo|kimi|minimax|step|command|yi-|mistral|llama-3/i.test(modelId)
+    const isAgent = /claude|gpt|gemini|deepseek|qwen|coder/i.test(modelId)
     return {
       success: true,
       message: '连接成功',
@@ -287,7 +281,7 @@ export async function testOpenCodeModel(
       openclaw: {
         tested: true,
         compatible: isAgent,
-        reason: isAgent ? '支持智能体与工具调用 (架构匹配通过)' : '未通过智能体评估 (缺少工具调用能力)',
+        reason: isAgent ? '支持智能体与工具调用 (匹配通过)' : '未通过智能体评估',
       },
     }
   }

@@ -1,11 +1,11 @@
+/**
+ * 版本号: v1.0.4
+ * 更新说明: OpenClaw专属测试与认证标签体系、提供商微批次轮询（每轮抽1-2个）、游标记忆定位、支持自定义修改标签
+ */
 import type { Provider } from './types'
-
-// 系统全局版本号 (每次更新严格递增版本号)
-export const CURRENT_VERSION = 'v1.18.7'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
-  version: CURRENT_VERSION,
   subtitle: '统一的 AI 管理平台',
   author: 'QingYun',
   authorUrl: 'https://github.com/yutian81/ai-gateway',
@@ -31,10 +31,9 @@ export const KEY_HEALTH_MAX_FAILURES = 5
 export const LOG_BATCH_SIZE = 10
 export const LOG_FLUSH_INTERVAL_MS = 30000
 
+// 梯队池席位上限配置（第一梯队 9 席，OpenClaw 智能体池 6 席，绘画池 6 席）
 export const TIER_1_MAX_SLOTS = 9
-// OpenClaw 专属梯队池席位上限：由原有的 5 席增加为 6 席
 export const TIER_OPENCLAW_MAX_SLOTS = 6
-// 绘图专属梯队池席位上限：由原有的 5 席增加为 6 席
 export const TIER_DRAWING_MAX_SLOTS = 6
 
 export const KV_KEYS = {
@@ -48,34 +47,7 @@ export const KV_KEYS = {
   LOG_CONFIG: 'config:log_settings',
   CUSTOM_MODEL_ROUTES: 'config:custom_model_routes',
   TIER_DATA: 'gateway:tier_data',
-  TIMEOUT_CONFIG: 'system:timeout_config',
 } as const
-
-// 各梯队池独立配置（包含超时时长与思考模式开关）
-export interface PoolTimeoutConfig {
-  // 第一梯队（通用池）超时时长，单位秒，默认 60 秒
-  generalTimeout: number
-  // OpenClaw 专属池超时时长，单位秒，默认 60 秒
-  openclawTimeout: number
-  // 绘图专属池超时时长，单位秒，默认 60 秒
-  drawingTimeout: number
-  // 第一梯队（通用池）是否强制关闭思考模式（默认 false：保留模型原生推理深度）
-  disableThinkingTier1?: boolean
-  // OpenClaw 专属池是否强制关闭思考模式（默认 true：防止智能体与思考模式冲突崩溃）
-  disableThinkingOpenclaw?: boolean
-  // 绘图专属池是否强制关闭思考模式（默认 false）
-  disableThinkingDrawing?: boolean
-}
-
-// 梯队池默认配置（超时保持 60 秒，OpenClaw 默认关闭思考以确保绝对稳定）
-export const DEFAULT_POOL_TIMEOUTS: PoolTimeoutConfig = {
-  generalTimeout: 60,
-  openclawTimeout: 60,
-  drawingTimeout: 60,
-  disableThinkingTier1: false,
-  disableThinkingOpenclaw: true, // 智能体专属池默认关闭内心戏，杜绝 LLM request failed
-  disableThinkingDrawing: false,
-}
 
 // 有效期选项（秒）
 export const EXPIRY_OPTIONS: Record<string, number | null> = {

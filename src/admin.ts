@@ -20,12 +20,10 @@ import {
   getCustomModelRoutes,
   saveCustomModelRoutes,
   saveAllUnifiedConfig,
-  getPoolTimeouts,
-  savePoolTimeouts,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
-import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL, PoolTimeoutConfig } from './config'
+import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL } from './config'
 import {
   deduplicateAndClassifyModels,
   resetAllCooldowns,
@@ -39,13 +37,11 @@ import {
   getTierStorage,
   saveTierStorage,
   runSingleModelProbe,
+  runOpenclawSpecificProbe,
   backfillTier1FromTier2,
-  backfillOpenclawTier,
-  backfillDrawingTier,
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
-  getCurrentAutoPointers,
 } from './tiers'
 import type {
   Env,
@@ -481,33 +477,19 @@ export async function handleGetDebugMode(c: Context<{ Bindings: Env }>) {
 }
 
 export async function handleToggleDebugMode(c: Context<{ Bindings: Env }>) {
-  const body = await c.req.json<{
-    debugMode?: boolean
-    logSaveMode?: 'eco' | 'batch' | 'realtime'
-    flushThreshold?: number
-    flushIntervalSec?: number
-  }>().catch(() => ({}))
-
-  const saved = await saveLogConfig(c.env, {
-    debugMode: typeof body.debugMode === 'boolean' ? body.debugMode : undefined,
-    logSaveMode: body.logSaveMode,
-    flushThreshold: body.flushThreshold,
-    flushIntervalSec: body.flushIntervalSec,
+  const body = await c.req.json<{ debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }>().catch(() => ({} as { debugMode?: boolean; bufferMaxCount?: number; flushIntervalSeconds?: number }))
+  await saveLogConfig(c.env, {
+    debugMode: !!body.debugMode,
+    bufferMaxCount: body.bufferMaxCount,
+    flushIntervalSeconds: body.flushIntervalSeconds,
   })
-
-  let modeDesc = '极速省流模式 (仅错误落盘+内存直读，0多余KV写入)'
-  if (saved.logSaveMode === 'batch') {
-    modeDesc = `批量缓冲模式 (每满 ${saved.flushThreshold} 条或每隔 ${saved.flushIntervalSec} 秒打包写入一次)`
-  } else if (saved.logSaveMode === 'realtime') {
-    modeDesc = '实时全存模式 (每条日志即时写入 KV)'
-  }
-
+  const updatedConfig = await getLogConfig(c.env)
   return c.json<ApiResponse>({
     success: true,
-    data: { debugMode: saved.debugMode, config: saved },
-    message: saved.debugMode
-      ? `日志调试模式已生效：当前运行在【${modeDesc}】`
-      : '日志调试已关闭：正常成功请求不记录日志，0 KV 写入消耗',
+    data: { debugMode: updatedConfig.debugMode, config: updatedConfig },
+    message: body.debugMode
+      ? '调试模式已开启：每条请求日志实时写入 KV，前端面板实时刷新'
+      : `正式模式已启用：日志内存缓存策略生效（满 ${updatedConfig.bufferMaxCount} 条或 ${updatedConfig.flushIntervalSeconds} 秒定时批量落盘，未落地日志已强制立即落盘）`,
   })
 }
 
@@ -757,15 +739,13 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
     tierStorage.modelCursors = cursors
     tierStorage.lastProbeDate = new Date().toISOString().split('T')[0]
 
-    // 4. 释放互斥锁并平滑补齐第一梯队、OpenClaw专属池与绘图专属池（补位自动进行轻量握手测速）
+    // 4. 释放互斥锁并平滑补齐第一梯队（按各家均匀配额补足）
     isProbeRunning = false
-    let finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
-    finalTierData = await backfillOpenclawTier(c.env, finalTierData)
-    finalTierData = await backfillDrawingTier(c.env, finalTierData)
+    const finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
 
     return c.json<ApiResponse>({
       success: true,
-      message: `探测任务完成！已基于游标轮转抽测各提供商代表模型（本次共抽测 ${testedCount} 个模型：${successCount} 可用，${failedCount} 异常），第一梯队、OpenClaw池与绘图池均已同步就绪并完成探测。`,
+      message: `探测任务完成！已基于游标轮转抽测各提供商 1~2 个代表模型（本次共抽测 ${testedCount} 个模型：${successCount} 可用，${failedCount} 异常），下次将自动轮转下一批模型，第一梯队已同步就绪。`,
       data: { testedCount, successCount, failedCount, tierData: finalTierData },
     })
   } finally {
@@ -916,6 +896,7 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
     enabled?: boolean
     category?: '文本' | '绘图' | '多模态' | '其他' | string
     unblockPermanent?: boolean
+    openclawVerified?: boolean
   }>()
 
   let found = false
@@ -925,6 +906,16 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
     const copy = { ...m }
     if (typeof body.enabled === 'boolean') copy.enabled = body.enabled
     if (typeof body.category === 'string' && body.category) copy.category = body.category
+    if (typeof body.openclawVerified === 'boolean') {
+      copy.openclawVerified = body.openclawVerified
+      copy.openclawCustomTagged = true // 标记为用户手动自定义覆盖
+      copy.openclawVerifiedAt = body.openclawVerified ? Date.now() : undefined
+      if (body.openclawVerified) {
+        copy.openclawTested = true
+        copy.openclawCompatible = true
+        copy.openclawReason = '用户手动自定义认证标签'
+      }
+    }
     if (body.unblockPermanent) {
       copy.permanentlyDisabled = false
       copy.disabledReason = null
@@ -939,13 +930,64 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
   if (!found) return c.json<ApiResponse>({ success: false, message: '模型不存在' }, 404)
 
   await updateProvider(c.env, providerId, { models: updatedModels })
+
+  // 顺风车同步更新梯队数据中对应的 probeStats，一次性保存
+  if (typeof body.openclawVerified === 'boolean') {
+    const tierData = await getTierStorage(c.env)
+    if (tierData && tierData.probeStats) {
+      const fullId = `${providerId}/${modelId}`
+      if (tierData.probeStats[fullId]) {
+        tierData.probeStats[fullId].openclawVerified = body.openclawVerified
+        tierData.probeStats[fullId].openclawCustomTagged = true
+        tierData.probeStats[fullId].openclawVerifiedAt = body.openclawVerified ? Date.now() : undefined
+        if (body.openclawVerified) {
+          tierData.probeStats[fullId].openclawCompatible = true
+          tierData.probeStats[fullId].openclawReason = '用户手动自定义认证标签'
+        }
+        await saveTierStorage(c.env, tierData)
+      }
+    }
+  }
+
   return c.json<ApiResponse>({
     success: true,
     message: '模型配置已成功更新',
   })
 }
 
-// ===== 获取梯队与探测数据 (同时附带当前 auto 实时指向) =====
+// ===== 单模型执行 OpenClaw 专属实机测试（带 tools 参数精准验证） =====
+export async function handleTestOpenclawModel(c: Context<{ Bindings: Env }>) {
+  const providerId = c.req.param('id')
+  const { modelId } = await c.req.json<{ modelId: string }>().catch(() => ({} as { modelId: string }))
+  if (!providerId || !modelId) {
+    return c.json<ApiResponse>({ success: false, message: '缺少 providerId 或 modelId' }, 400)
+  }
+
+  const provider = await getProvider(c.env, providerId)
+  if (!provider) {
+    return c.json<ApiResponse>({ success: false, message: '提供商不存在' }, 404)
+  }
+
+  const metric = await runOpenclawSpecificProbe(c.env, provider, modelId)
+
+  // 顺风车更新当前梯队 probeStats
+  const tierData = await getTierStorage(c.env)
+  if (tierData) {
+    tierData.probeStats = tierData.probeStats || {}
+    tierData.probeStats[`${providerId}/${modelId}`] = metric
+    await saveTierStorage(c.env, tierData)
+  }
+
+  return c.json<ApiResponse>({
+    success: true,
+    data: metric,
+    message: metric.openclawVerified
+      ? '专属测试通过！该模型已成功执行 calculate_sum 工具调用并获得 OpenClaw 认证标签。'
+      : `专属测试未通过：${metric.openclawReason || metric.error || '不适合作为 OpenClaw 智能体模型'}`,
+  })
+}
+
+// ===== 获取梯队与探测数据 =====
 export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
   const defaultTierData: TierStorage = {
     tier1: [],
@@ -958,18 +1000,10 @@ export async function handleGetTiers(c: Context<{ Bindings: Env }>) {
     updatedAt: '',
     modelCursors: {},
   }
-  // 并发从 KV 和内存计算当前梯队数据及 auto 实时指向
-  const [tierData, activePointers] = await Promise.all([
-    getTierStorage(c.env).then((res) => res || defaultTierData),
-    getCurrentAutoPointers(c.env),
-  ])
-
+  const tierData = (await getTierStorage(c.env)) || defaultTierData
   return c.json<ApiResponse>({
     success: true,
-    data: {
-      ...tierData,
-      activePointers, // 附带当前各个 auto 路由实时指向的模型信息
-    },
+    data: tierData,
   })
 }
 
@@ -1100,24 +1134,4 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
   } finally {
     isProbeRunning = false
   }
-}
-
-/** 获取各梯队池的请求超时设置 */
-export async function handleGetTimeouts(c: Context<{ Bindings: Env }>) {
-  const timeouts = await getPoolTimeouts(c.env)
-  return c.json<ApiResponse>({
-    success: true,
-    data: timeouts,
-  })
-}
-
-/** 保存各梯队池的请求超时设置 */
-export async function handleSaveTimeouts(c: Context<{ Bindings: Env }>) {
-  const body = await c.req.json<Partial<PoolTimeoutConfig>>().catch(() => ({}))
-  const saved = await savePoolTimeouts(c.env, body)
-  return c.json<ApiResponse>({
-    success: true,
-    data: saved,
-    message: '各梯队池超时设置已成功保存并立即生效',
-  })
 }

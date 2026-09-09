@@ -1,10 +1,14 @@
+/**
+ * 版本号: v1.0.4
+ * 更新说明: OpenClaw 专属实机工具调用测试打标系统、游标记忆轮询补位与用户自定义标签管理
+ */
 import { Context } from 'hono'
-import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes, getPoolTimeouts } from './storage'
+import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
 import { SITE_CONFIG, OPENCODE_DEFAULT_URL } from './config'
 import type { Env, TierStorage } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
-import { getTierStorage, ensureTierStorage, getCurrentAutoPointers } from './tiers'
+import { getTierStorage } from './tiers'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -31,44 +35,8 @@ const H = (title: string) => `
 // ===== 首页 =====
 
 export async function renderHomePage(c: Context<{ Bindings: Env }>, isLoggedIn: boolean) {
-  // 并发读取提供商数据与各 auto 路由当前实时指向（纯内存计算，0 KV 额外写入）
-  const [providers, activePointers] = await Promise.all([
-    getProviders(c.env),
-    getCurrentAutoPointers(c.env),
-  ])
-
-  // 仅从 KV 快速读取已有数据，绝不发起任何外部网络测速，保证瞬间秒开
-  const defaultTierData: TierStorage = {
-    tier1: [],
-    tier2: [],
-    tierOpenclaw: [],
-    tierDrawing: [],
-    probeStats: {},
-    businessStats: {},
-    updatedAt: '',
-    lastProbeDate: '',
-    modelCursors: {},
-  }
-  let tierData = await getTierStorage(c.env)
-  if (!tierData) {
-    // 首次进入无梯队数据，触发初始化
-    tierData = await ensureTierStorage(c.env)
-  } else {
-    // 若现有梯队中存在尚无探针数据的席位（如绘图池补位未探测的历史遗留），平滑调用 ensureTierStorage 并发补测并存盘
-    const hasMissingProbe = [
-      ...(tierData.tier1 || []),
-      ...(tierData.tierOpenclaw || []),
-      ...(tierData.tierDrawing || []),
-    ].some((seat) => !tierData?.probeStats?.[seat.fullId])
-    if (hasMissingProbe) {
-      tierData = await ensureTierStorage(c.env)
-    }
-  }
-  tierData = tierData || defaultTierData
-  const tier1Models = tierData.tier1 || []
-  const tierOpenclawModels = tierData.tierOpenclaw || []
-  const tierDrawingModels = tierData.tierDrawing || []
-  const tier2Count = (tierData.tier2 || []).length
+  // 首页仅从内存快速读取提供商列表，极速渲染，零外部网络开销与零额外 KV 读写
+  const providers = await getProviders(c.env)
 
   const host = c.req.header('host') || 'localhost:8787'
   const apiBase = `https://${host}/v1`
@@ -84,11 +52,11 @@ ${H('首页')}
     <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">API CONTROL PLANE</span>
+      <span class="brand__descriptor">API CONTROL PLANE · v1.0.4</span>
     </a>
     <nav class="topbar__actions" id="topbar-actions" aria-label="主导航">
       ${isLoggedIn
-        ? `<a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a><a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem('admin_token')"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>`
+        ? `<a href="/admin#tiers" class="btn btn-gh" style="margin-right:0.25rem;"><i class="fas fa-layer-group" aria-hidden="true"></i>梯队池管理</a><a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a><a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem('admin_token')"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>`
         : `<a href="/admin/login" class="btn btn-p"><i class="fas fa-sign-in-alt" aria-hidden="true"></i>管理员登录</a>`
       }
     </nav>
@@ -120,392 +88,44 @@ ${H('首页')}
   <span class="syntax-key">-H</span> <span class="syntax-string">"Authorization: Bearer sk_cf_••••"</span> \\
   <span class="syntax-key">-H</span> <span class="syntax-string">"Content-Type: application/json"</span> \\
   <span class="syntax-key">-d</span> <span class="syntax-string">'{
-    "model": "opencode/deepseek-v4-flash-free",
+    "model": "auto/auto",
     "messages": [{ "role": "user", "content": "Hello" }]
   }'</span></code></pre>
       <div class="request-panel__foot">
         <span>模型格式</span>
-        <code>provider/model</code>
+        <code>provider/model 或 auto/auto</code>
       </div>
     </figure>
   </section>
 
+  ${isLoggedIn ? `
+  <!-- 已登录状态：展示轻量概览指标 -->
   <section class="shell metrics-strip" aria-label="网关配置概览">
     <div class="metric"><span class="metric__value">${providers.length}</span><span class="metric__label">提供商总计</span></div>
     <div class="metric"><span class="metric__value">${enabledProviders.length}</span><span class="metric__label">已启用提供商</span></div>
     <div class="metric"><span class="metric__value">${allModelsCount}</span><span class="metric__label">模型总计</span></div>
-    <div class="metric"><span class="metric__value">${tier1Models.length} / 9</span><span class="metric__label">第一梯队席位</span></div>
-    <div class="metric"><span class="metric__value">${tierOpenclawModels.length} / 6</span><span class="metric__label">OpenClaw 席位</span></div>
-    <div class="metric"><span class="metric__value">${tierDrawingModels.length} / 6</span><span class="metric__label">绘图池席位</span></div>
+    <div class="metric"><span class="metric__value">${enabledModelsCount}</span><span class="metric__label">可用模型</span></div>
   </section>
-
-  <!-- Auto 智能路由实时指向雷达看板 (直观展示各个 auto 正在派发到哪个具体模型) -->
-  <section class="shell auto-pointers-radar" style="margin-top:2rem;margin-bottom:1.5rem;" aria-label="Auto 路由实时指向雷达">
-    <div style="background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);border:1px solid #cbd5e1;border-radius:0.875rem;padding:1.25rem 1.5rem;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;">
-        <div style="display:flex;align-items:center;gap:0.6rem;">
-          <span style="display:inline-flex;align-items:center;justify-content:center;width:2.2rem;height:2.2rem;border-radius:0.5rem;background:#2563eb;color:#ffffff;font-size:1rem;box-shadow:0 2px 4px rgba(37,99,235,0.2);">
-            <i class="fas fa-radar"></i>
-          </span>
-          <div>
-            <h3 style="margin:0;font-size:1.15rem;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:0.5rem;">
-              Auto 智能路由实时指向看板
-              <span style="font-size:0.7rem;background:#22c55e;color:#ffffff;padding:0.15rem 0.5rem;border-radius:9999px;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;">
-                <span style="width:6px;height:6px;background:#ffffff;border-radius:50%;display:inline-block;"></span>实时当班接客
-              </span>
-            </h3>
-            <p style="margin:0.2rem 0 0 0;font-size:0.8rem;color:#64748b;">
-              展示当前网关 3 个 auto 调度模式实际派发的当班主力模型（毫秒级健康选优与动态轮询）
-            </p>
-          </div>
-        </div>
-        <span style="font-size:0.75rem;color:#475569;background:#ffffff;border:1px solid #e2e8f0;padding:0.25rem 0.65rem;border-radius:0.375rem;font-weight:500;">
-          <i class="fas fa-microchip" style="color:#2563eb;margin-right:0.25rem;"></i>内存实时计算 · 0 KV 写入
-        </span>
-      </div>
-
-      <!-- 3 个 Auto 指向卡片 -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:1rem;">
-        <!-- 1. 通用 auto -->
-        <div style="background:#ffffff;border:1.5px solid ${activePointers.general ? '#3b82f6' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(59,130,246,0.08);">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-            <span style="font-size:0.75rem;font-weight:700;color:#1d4ed8;background:#dbeafe;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
-              <i class="fas fa-bolt"></i> 通用 auto
-            </span>
-            <span style="font-size:0.7rem;color:#15803d;font-weight:700;background:#dcfce7;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-              ${activePointers.general ? (activePointers.general.latency ? `⚡ ${activePointers.general.latency} ms` : '🟢 在线当班') : '⚠️ 暂无就绪'}
-            </span>
-          </div>
-          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
-          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#f8fafc;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #e2e8f0;">
-            ${escapePageHtml(activePointers.general?.fullId || '暂无可用的第一梯队模型')}
-          </div>
-          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
-            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.general?.providerName || '-')}</strong></span>
-            <span>匹配: <code>model="auto"</code></span>
-          </div>
-        </div>
-
-        <!-- 2. 智能体 openclaw/auto -->
-        <div style="background:#ffffff;border:1.5px solid ${activePointers.openclaw ? '#8b5cf6' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(139,92,246,0.08);">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-            <span style="font-size:0.75rem;font-weight:700;color:#7e22ce;background:#ede9fe;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
-              <i class="fas fa-robot"></i> openclaw/auto
-            </span>
-            <span style="font-size:0.7rem;color:#7e22ce;font-weight:700;background:#ede9fe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-              ${activePointers.openclaw ? (activePointers.openclaw.latency ? `⚡ ${activePointers.openclaw.latency} ms` : '🟢 智能体当班') : '⚠️ 暂无就绪'}
-            </span>
-          </div>
-          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
-          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#faf5ff;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #f3e8ff;">
-            ${escapePageHtml(activePointers.openclaw?.fullId || '暂无可用的 OpenClaw 模型')}
-          </div>
-          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
-            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.openclaw?.providerName || '-')}</strong></span>
-            <span>匹配: <code>tools 或 openclaw</code></span>
-          </div>
-        </div>
-
-        <!-- 3. 绘图 drawing/auto -->
-        <div style="background:#ffffff;border:1.5px solid ${activePointers.drawing ? '#ec4899' : '#e2e8f0'};border-radius:0.75rem;padding:1rem;box-shadow:0 2px 4px rgba(236,72,153,0.08);">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-            <span style="font-size:0.75rem;font-weight:700;color:#be185d;background:#fce7f3;padding:0.2rem 0.5rem;border-radius:0.375rem;display:inline-flex;align-items:center;gap:0.3rem;">
-              <i class="fas fa-palette"></i> drawing/auto
-            </span>
-            <span style="font-size:0.7rem;color:#be185d;font-weight:700;background:#fce7f3;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-              ${activePointers.drawing ? (activePointers.drawing.latency ? `⚡ ${activePointers.drawing.latency} ms` : '🟢 绘图当班') : '⚠️ 暂无就绪'}
-            </span>
-          </div>
-          <div style="font-size:0.75rem;color:#64748b;margin-bottom:0.25rem;">当前调度模型：</div>
-          <div style="font-weight:700;font-size:0.95rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#fff5f7;padding:0.4rem 0.6rem;border-radius:0.375rem;border:1px solid #ffe4e6;">
-            ${escapePageHtml(activePointers.drawing?.fullId || '暂无可用的绘图模型')}
-          </div>
-          <div style="margin-top:0.5rem;font-size:0.7rem;color:#64748b;display:flex;justify-content:space-between;align-items:center;">
-            <span>提供商: <strong style="color:#0f172a;">${escapePageHtml(activePointers.drawing?.providerName || '-')}</strong></span>
-            <span>匹配: <code>生图接口 或 drawing</code></span>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="shell tier1-showcase" style="margin-top:2rem;margin-bottom:2rem;">
-    <div class="section-heading" style="margin-bottom:1rem;">
+  ` : `
+  <!-- 未登录状态：展示登录引导条 -->
+  <section class="shell" style="margin-top:2rem;margin-bottom:2rem;">
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1.5rem;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
       <div>
-        <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
-          <i class="fas fa-layer-group" style="color:#2563eb;"></i>
-          第一梯队 (Tier 1) 黄金模型池
-          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#dbeafe;color:#1e40af;border-radius:9999px;font-weight:600;">9 席位固定</span>
-        </h2>
-        <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
-          <code>auto/auto</code> 智能路由仅在第一梯队内匹配选优；当模型遭遇业务故障或连续失败时自动淘汰，并使用独立轻量探测从候选池（含 ${tier2Count} 个候选模型）海选补位。
+        <h3 style="margin:0 0 0.25rem 0;font-size:1.1rem;color:#0f172a;display:flex;align-items:center;gap:0.5rem;">
+          <i class="fas fa-lock" style="color:#64748b;"></i> 管理员安全隔离
+        </h3>
+        <p style="margin:0;color:#64748b;font-size:0.875rem;">
+          为防止模型资产泄露，模型列表与梯队池管理需管理员登录后方可查阅。
         </p>
       </div>
-    </div>
-
-    <!-- Auto 调用示例卡片 -->
-    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
-        <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#0f172a;">
-          <i class="fas fa-bolt" style="color:#eab308;"></i> 极简通用 Auto 智能调度：指定 model: "auto/auto" 或 "tier1"
-        </span>
-        <span style="font-size:0.75rem;color:#64748b;">9 席黄金池 · 毫秒级优选 · 自动健康补位</span>
-      </div>
-      <pre style="background:#0f172a;color:#f8fafc;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/chat/completions \\
-  -H "Authorization: Bearer sk_cf_••••" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "auto/auto",
-    "messages": [{ "role": "user", "content": "Hello" }]
-  }'</code></pre>
-    </div>
-
-    <!-- 第一梯队 9 个席位卡片 -->
-    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
-      ${Array.from({ length: 9 }).map((_, idx) => {
-        const item = tier1Models[idx]
-        if (item) {
-          const isCurrentAutoTarget = activePointers.general?.fullId === item.fullId
-          const probeStat = tierData.probeStats[item.fullId]
-          const bStat = tierData.businessStats[item.fullId]
-          const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
-          const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
-          return `
-          <div style="background:#ffffff;border:${isCurrentAutoTarget ? '2px solid #2563eb' : '1px solid #e2e8f0'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentAutoTarget ? '0 4px 12px rgba(37,99,235,0.15)' : '0 1px 2px rgba(0,0,0,0.03)'};position:relative;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
-              <span style="font-size:0.7rem;font-weight:700;color:#1e40af;background:#dbeafe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-                席位 #${idx + 1}
-              </span>
-              <div style="display:flex;align-items:center;gap:0.35rem;">
-                ${isCurrentAutoTarget ? `
-                <span style="font-size:0.65rem;background:#dcfce7;color:#166534;border:1px solid #86efac;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
-                  <span style="width:6px;height:6px;border-radius:50%;background:#22c55e;display:inline-block;"></span>正在服务 auto
-                </span>` : ''}
-                <span style="font-size:0.7rem;color:#15803d;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 第一梯队
-                </span>
-              </div>
-            </div>
-            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
-              ${escapePageHtml(item.fullId)}
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
-              <span style="font-size:0.65rem;background:#eff6ff;color:#1d4ed8;padding:0.1rem 0.35rem;border-radius:0.25rem;">
-                ${escapePageHtml(probeStat?.category || '文本')}
-              </span>
-              ${probeStat?.openclawCompatible ? `
-              <span style="font-size:0.65rem;background:#dcfce7;color:#15803d;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;" title="${escapePageHtml(probeStat.openclawReason || '适合 OpenClaw 智能体')}">
-                <i class="fas fa-bolt"></i> 适合 OpenClaw
-              </span>` : ''}
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#f8fafc;padding:0.375rem 0.5rem;border-radius:0.375rem;">
-              <div>
-                <div style="color:#64748b;font-size:0.65rem;">海选探测延迟</div>
-                <div style="font-weight:600;color:#0369a1;">${probeLatText}</div>
-              </div>
-              <div>
-                <div style="color:#64748b;font-size:0.65rem;">用户业务延迟</div>
-                <div style="font-weight:600;color:#059669;">${busLatText}</div>
-              </div>
-            </div>
-          </div>`
-        } else {
-          return `
-          <div style="background:#f8fafc;border:1px dashed #cbd5e1;border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:90px;">
-            <span style="font-size:0.7rem;font-weight:600;color:#94a3b8;margin-bottom:0.2rem;">席位 #${idx + 1}</span>
-            <span style="font-size:0.8rem;color:#64748b;display:flex;align-items:center;gap:0.375rem;">
-              <i class="fas fa-clock" style="color:#94a3b8;"></i> 待选拔补位
-            </span>
-          </div>`
-        }
-      }).join('')}
+      <a href="/admin/login" class="btn btn-p" style="white-space:nowrap;">
+        <i class="fas fa-sign-in-alt"></i> 登录后查看详细模型与梯队池
+      </a>
     </div>
   </section>
+  `}
 
-  <!-- OpenClaw 专属梯队池展示区 -->
-  <section class="shell openclaw-showcase" style="margin-top:2rem;margin-bottom:2rem;">
-    <div class="section-heading" style="margin-bottom:1rem;">
-      <div>
-        <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
-          <i class="fas fa-robot" style="color:#8b5cf6;"></i>
-          OpenClaw 专属梯队池 (OpenClaw Tier)
-          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:9999px;font-weight:600;">6 席位固定</span>
-        </h2>
-        <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
-          针对复杂 Agent、Function Calling 与智能体场景经过 Canary 探针验证的模型池。传入 <code>model: "openclaw/auto"</code> 或请求包含 <code>tools</code> 时自动调度。
-        </p>
-      </div>
-    </div>
-
-    <!-- OpenClaw 调用示例卡片 -->
-    <div style="background:#fdf4ff;border:1px solid #f5d0fe;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
-        <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#701a75;">
-          <i class="fas fa-wand-magic-sparkles" style="color:#a855f7;"></i> OpenClaw 智能调度：指定 model: "openclaw/auto" 或携带 tools 自动触发
-        </span>
-        <span style="font-size:0.75rem;color:#86198f;">工具调用支持 · 智能体优选 · 自动补位</span>
-      </div>
-      <pre style="background:#1e1b4b;color:#f5d0fe;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/chat/completions \\
-  -H "Authorization: Bearer sk_cf_••••" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "openclaw/auto",
-    "messages": [{ "role": "user", "content": "Fetch weather with tools" }],
-    "tools": [{ "type": "function", "function": { "name": "get_weather" } }]
-  }'</code></pre>
-    </div>
-
-    <!-- OpenClaw 6 个席位卡片 -->
-    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
-      ${Array.from({ length: 6 }).map((_, idx) => {
-        const item = tierOpenclawModels[idx]
-        if (item) {
-          const isCurrentOpenclawTarget = activePointers.openclaw?.fullId === item.fullId
-          const probeStat = tierData.probeStats[item.fullId]
-          const bStat = tierData.businessStats[item.fullId]
-          const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
-          const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
-          return `
-          <div style="background:#ffffff;border:${isCurrentOpenclawTarget ? '2px solid #8b5cf6' : '1px solid #f3e8ff'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentOpenclawTarget ? '0 4px 12px rgba(139,92,246,0.15)' : '0 1px 2px rgba(139,92,246,0.05)'};position:relative;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
-              <span style="font-size:0.7rem;font-weight:700;color:#6d28d9;background:#ede9fe;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-                OpenClaw 席位 #${idx + 1}
-              </span>
-              <div style="display:flex;align-items:center;gap:0.35rem;">
-                ${isCurrentOpenclawTarget ? `
-                <span style="font-size:0.65rem;background:#fae8ff;color:#701a75;border:1px solid #f0abfc;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
-                  <span style="width:6px;height:6px;border-radius:50%;background:#a855f7;display:inline-block;"></span>正在服务 openclaw
-                </span>` : ''}
-                <span style="font-size:0.7rem;color:#7c3aed;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 兼容智能体
-                </span>
-              </div>
-            </div>
-            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
-              ${escapePageHtml(item.fullId)}
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
-              <span style="font-size:0.65rem;background:#fae8ff;color:#86198f;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;">
-                <i class="fas fa-bolt"></i> 适合 OpenClaw
-              </span>
-              <span style="font-size:0.65rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.35rem;border-radius:0.25rem;">
-                ${escapePageHtml(probeStat?.category || '文本')}
-              </span>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#faf5ff;padding:0.375rem 0.5rem;border-radius:0.375rem;">
-              <div>
-                <div style="color:#7e22ce;font-size:0.65rem;">探针延迟</div>
-                <div style="font-weight:600;color:#6b21a8;">${probeLatText}</div>
-              </div>
-              <div>
-                <div style="color:#64748b;font-size:0.65rem;">业务延迟</div>
-                <div style="font-weight:600;color:#059669;">${busLatText}</div>
-              </div>
-            </div>
-          </div>`
-        } else {
-          return `
-          <div style="background:#faf5ff;border:1px dashed #d8b4fe;border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:90px;">
-            <span style="font-size:0.7rem;font-weight:600;color:#c084fc;margin-bottom:0.2rem;">OpenClaw 席位 #${idx + 1}</span>
-            <span style="font-size:0.8rem;color:#9333ea;display:flex;align-items:center;gap:0.375rem;">
-              <i class="fas fa-clock" style="color:#c084fc;"></i> 待适配模型补位
-            </span>
-          </div>`
-        }
-      }).join('')}
-    </div>
-  </section>
-
-  <!-- 绘图专属梯队池展示区 -->
-  <section class="shell drawing-showcase" style="margin-top:2rem;margin-bottom:2rem;">
-    <div class="section-heading" style="margin-bottom:1rem;">
-      <div>
-        <h2 style="font-size:1.35rem;font-weight:600;display:flex;align-items:center;gap:0.5rem;margin:0;">
-          <i class="fas fa-palette" style="color:#ec4899;"></i>
-          绘图专属梯队池 (Drawing Tier)
-          <span style="font-size:0.75rem;padding:0.2rem 0.5rem;background:#fce7f3;color:#be185d;border-radius:9999px;font-weight:600;">6 席位固定</span>
-        </h2>
-        <p style="color:#64748b;margin-top:0.25rem;font-size:0.875rem;margin-bottom:0;">
-          专门收录 DALL-E、Flux、Stable Diffusion 与各类图像生成模型。传入 <code>model: "drawing/auto"</code> 或请求 <code>/v1/images/generations</code> 接口时自动调度。
-        </p>
-      </div>
-    </div>
-
-    <!-- 绘图调用示例卡片 -->
-    <div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;gap:0.5rem;">
-        <span style="font-weight:600;font-size:0.9rem;display:flex;align-items:center;gap:0.5rem;color:#881337;">
-          <i class="fas fa-paint-brush" style="color:#f43f5e;"></i> 绘图模型智能调度：指定 model: "drawing/auto" 或访问图像生成接口
-        </span>
-        <span style="font-size:0.75rem;color:#9f1239;">图像模型优选 · 智能轮询 · 故障自愈</span>
-      </div>
-      <pre style="background:#26131c;color:#fecdd3;padding:0.75rem 1rem;border-radius:0.5rem;overflow-x:auto;font-size:0.825rem;margin:0;line-height:1.5;"><code>curl ${escapePageHtml(apiBase)}/images/generations \\
-  -H "Authorization: Bearer sk_cf_••••" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "drawing/auto",
-    "prompt": "A futuristic city in watercolor style"
-  }'</code></pre>
-    </div>
-
-    <!-- 绘图 6 个席位卡片 -->
-    <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(300px, 1fr));gap:0.875rem;">
-      ${Array.from({ length: 6 }).map((_, idx) => {
-        const item = tierDrawingModels[idx]
-        if (item) {
-          const isCurrentDrawingTarget = activePointers.drawing?.fullId === item.fullId
-          const probeStat = tierData.probeStats[item.fullId]
-          const bStat = tierData.businessStats[item.fullId]
-          const probeLatText = probeStat?.success ? `${probeStat.latency} ms` : '初始化海选'
-          const busLatText = bStat && bStat.totalRequests > 0 ? `${bStat.avgLatency} ms (${bStat.totalRequests}次)` : '尚无真实业务'
-          return `
-          <div style="background:#ffffff;border:${isCurrentDrawingTarget ? '2px solid #ec4899' : '1px solid #ffe4e6'};border-radius:0.625rem;padding:0.875rem;box-shadow:${isCurrentDrawingTarget ? '0 4px 12px rgba(236,72,153,0.15)' : '0 1px 2px rgba(236,72,153,0.05)'};position:relative;">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.375rem;">
-              <span style="font-size:0.7rem;font-weight:700;color:#be185d;background:#fce7f3;padding:0.15rem 0.4rem;border-radius:0.25rem;">
-                绘图席位 #${idx + 1}
-              </span>
-              <div style="display:flex;align-items:center;gap:0.35rem;">
-                ${isCurrentDrawingTarget ? `
-                <span style="font-size:0.65rem;background:#ffe4e6;color:#9f1239;border:1px solid #fda4af;padding:0.12rem 0.4rem;border-radius:9999px;font-weight:700;display:inline-flex;align-items:center;gap:0.2rem;">
-                  <span style="width:6px;height:6px;border-radius:50%;background:#f43f5e;display:inline-block;"></span>正在服务 drawing
-                </span>` : ''}
-                <span style="font-size:0.7rem;color:#e11d48;font-weight:600;display:flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-check-circle" style="font-size:0.65rem;"></i> 绘图模型
-                </span>
-              </div>
-            </div>
-            <div style="font-weight:600;font-size:0.9rem;color:#0f172a;word-break:break-all;margin-bottom:0.375rem;font-family:monospace;">
-              ${escapePageHtml(item.fullId)}
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.5rem;flex-wrap:wrap;">
-              <span style="font-size:0.65rem;background:#ffe4e6;color:#be123c;padding:0.1rem 0.35rem;border-radius:0.25rem;font-weight:600;">
-                <i class="fas fa-palette"></i> 绘图
-              </span>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#fff5f7;padding:0.375rem 0.5rem;border-radius:0.375rem;">
-              <div>
-                <div style="color:#be123c;font-size:0.65rem;">探针延迟</div>
-                <div style="font-weight:600;color:#9f1239;">${probeLatText}</div>
-              </div>
-              <div>
-                <div style="color:#64748b;font-size:0.65rem;">业务延迟</div>
-                <div style="font-weight:600;color:#059669;">${busLatText}</div>
-              </div>
-            </div>
-          </div>`
-        } else {
-          return `
-          <div style="background:#fff5f7;border:1px dashed #fecdd3;border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:90px;">
-            <span style="font-size:0.7rem;font-weight:600;color:#fb7185;margin-bottom:0.2rem;">绘图席位 #${idx + 1}</span>
-            <span style="font-size:0.8rem;color:#e11d48;display:flex;align-items:center;gap:0.375rem;">
-              <i class="fas fa-clock" style="color:#fb7185;"></i> 待绘图模型补位
-            </span>
-          </div>`
-        }
-      }).join('')}
-    </div>
-  </section>
-
+  ${isLoggedIn ? `
   <section class="shell directory" aria-labelledby="directory-title">
     <div class="directory-toolbar">
       <div class="directory-header">
@@ -521,44 +141,19 @@ ${H('首页')}
         </label>
       </div>
 
-      <!-- 分类标签与健康状态多维筛选栏 -->
-      <div class="filter-sections" id="filter-sections">
-        <!-- 第一行：按类型分类标签 -->
-        <div class="filter-group">
-          <span class="filter-group-title"><i class="fas fa-shapes" style="color:#2563eb;"></i> 类型:</span>
-          <button type="button" class="filter-chip is-active" data-type="all">
-            <i class="fas fa-border-all" aria-hidden="true"></i> 全部类型 (<span id="cnt-type-all">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-type="chat">
-            <i class="fas fa-comment-alt" style="color:#2563eb;" aria-hidden="true"></i> 文本 (<span id="cnt-type-chat">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-type="openclaw">
-            <i class="fas fa-bolt" style="color:#16a34a;" aria-hidden="true"></i> OpenClaw (<span id="cnt-type-openclaw">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-type="drawing">
-            <i class="fas fa-palette" style="color:#d97706;" aria-hidden="true"></i> 绘图 (<span id="cnt-type-drawing">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-type="embedding">
-            <i class="fas fa-cube" style="color:#9333ea;" aria-hidden="true"></i> 嵌入 (<span id="cnt-type-embedding">0</span>)
-          </button>
-        </div>
-
-        <!-- 第二行：按健康状态分类标签 -->
-        <div class="filter-group">
-          <span class="filter-group-title"><i class="fas fa-heartbeat" style="color:#10b981;"></i> 状态:</span>
-          <button type="button" class="filter-chip is-active" data-status="all">
-            <i class="fas fa-cubes" aria-hidden="true"></i> 全部状态 (<span id="cnt-all">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-status="ok">
-            <i class="fas fa-check-circle" style="color:#16a34a;" aria-hidden="true"></i> 正常 (<span id="cnt-ok">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-status="cd">
-            <i class="fas fa-hourglass-half" style="color:#d97706;" aria-hidden="true"></i> 冷却 (<span id="cnt-cd">0</span>)
-          </button>
-          <button type="button" class="filter-chip" data-status="err">
-            <i class="fas fa-ban" style="color:#dc2626;" aria-hidden="true"></i> 失效 (<span id="cnt-err">0</span>)
-          </button>
-        </div>
+      <div class="filter-chips" id="filter-chips">
+        <button type="button" class="filter-chip is-active" data-status="all">
+          <i class="fas fa-cubes" aria-hidden="true"></i> 全部 (<span id="cnt-all">0</span>)
+        </button>
+        <button type="button" class="filter-chip" data-status="ok">
+          <i class="fas fa-check-circle" style="color:#16a34a;" aria-hidden="true"></i> 正常 (<span id="cnt-ok">0</span>)
+        </button>
+        <button type="button" class="filter-chip" data-status="cd">
+          <i class="fas fa-hourglass-half" style="color:#d97706;" aria-hidden="true"></i> 冷却 (<span id="cnt-cd">0</span>)
+        </button>
+        <button type="button" class="filter-chip" data-status="err">
+          <i class="fas fa-ban" style="color:#dc2626;" aria-hidden="true"></i> 失效 (<span id="cnt-err">0</span>)
+        </button>
       </div>
     </div>
 
@@ -641,38 +236,25 @@ ${H('首页')}
                     }
                   }
 
-                  let latencyBadgeHtml = ''
-                  const probeStat = tierData.probeStats?.[fullModel]
-                  if (probeStat && probeStat.success) {
-                    latencyBadgeHtml = `<span class="m-badge" style="background:#f0fdf4;color:#16a34a;font-size:0.65rem;border:1px solid #bbf7d0;font-weight:600;" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> ${probeStat.latency}ms</span>`
-                  }
-
                   const isHiddenInitially = idx >= INITIAL_LIMIT ? 'is-collapsed' : ''
-                  const typeKey = cat === '绘图' ? 'drawing' : cat === '嵌入' ? 'embedding' : 'chat'
-                  const isOpenclaw = !!(model.openclawTested && model.openclawCompatible)
 
                   return `<div class="model-card copy-control ${isHiddenInitially}" 
                                data-copy="${escapePageHtml(fullModel)}" 
                                data-model-id="${escapePageHtml(model.id.toLowerCase())}" 
                                data-full-id="${escapePageHtml(fullModel.toLowerCase())}"
                                data-status="${statusKey}"
-                               data-type="${typeKey}"
-                               data-openclaw="${isOpenclaw ? '1' : '0'}"
                                data-index="${idx}">
-                    <!-- 第一行：模型完整名称与小巧复制按钮 -->
-                    <div class="model-card__header-row">
+                    <div class="model-card__info">
                       <code class="model-card__name" title="点击复制完整ID: ${escapePageHtml(fullModel)}">${escapePageHtml(model.id)}</code>
-                      <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
-                        <i class="far fa-copy" aria-hidden="true"></i>
-                      </button>
+                      <div style="display:flex;align-items:center;gap:0.25rem;flex-wrap:wrap;margin-top:0.25rem;">
+                        ${categoryBadgeHtml}
+                        ${openclawBadgeHtml}
+                        ${statusBadgeHtml}
+                      </div>
                     </div>
-                    <!-- 第二行：各类状态、特性与延迟标签整齐排列 -->
-                    <div class="model-card__tags-row">
-                      ${categoryBadgeHtml}
-                      ${openclawBadgeHtml}
-                      ${statusBadgeHtml}
-                      ${latencyBadgeHtml}
-                    </div>
+                    <button class="model-card__copy-btn" type="button" aria-label="复制 ${escapePageHtml(fullModel)}">
+                      <i class="far fa-copy" aria-hidden="true"></i>
+                    </button>
                   </div>`
                 }).join('')}
               </div>
@@ -696,29 +278,61 @@ ${H('首页')}
       <button type="button" class="btn btn-s" style="margin-top:0.5rem;" onclick="resetSearch()"><i class="fas fa-redo" aria-hidden="true"></i> 清除筛选与搜索</button>
     </div>
   </section>
+  ` : `
+  <!-- 未登录访客保护展示区：安全隔离所有模型列表与调度池数据 -->
+  <section class="shell home-auth-guard" style="margin:2.5rem auto 3rem auto;max-width:44rem;padding:3.5rem 1.5rem;background:#ffffff;border-radius:1rem;box-shadow:0 4px 6px -1px rgba(0,0,0,0.05),0 2px 4px -1px rgba(0,0,0,0.03);border:1px solid #e2e8f0;text-align:center;">
+    <div style="width:4.25rem;height:4.25rem;background:#eff6ff;color:#2563eb;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:1.85rem;margin-bottom:1.25rem;">
+      <i class="fas fa-shield-alt" aria-hidden="true"></i>
+    </div>
+    <h2 style="font-size:1.4rem;font-weight:700;color:#0f172a;margin-bottom:0.75rem;">模型列表已受访问保护</h2>
+    <p style="color:#64748b;font-size:0.95rem;line-height:1.65;margin:0 auto 1.75rem auto;max-width:32rem;">
+      为保障网关核心资产与模型私密性，当前第一梯队池、OpenClaw 智能体池、绘图专属池以及各厂商可用模型清单仅向管理员开放。
+    </p>
+    <div style="display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;">
+      <a href="/admin/login" class="btn btn-p" style="padding:0.65rem 1.75rem;font-size:0.95rem;">
+        <i class="fas fa-sign-in-alt" aria-hidden="true"></i> 管理员登录查看
+      </a>
+    </div>
+  </section>
+  `}
 </main>
 
 ${renderSiteFooter(SITE_CONFIG.title)}
 
 <script>
 (function () {
+  // 自动从 localStorage 恢复会话并向后端轻量校验有效性，杜绝“假登录”
   var savedToken = localStorage.getItem('admin_token');
   if (savedToken) {
     if (!document.cookie.includes('session_id=')) {
       document.cookie = "session_id=" + savedToken + "; path=/; max-age=86400; SameSite=None; Secure";
     }
+    // 异步探测是否真正有效
+    fetch('/admin/api/auth-check')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        var nav = document.getElementById('topbar-actions');
+        if (data && data.loggedIn) {
+          if (nav && !nav.innerHTML.includes('管理控制台')) {
+            nav.innerHTML = '<a href="/admin" class="btn btn-p"><i class="fas fa-sliders-h" aria-hidden="true"></i>管理控制台</a>' +
+                            '<a href="/admin/logout" class="btn btn-gh" onclick="localStorage.removeItem(&quot;admin_token&quot;)"><i class="fas fa-sign-out-alt" aria-hidden="true"></i>退出</a>';
+          }
+          // 若当前页面处于未登录保护视图但校验已登录，平滑刷新以展示完整模型列表
+          if (document.querySelector('.home-auth-guard') && !window.__authReloaded) {
+            window.__authReloaded = true;
+            window.location.reload();
+          }
+        } else {
+          // Token 实际已失效，自动清除残留，还原登录按钮
+          localStorage.removeItem('admin_token');
+          document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
+          if (nav && nav.innerHTML.includes('管理控制台')) {
+            nav.innerHTML = '<a href="/admin/login" class="btn btn-p"><i class="fas fa-sign-in-alt" aria-hidden="true"></i>管理员登录</a>';
+          }
+        }
+      })
+      .catch(function() {});
   }
-  // 异步探测会话是否有效，失效则立刻跳往登录页
-  fetch('/admin/api/auth-check')
-    .then(function(res) { return res.json(); })
-    .then(function(data) {
-      if (!data || !data.loggedIn) {
-        localStorage.removeItem('admin_token');
-        document.cookie = "session_id=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=None; Secure";
-        window.location.href = '/admin/login';
-      }
-    })
-    .catch(function() {});
 
   // 复制控制
   var copyStatus = document.getElementById('copy-status');
@@ -760,58 +374,33 @@ ${renderSiteFooter(SITE_CONFIG.title)}
     });
   });
 
-  // 统计计算与实时搜索 / 状态与类型多维过滤
+  // 统计计算与实时搜索 / 状态过滤
   var searchInput = document.getElementById('model-search');
+  var filterChips = document.querySelectorAll('.filter-chip');
   var providerCards = Array.from(document.querySelectorAll('.provider-card'));
   var emptyState = document.getElementById('search-empty');
 
-  // 当前激活的健康状态筛选（all, ok, cd, err）
   var activeStatus = 'all';
-  // 当前激活的模型类型筛选（all, chat, openclaw, drawing, embedding）
-  var activeType = 'all';
 
-  // 动态更新各标签栏模型统计数量
   function updateCounts() {
     var cntAll = 0, cntOk = 0, cntCd = 0, cntErr = 0;
-    var cntTAll = 0, cntTChat = 0, cntTOc = 0, cntTDraw = 0, cntTEmb = 0;
-
     document.querySelectorAll('.model-card').forEach(function (m) {
       cntAll++;
-      cntTAll++;
-      // 状态统计
       var st = m.getAttribute('data-status');
       if (st === 'ok') cntOk++;
       else if (st === 'cd') cntCd++;
       else if (st === 'err') cntErr++;
-
-      // 类型统计
-      var tp = m.getAttribute('data-type');
-      var oc = m.getAttribute('data-openclaw');
-      if (tp === 'chat') cntTChat++;
-      else if (tp === 'drawing') cntTDraw++;
-      else if (tp === 'embedding') cntTEmb++;
-
-      if (oc === '1') cntTOc++;
     });
 
-    // 填充状态数量
     var elAll = document.getElementById('cnt-all'); if (elAll) elAll.textContent = cntAll;
     var elOk = document.getElementById('cnt-ok'); if (elOk) elOk.textContent = cntOk;
     var elCd = document.getElementById('cnt-cd'); if (elCd) elCd.textContent = cntCd;
     var elErr = document.getElementById('cnt-err'); if (elErr) elErr.textContent = cntErr;
-
-    // 填充类型数量
-    var elTAll = document.getElementById('cnt-type-all'); if (elTAll) elTAll.textContent = cntTAll;
-    var elTChat = document.getElementById('cnt-type-chat'); if (elTChat) elTChat.textContent = cntTChat;
-    var elTOc = document.getElementById('cnt-type-openclaw'); if (elTOc) elTOc.textContent = cntTOc;
-    var elTDraw = document.getElementById('cnt-type-drawing'); if (elTDraw) elTDraw.textContent = cntTDraw;
-    var elTEmb = document.getElementById('cnt-type-embedding'); if (elTEmb) elTEmb.textContent = cntTEmb;
   }
 
-  // 组合条件实时筛选（搜索关键字 + 类型分类 + 健康状态）
   function applyFilters() {
     var query = (searchInput ? searchInput.value : '').trim().toLowerCase();
-    var isSearching = query.length > 0 || activeStatus !== 'all' || activeType !== 'all';
+    var isSearching = query.length > 0 || activeStatus !== 'all';
 
     var totalVisibleModels = 0;
 
@@ -832,18 +421,11 @@ ${renderSiteFooter(SITE_CONFIG.title)}
         var mId = mCard.getAttribute('data-model-id') || '';
         var fId = mCard.getAttribute('data-full-id') || '';
         var st = mCard.getAttribute('data-status') || '';
-        var tp = mCard.getAttribute('data-type') || '';
-        var oc = mCard.getAttribute('data-openclaw') || '';
 
-        // 1. 关键字匹配
         var matchesSearch = !query || pName.includes(query) || pId.includes(query) || mId.includes(query) || fId.includes(query);
-        // 2. 状态匹配
         var matchesStatus = activeStatus === 'all' || st === activeStatus;
-        // 3. 类型匹配
-        var matchesType = activeType === 'all' ||
-                          (activeType === 'openclaw' ? oc === '1' : tp === activeType);
 
-        var isVisible = matchesSearch && matchesStatus && matchesType;
+        var isVisible = matchesSearch && matchesStatus;
         mCard.classList.toggle('hd', !isVisible);
 
         if (isVisible) {
@@ -852,55 +434,36 @@ ${renderSiteFooter(SITE_CONFIG.title)}
         }
       });
 
-      // 如果当前提供商下所有模型都被过滤，则自动隐藏该提供商卡片
       pCard.classList.toggle('hd', visibleInProvider === 0);
     });
 
     if (emptyState) {
-      emptyState.classList.toggle('hd', totalVisibleModels > 0 || (!query && activeStatus === 'all' && activeType === 'all'));
+      emptyState.classList.toggle('hd', totalVisibleModels > 0 || (!query && activeStatus === 'all'));
     }
   }
 
-  // 一键清空所有筛选条件与搜索
   window.resetSearch = function() {
     if (searchInput) searchInput.value = '';
     activeStatus = 'all';
-    activeType = 'all';
-    document.querySelectorAll('.filter-chip[data-status]').forEach(function(chip) {
+    filterChips.forEach(function(chip) {
       chip.classList.toggle('is-active', chip.getAttribute('data-status') === 'all');
-    });
-    document.querySelectorAll('.filter-chip[data-type]').forEach(function(chip) {
-      chip.classList.toggle('is-active', chip.getAttribute('data-type') === 'all');
     });
     applyFilters();
   };
 
-  // 监听搜索输入
   if (searchInput) {
     searchInput.addEventListener('input', applyFilters);
   }
 
-  // 监听健康状态标签点击
-  document.querySelectorAll('.filter-chip[data-status]').forEach(function (chip) {
+  filterChips.forEach(function (chip) {
     chip.addEventListener('click', function () {
-      document.querySelectorAll('.filter-chip[data-status]').forEach(function (c) { c.classList.remove('is-active'); });
+      filterChips.forEach(function (c) { c.classList.remove('is-active'); });
       chip.classList.add('is-active');
       activeStatus = chip.getAttribute('data-status') || 'all';
       applyFilters();
     });
   });
 
-  // 监听类型分类标签点击
-  document.querySelectorAll('.filter-chip[data-type]').forEach(function (chip) {
-    chip.addEventListener('click', function () {
-      document.querySelectorAll('.filter-chip[data-type]').forEach(function (c) { c.classList.remove('is-active'); });
-      chip.classList.add('is-active');
-      activeType = chip.getAttribute('data-type') || 'all';
-      applyFilters();
-    });
-  });
-
-  // 初始化计算数量
   updateCounts();
 })()
 </script>
@@ -915,11 +478,11 @@ ${H('登录')}
 <body class="site-page auth-page">
 <header class="topbar topbar--auth">
   <div class="shell topbar__inner">
-    <div class="brand" aria-label="AI Gateway 访问控制">
+    <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">CONTROL PLANE</span>
-    </div>
+    </a>
+    <a href="/" class="btn btn-gh"><i class="fas fa-arrow-left" aria-hidden="true"></i>返回首页</a>
   </div>
 </header>
 
@@ -1024,21 +587,204 @@ ${H('登录')}
 </body></html>`)
 }
 
+// ===== 梯队池模型监控组件（模块化渲染函数） =====
+
+/**
+ * 渲染管理控制台专属的三大梯队池模型监控看板
+ * 优化点：
+ * 1. 严格遵守零额外 KV 消耗原则，只读取传入的 tierData 缓存
+ * 2. 独立函数渲染，确保 HTML 结构安全与转义完全闭合
+ * 3. 清晰直观展示三大梯队池每个席位当前连接的模型全称、所属渠道标识与延迟指标
+ */
+function renderAdminTierPools(tierData: TierStorage): string {
+  // 提取三大梯队池当前连接的模型数据
+  const tier1Models = tierData.tier1 || []
+  const tierOpenclawModels = tierData.tierOpenclaw || []
+  const tierDrawingModels = tierData.tierDrawing || []
+  const tier2Count = (tierData.tier2 || []).length
+  const totalTierOnlineCount = tier1Models.length + tierOpenclawModels.length + tierDrawingModels.length
+
+  // 辅助函数：渲染单个梯队池的席位卡片网格
+  function renderPoolCards(
+    models: typeof tier1Models,
+    maxSlots: number,
+    slotPrefix: string,
+    themeColor: string,
+    bgColor: string,
+    borderColor: string,
+    badgeBg: string,
+    badgeText: string,
+    extraBadgeText: string
+  ): string {
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:0.875rem;">'
+    // 遍历每一个固定席位
+    for (let idx = 0; idx < maxSlots; idx++) {
+      const item = models[idx]
+      // 判断该席位是否有连接中的模型
+      if (item) {
+        const probeStat = tierData.probeStats[item.fullId]
+        const bStat = tierData.businessStats[item.fullId]
+        const probeLatText = probeStat && probeStat.success ? probeStat.latency + ' ms' : '海选中'
+        const busLatText = bStat && bStat.totalRequests > 0 ? bStat.avgLatency + ' ms (' + bStat.totalRequests + '次)' : '暂无业务请求'
+        const providerPart = item.fullId.split('/')[0] || '默认'
+        const safeFullId = escapePageHtml(item.fullId)
+        const safeProvider = escapePageHtml(providerPart)
+        const categoryText = escapePageHtml(probeStat?.category || '通用模型')
+
+        html += '<div style="background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:0.625rem;padding:0.875rem;display:flex;flex-direction:column;justify-content:space-between;">'
+        html += '  <div>'
+        html += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">'
+        html += '      <span style="font-size:0.75rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.15rem 0.45rem;border-radius:0.25rem;">'
+        html += '        ' + slotPrefix + ' #' + (idx + 1)
+        html += '      </span>'
+        html += '      <span style="font-size:0.725rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.3rem;">'
+        html += '        <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#16a34a;"></span>'
+        html += '        已连接运行'
+        html += '      </span>'
+        html += '    </div>'
+        html += '    <div style="margin-bottom:0.5rem;">'
+        html += '      <div style="font-size:0.7rem;color:#64748b;margin-bottom:0.15rem;">当前连接模型：</div>'
+        html += '      <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #e2e8f0;padding:0.35rem 0.5rem;border-radius:0.375rem;gap:0.5rem;">'
+        html += '        <code style="font-weight:700;font-size:0.825rem;color:#0f172a;word-break:break-all;font-family:monospace;">' + safeFullId + '</code>'
+        html += '        <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText(\'' + safeFullId + '\');toast(\'已复制模型ID\',\'success\')" title="复制模型ID" style="padding:2px 4px;font-size:0.75rem;"><i class="far fa-copy"></i></button>'
+        html += '      </div>'
+        html += '    </div>'
+        html += '    <div style="display:flex;gap:0.35rem;align-items:center;margin-bottom:0.65rem;flex-wrap:wrap;">'
+        html += '      <span style="font-size:0.7rem;background:#e0f2fe;color:#0369a1;padding:0.1rem 0.4rem;border-radius:0.25rem;font-weight:600;"><i class="fas fa-server"></i> 渠道: ' + safeProvider + '</span>'
+        html += '      <span style="font-size:0.7rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.4rem;border-radius:0.25rem;">' + categoryText + '</span>'
+        if (extraBadgeText) {
+          html += '      <span style="font-size:0.7rem;background:' + badgeBg + ';color:' + badgeText + ';padding:0.1rem 0.4rem;border-radius:0.25rem;font-weight:600;">' + extraBadgeText + '</span>'
+        }
+        html += '    </div>'
+        html += '  </div>'
+        html += '  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.375rem;font-size:0.75rem;background:#ffffff;padding:0.4rem 0.5rem;border-radius:0.375rem;border:1px solid #e2e8f0;">'
+        html += '    <div><div style="color:#64748b;font-size:0.65rem;">探测延迟</div><div style="font-weight:600;color:' + themeColor + ';">' + probeLatText + '</div></div>'
+        html += '    <div><div style="color:#64748b;font-size:0.65rem;">业务平均延迟</div><div style="font-weight:600;color:#16a34a;">' + busLatText + '</div></div>'
+        html += '  </div>'
+        html += '</div>'
+      } else {
+        // 席位空置状态
+        html += '<div style="background:' + bgColor + ';border:1px dashed ' + borderColor + ';border-radius:0.625rem;padding:1rem;display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:120px;text-align:center;">'
+        html += '  <span style="font-size:0.75rem;font-weight:600;color:#94a3b8;margin-bottom:0.25rem;">' + slotPrefix + ' #' + (idx + 1) + '</span>'
+        html += '  <div style="font-size:0.85rem;color:#64748b;display:flex;align-items:center;gap:0.375rem;margin-bottom:0.35rem;"><i class="fas fa-clock" style="color:#94a3b8;"></i> 待调度补位</div>'
+        html += '  <span style="font-size:0.7rem;color:#94a3b8;">点击上方“即刻探测刷新”从候选池中选拔入驻</span>'
+        html += '</div>'
+      }
+    }
+    html += '</div>'
+    return html
+  }
+
+  // 拼接三大梯队池整体页面模块
+  let out = ''
+  out += '<section id="tiers" class="workspace-section" aria-labelledby="tiers-title">'
+  out += '  <div class="section-heading section-heading--admin">'
+  out += '    <div>'
+  out += '      <h2 id="tiers-title" style="display:flex;align-items:center;gap:0.5rem;">'
+  out += '        <i class="fas fa-layer-group" style="color:#2563eb;"></i> 梯队池模型'
+  out += '        <span style="font-size:0.75rem;padding:0.2rem 0.55rem;background:#dbeafe;color:#1e40af;border-radius:9999px;font-weight:600;">'
+  out += '          共 ' + totalTierOnlineCount + ' 个模型服务中'
+  out += '        </span>'
+  out += '      </h2>'
+  out += '      <p>实时监控三大梯队池当前连接的模型。高可用智能路由在各个池内执行毫秒级选优与故障自愈。</p>'
+  out += '    </div>'
+  out += '    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">'
+  out += '      <button class="btn btn-p btn-s" onclick="triggerProbe()"><i class="fas fa-radar" aria-hidden="true"></i>即刻探测刷新</button>'
+  out += '      <button class="btn btn-s" onclick="testAllBlockedModels()"><i class="fas fa-unlock-alt" aria-hidden="true"></i>复测被封模型</button>'
+  out += '    </div>'
+  out += '  </div>'
+
+  out += '  <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:0.75rem;margin-bottom:1.5rem;">'
+  out += '    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:0.625rem;padding:0.75rem 1rem;">'
+  out += '      <div style="font-size:0.8rem;font-weight:700;color:#0369a1;margin-bottom:0.25rem;display:flex;align-items:center;gap:0.35rem;"><i class="fas fa-bolt" style="color:#0284c7;"></i> 第一梯队通用路由</div>'
+  out += '      <div style="font-size:0.75rem;color:#0c4a6e;margin-bottom:0.35rem;">客户端模型参数直接指定：</div>'
+  out += '      <code style="background:#e0f2fe;color:#0369a1;padding:0.2rem 0.4rem;border-radius:0.25rem;font-size:0.8rem;font-weight:600;">model: &quot;auto/auto&quot; 或 &quot;tier1&quot;</code>'
+  out += '    </div>'
+  out += '    <div style="background:#faf5ff;border:1px solid #e9d5ff;border-radius:0.625rem;padding:0.75rem 1rem;">'
+  out += '      <div style="font-size:0.8rem;font-weight:700;color:#7e22ce;margin-bottom:0.25rem;display:flex;align-items:center;gap:0.35rem;"><i class="fas fa-robot" style="color:#9333ea;"></i> OpenClaw 智能体路由</div>'
+  out += '      <div style="font-size:0.75rem;color:#581c87;margin-bottom:0.35rem;">适配函数调用与复杂 Agent：</div>'
+  out += '      <code style="background:#f3e8ff;color:#7e22ce;padding:0.2rem 0.4rem;border-radius:0.25rem;font-size:0.8rem;font-weight:600;">model: &quot;openclaw/auto&quot;</code>'
+  out += '    </div>'
+  out += '    <div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:0.625rem;padding:0.75rem 1rem;">'
+  out += '      <div style="font-size:0.8rem;font-weight:700;color:#be123c;margin-bottom:0.25rem;display:flex;align-items:center;gap:0.35rem;"><i class="fas fa-paint-brush" style="color:#e11d48;"></i> 绘图模型专属路由</div>'
+  out += '      <div style="font-size:0.75rem;color:#881337;margin-bottom:0.35rem;">绘图生图与图像生成接口：</div>'
+  out += '      <code style="background:#ffe4e6;color:#be123c;padding:0.2rem 0.4rem;border-radius:0.25rem;font-size:0.8rem;font-weight:600;">model: &quot;drawing/auto&quot;</code>'
+  out += '    </div>'
+  out += '  </div>'
+
+  // 第一梯队黄金模型池
+  out += '  <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,0.02);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #f1f5f9;padding-bottom:0.75rem;">'
+  out += '      <div>'
+  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#0f172a;display:flex;align-items:center;gap:0.5rem;">'
+  out += '          <span style="color:#2563eb;">👑 第一梯队 (Tier 1) 黄金模型池</span>'
+  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#dbeafe;color:#1e40af;border-radius:0.25rem;font-weight:600;">已连接 ' + tier1Models.length + ' / 9 席</span>'
+  out += '        </h3>'
+  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">负责 auto/auto 智能分流。由轻量探针持续从 ' + tier2Count + ' 个候选模型中海选选优。</p>'
+  out += '      </div>'
+  out += '    </div>'
+  out += renderPoolCards(tier1Models, 9, '席位', '#0284c7', '#f8fafc', '#cbd5e1', '#dbeafe', '#1e40af', '<i class="fas fa-bolt"></i> 黄金席位')
+  out += '  </div>'
+
+  // OpenClaw 专属智能体池
+  out += '  <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(139,92,246,0.03);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #faf5ff;padding-bottom:0.75rem;">'
+  out += '      <div>'
+  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#581c87;display:flex;align-items:center;gap:0.5rem;">'
+  out += '          <span style="color:#9333ea;">🤖 OpenClaw 专属智能体梯队池</span>'
+  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ede9fe;color:#6d28d9;border-radius:0.25rem;font-weight:600;">已连接 ' + tierOpenclawModels.length + ' / 6 席</span>'
+  out += '        </h3>'
+  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">专供 openclaw/auto 与复杂智能体任务。仅由通过实机工具调用专属测试打标的模型入选；每轮按提供商抽 1~2 个微批次探测，自动带游标断点续测。</p>'
+  out += '      </div>'
+  out += '    </div>'
+  out += renderPoolCards(tierOpenclawModels, 6, 'OpenClaw 席位', '#9333ea', '#faf5ff', '#d8b4fe', '#ede9fe', '#6d28d9', '<i class="fas fa-check-double"></i> 工具调用实测认证')
+  out += '  </div>'
+
+  // 绘图专属池
+  out += '  <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.75rem;padding:1.25rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(236,72,153,0.03);">'
+  out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #fff1f2;padding-bottom:0.75rem;">'
+  out += '      <div>'
+  out += '        <h3 style="font-size:1.1rem;font-weight:700;margin:0 0 0.25rem 0;color:#881337;display:flex;align-items:center;gap:0.5rem;">'
+  out += '          <span style="color:#e11d48;">🎨 绘图专属梯队池 (Drawing Tier)</span>'
+  out += '          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ffe4e6;color:#9f1239;border-radius:0.25rem;font-weight:600;">已连接 ' + tierDrawingModels.length + ' / 6 席</span>'
+  out += '        </h3>'
+  out += '        <p style="margin:0;font-size:0.8rem;color:#64748b;">专用于图像生成接口 /v1/images/generations 或指定 model: &quot;drawing/auto&quot;。</p>'
+  out += '      </div>'
+  out += '    </div>'
+  out += renderPoolCards(tierDrawingModels, 6, '绘图席位', '#e11d48', '#fff5f7', '#fecdd3', '#ffe4e6', '#be123c', '<i class="fas fa-palette"></i> 绘画生图')
+  out += '  </div>'
+
+  out += '</section>'
+  return out
+}
+
 // ===== 管理后台 =====
 
 export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
-  // 并发读取配置并计算当前各个 auto 路由实时指向（纯内存计算，0 KV 额外写入）
-  const [providers, proxyKeys, logs, logConfig, customRoutes, poolTimeouts, tierData, activePointers] = await Promise.all([
-    getProviders(c.env),
-    getProxyKeys(c.env),
-    getLogs(c.env),
-    getLogConfig(c.env),
-    getCustomModelRoutes(c.env),
-    getPoolTimeouts(c.env),
-    getTierStorage(c.env),
-    getCurrentAutoPointers(c.env),
-  ])
-  const probeStats = tierData?.probeStats || {}
+  const providers = await getProviders(c.env)
+  const proxyKeys = await getProxyKeys(c.env)
+  const logs = await getLogs(c.env)
+  const logConfig = await getLogConfig(c.env)
+  const customRoutes = await getCustomModelRoutes(c.env)
+  // 获取梯队存储数据（从 KV 或内存缓存直接读取，零额外外部调用）
+  const defaultTierData: TierStorage = {
+    tier1: [],
+    tier2: [],
+    tierOpenclaw: [],
+    tierDrawing: [],
+    probeStats: {},
+    businessStats: {},
+    updatedAt: '',
+    lastProbeDate: '',
+    modelCursors: {},
+  }
+  const tierData = (await getTierStorage(c.env)) || defaultTierData
+  const tier1Models = tierData.tier1 || []
+  const tierOpenclawModels = tierData.tierOpenclaw || []
+  const tierDrawingModels = tierData.tierDrawing || []
+  const tier2Count = (tierData.tier2 || []).length
+  const totalTierOnlineCount = tier1Models.length + tierOpenclawModels.length + tierDrawingModels.length
+
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
   const modelsCount = providers.reduce((total, provider) => total + provider.models.length, 0)
@@ -1052,11 +798,11 @@ ${H('管理')}
   <aside class="admin-rail" aria-label="控制台导航">
     <a class="brand admin-rail__brand" href="/">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
-      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE</small></span>
+      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.3</small></span>
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
-      <a class="admin-nav__link" href="#timeouts"><i class="fas fa-stopwatch" aria-hidden="true"></i><span>超时控制</span></a>
+      <a class="admin-nav__link" href="#tiers"><i class="fas fa-layer-group" aria-hidden="true"></i><span>梯队池模型</span><b>${totalTierOnlineCount}</b></a>
       <a class="admin-nav__link" href="#providers"><i class="fas fa-server" aria-hidden="true"></i><span>提供商</span><b>${providers.length}</b></a>
       <a class="admin-nav__link" href="#custom-routes"><i class="fas fa-route" aria-hidden="true"></i><span>指定模型路由</span><b id="custom-routes-count-badge">${customRoutes.length}</b></a>
       <a class="admin-nav__link" href="#proxy-keys"><i class="fas fa-key" aria-hidden="true"></i><span>转发 Key</span><b>${proxyKeys.length}</b></a>
@@ -1079,7 +825,7 @@ ${H('管理')}
   <div class="admin-main">
     <header class="admin-topbar">
       <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span></a>
-      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#timeouts">超时</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
+      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#tiers">梯队池</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
       <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
       <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
     </header>
@@ -1104,209 +850,14 @@ ${H('管理')}
         <div class="admin-metrics" aria-label="配置统计">
           <div><span>${providers.length}</span><p>提供商</p><small>${enabledProvidersCount} 个已启用</small></div>
           <div><span>${modelsCount}</span><p>模型</p><small>${enabledModelsCount} 个可用</small></div>
+          <div><span>${tier1Models.length} / 9</span><p>第一梯队在线</p><small>候选池 ${tier2Count} 个</small></div>
+          <div><span>${tierOpenclawModels.length} / 6</span><p>OpenClaw 在线</p><small>智能体专用池</small></div>
+          <div><span>${tierDrawingModels.length} / 6</span><p>绘图池在线</p><small>绘图专属池</small></div>
           <div><span>${proxyKeys.length}</span><p>转发 Key</p><small>${enabledProxyKeysCount} 个可用</small></div>
-          <div><span class="status-dot status-dot--online"><i aria-hidden="true"></i>已配置</span><p>存储</p><small>Cloudflare KV</small></div>
-        </div>
-
-        <!-- 管理后台 Auto 智能路由实时指向看板 -->
-        <div style="margin-top:1.25rem;background:linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);border:1px solid #cbd5e1;border-radius:0.875rem;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.875rem;flex-wrap:wrap;gap:0.5rem;">
-            <div style="display:flex;align-items:center;gap:0.5rem;">
-              <span style="display:inline-flex;align-items:center;justify-content:center;width:1.8rem;height:1.8rem;border-radius:0.375rem;background:#2563eb;color:#ffffff;font-size:0.9rem;">
-                <i class="fas fa-radar"></i>
-              </span>
-              <span style="font-weight:700;font-size:0.95rem;color:#0f172a;">各 Auto 路由当前实时指向（当班接客模型）</span>
-            </div>
-            <span style="font-size:0.7rem;color:#475569;background:#ffffff;border:1px solid #e2e8f0;padding:0.2rem 0.5rem;border-radius:0.25rem;">
-              <i class="fas fa-microchip" style="color:#2563eb;"></i> 实时内存计算 · 0 KV 写入
-            </span>
-          </div>
-
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(260px, 1fr));gap:0.875rem;">
-            <!-- 1. 通用 auto -->
-            <div style="background:#ffffff;border:1px solid ${activePointers.general ? '#93c5fd' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
-                <span style="font-size:0.75rem;font-weight:700;color:#1d4ed8;display:inline-flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-bolt"></i> 通用 auto
-                </span>
-                <span style="font-size:0.65rem;color:#15803d;font-weight:700;background:#dcfce7;padding:0.1rem 0.35rem;border-radius:0.25rem;">
-                  ${activePointers.general ? (activePointers.general.latency ? `⚡ ${activePointers.general.latency} ms` : '🟢 在线当班') : '⚠️ 无'}
-                </span>
-              </div>
-              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#f8fafc;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #e2e8f0;">
-                ${escapePageHtml(activePointers.general?.fullId || '暂无可用的第一梯队模型')}
-              </div>
-              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
-                提供商: <strong>${escapePageHtml(activePointers.general?.providerName || '-')}</strong>
-              </div>
-            </div>
-
-            <!-- 2. 智能体 openclaw/auto -->
-            <div style="background:#ffffff;border:1px solid ${activePointers.openclaw ? '#d8b4fe' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
-                <span style="font-size:0.75rem;font-weight:700;color:#7e22ce;display:inline-flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-robot"></i> openclaw/auto
-                </span>
-                <span style="font-size:0.65rem;color:#7e22ce;font-weight:700;background:#ede9fe;padding:0.1rem 0.35rem;border-radius:0.25rem;">
-                  ${activePointers.openclaw ? (activePointers.openclaw.latency ? `⚡ ${activePointers.openclaw.latency} ms` : '🟢 智能体当班') : '⚠️ 无'}
-                </span>
-              </div>
-              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#faf5ff;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #f3e8ff;">
-                ${escapePageHtml(activePointers.openclaw?.fullId || '暂无可用的 OpenClaw 模型')}
-              </div>
-              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
-                提供商: <strong>${escapePageHtml(activePointers.openclaw?.providerName || '-')}</strong>
-              </div>
-            </div>
-
-            <!-- 3. 绘图 drawing/auto -->
-            <div style="background:#ffffff;border:1px solid ${activePointers.drawing ? '#fbcfe8' : '#e2e8f0'};border-radius:0.625rem;padding:0.75rem 0.875rem;">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">
-                <span style="font-size:0.75rem;font-weight:700;color:#be185d;display:inline-flex;align-items:center;gap:0.25rem;">
-                  <i class="fas fa-palette"></i> drawing/auto
-                </span>
-                <span style="font-size:0.65rem;color:#be185d;font-weight:700;background:#fce7f3;padding:0.1rem 0.35rem;border-radius:0.25rem;">
-                  ${activePointers.drawing ? (activePointers.drawing.latency ? `⚡ ${activePointers.drawing.latency} ms` : '🟢 绘图当班') : '⚠️ 无'}
-                </span>
-              </div>
-              <div style="font-weight:700;font-size:0.85rem;color:#0f172a;font-family:monospace;word-break:break-all;background:#fff5f7;padding:0.3rem 0.5rem;border-radius:0.25rem;border:1px solid #ffe4e6;">
-                ${escapePageHtml(activePointers.drawing?.fullId || '暂无可用的绘图模型')}
-              </div>
-              <div style="margin-top:0.35rem;font-size:0.68rem;color:#64748b;">
-                提供商: <strong>${escapePageHtml(activePointers.drawing?.providerName || '-')}</strong>
-              </div>
-            </div>
-          </div>
         </div>
       </section>
 
-      <!-- 各梯队池请求超时与思考模式独立控制区 -->
-      <section id="timeouts" class="workspace-section" aria-labelledby="timeouts-title">
-        <div class="section-heading section-heading--admin">
-          <div>
-            <h2 id="timeouts-title" style="display:flex;align-items:center;gap:8px;">
-              <i class="fas fa-sliders" style="color:var(--color-brand);"></i>
-              各梯队池独立控制（超时与思考模式）
-            </h2>
-            <p>为每个梯队池独立配置超时等待时间与思考模式（Thinking）开关。超时自动秒级换模，关闭思考杜绝智能体报错卡死。</p>
-          </div>
-          <button type="button" class="btn btn-p" onclick="saveTimeoutsBtn()"><i class="fas fa-save" aria-hidden="true"></i> 💾 保存梯队池配置</button>
-        </div>
-
-        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px;margin-bottom:20px;">
-          <!-- OpenClaw 专属池超时卡片 -->
-          <div style="background:var(--color-paper);border:1px solid #ddd6fe;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(139,92,246,0.06);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-              <span style="font-weight:700;font-size:14px;color:#6d28d9;display:flex;align-items:center;gap:6px;">
-                <i class="fas fa-robot"></i> OpenClaw 专属池
-              </span>
-              <span style="font-size:11px;background:#ede9fe;color:#7c3aed;padding:2px 8px;border-radius:999px;font-weight:600;">智能体专属</span>
-            </div>
-            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
-              针对 <code>openclaw/auto</code> 或包含 tools 工具调用的请求生效。
-            </p>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <input type="number" id="timeout-openclaw" class="form-input" min="5" max="600" value="${poolTimeouts.openclawTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #c4b5fd;">
-              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
-            </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #ddd6fe;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#7c3aed;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">关闭内心独白，防止智能体报错崩溃</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-openclaw" ${poolTimeouts.disableThinkingOpenclaw !== false ? 'checked' : ''} aria-label="OpenClaw池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#7c3aed;margin-top:8px;line-height:1.5;">
-              💡 保持开启关思考（默认开启），可杜绝 <code>LLM request failed</code> 错误。
-            </div>
-          </div>
-
-          <!-- 通用第一梯队池超时卡片 -->
-          <div style="background:var(--color-paper);border:1px solid #fed7aa;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(249,115,22,0.06);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-              <span style="font-weight:700;font-size:14px;color:#c2410c;display:flex;align-items:center;gap:6px;">
-                <i class="fas fa-bolt"></i> 第一梯队（通用池）
-              </span>
-              <span style="font-size:11px;background:#ffedd5;color:#ea580c;padding:2px 8px;border-radius:999px;font-weight:600;">日常对话</span>
-            </div>
-            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
-              针对 <code>auto</code> 智能调度或普通对话请求生效。
-            </p>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <input type="number" id="timeout-general" class="form-input" min="5" max="600" value="${poolTimeouts.generalTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #fdba74;">
-              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
-            </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fed7aa;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#ea580c;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">开启后极速吐字；关闭则保留模型深度推理</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-general" ${poolTimeouts.disableThinkingTier1 ? 'checked' : ''} aria-label="第一梯队通用池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#ea580c;margin-top:8px;line-height:1.5;">
-              💡 默认关闭，保留大模型原生深度思考；若追求极速响应可随时开启。
-            </div>
-          </div>
-
-          <!-- 绘图专属池超时卡片 -->
-          <div style="background:var(--color-paper);border:1px solid #fbcfe8;border-radius:var(--radius-panel);padding:18px;box-shadow:0 1px 3px rgba(236,72,153,0.06);">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-              <span style="font-weight:700;font-size:14px;color:#be185d;display:flex;align-items:center;gap:6px;">
-                <i class="fas fa-palette"></i> 绘图专属池
-              </span>
-              <span style="font-size:11px;background:#fce7f3;color:#db2777;padding:2px 8px;border-radius:999px;font-weight:600;">AI生图</span>
-            </div>
-            <p style="font-size:12px;color:var(--color-muted);margin:0 0 12px 0;line-height:1.5;">
-              针对 <code>drawing/auto</code> 或生图接口生效。
-            </p>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <input type="number" id="timeout-drawing" class="form-input" min="5" max="600" value="${poolTimeouts.drawingTimeout}" style="width:110px;font-size:14px;font-weight:600;padding:6px 10px;border-radius:6px;border:1px solid #f472b6;">
-              <span style="font-size:13px;color:var(--color-text);font-weight:500;">秒 (s)</span>
-            </div>
-            <!-- 关闭思考模式开关 -->
-            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #fbcfe8;display:flex;align-items:center;justify-content:space-between;">
-              <div>
-                <span style="font-size:12px;font-weight:600;color:var(--color-text);display:flex;align-items:center;gap:4px;">
-                  <i class="fas fa-brain" style="font-size:11px;color:#db2777;"></i> 关闭思考模式 (Thinking)
-                </span>
-                <span style="font-size:10.5px;color:var(--color-muted);display:block;margin-top:2px;">专注生成图像，去除多余文字思考</span>
-              </div>
-              <label class="tg">
-                <input type="checkbox" id="thinking-drawing" ${poolTimeouts.disableThinkingDrawing ? 'checked' : ''} aria-label="绘图池关闭思考模式">
-                <span class="sl"></span>
-              </label>
-            </div>
-            <div style="font-size:11px;color:#db2777;margin-top:8px;line-height:1.5;">
-              💡 保持默认 60 秒。由于 AI 画图耗时较长，建议保持 60 秒或更大数值。
-            </div>
-          </div>
-        </div>
-
-        <!-- 小白能看懂的规则与使用指南卡片 -->
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:var(--radius-panel);padding:16px 20px;">
-          <h4 style="margin:0 0 8px 0;font-size:13px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:6px;">
-            <i class="fas fa-info-circle" style="color:#3b82f6;"></i> 超时与无缝自动切换机制说明指南
-          </h4>
-          <ul style="margin:0;padding-left:18px;font-size:12px;color:#475569;line-height:1.8;">
-            <li><strong>故障自愈与自动切换</strong>：客户端请求时，若当前模型响应卡死达到上述设定的超时时间，网关会自动判定该模型异常，并在同一连接中<strong>立刻无缝切换至下一个备用模型</strong>继续作答。</li>
-            <li><strong>如何解决 OpenClaw 报错 Cause: timeout</strong>：OpenClaw 客户端自身只等待 60~120 秒。如果网关单次等待 60 秒，客户端可能提前失去耐心报错。<strong>手动将 OpenClaw 专属池超时改为 20~25 秒</strong>，可以让网关在机器人断开前完成多次重试切换，彻底避免报错。</li>
-            <li><strong>保存即生效与极度省流</strong>：点击【💾 保存超时设置】后仅写入 1 次 Cloudflare KV 并即时生效，平时调用 0 次 KV 消耗，0 性能延迟。</li>
-            <li><strong>报错日志保障</strong>：无论下方的“调试模式”是否开启，<strong>所有超时与报错日志均 100% 强制存入日志面板</strong>，方便您随时排查定位。</li>
-          </ul>
-        </div>
-      </section>
+      ${renderAdminTierPools(tierData)}
 
       <section id="providers" class="workspace-section" aria-labelledby="providers-title">
         <div class="section-heading section-heading--admin">
@@ -1439,11 +990,20 @@ ${H('管理')}
                       statusBadge = '<span class="bd bd-off" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-minus-circle"></i> 已禁用</span>';
                     }
 
-                    const openclawBadge = m.openclawTested
-                      ? (m.openclawCompatible
-                          ? `<span class="openclaw-badge openclaw-badge--ok" title="${escapePageHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)')}"><i class="fas fa-robot"></i> OpenClaw 适合</span>`
-                          : `<span class="openclaw-badge openclaw-badge--no" title="${escapePageHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)')}"><i class="fas fa-ban"></i> OpenClaw 不适合</span>`)
-                      : '';
+                    let openclawBadge = '';
+                    if (m.openclawVerified) {
+                      if (m.openclawCustomTagged) {
+                        openclawBadge = `<span class="openclaw-badge openclaw-badge--manual openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="true" title="已获 OpenClaw 认证（用户手动设置）。点击可取消"><i class="fas fa-robot"></i> OpenClaw 认证 (手动)</span>`;
+                      } else {
+                        openclawBadge = `<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="true" title="已通过专属计算器实机测试！点击可切换修改"><i class="fas fa-robot"></i> OpenClaw 认证</span>`;
+                      }
+                    } else if (m.openclawTested && !m.openclawCompatible) {
+                      openclawBadge = `<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="false" title="专属测试未通过：${escapePageHtml(m.openclawReason || '不兼容工具调用')}。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过 (${escapePageHtml(m.openclawReason || '不兼容')})</span>`;
+                    } else {
+                      openclawBadge = `<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="false" title="未通过 OpenClaw 认证。点击可手动赋予认证标签"><i class="fas fa-tag"></i> 未认证</span>`;
+                    }
+
+                    const openclawTestBtn = `<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>`;
 
                     const catSelect = `<select class="select-xs" style="padding:2px 6px;font-size:11px;border-radius:4px;" onchange="updateModelCatBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="修改智能分类">` +
                       `<option value="文本" ${mCat === '文本' ? 'selected' : ''}>文本</option>` +
@@ -1451,11 +1011,6 @@ ${H('管理')}
                       `<option value="多模态" ${mCat === '多模态' ? 'selected' : ''}>多模态</option>` +
                       `<option value="其他" ${mCat === '其他' ? 'selected' : ''}>其他</option>` +
                       `</select>`;
-
-                    const fullModelKey = `${p.id}/${m.id}`;
-                    const mProbe = probeStats[fullModelKey];
-                    const latText = mProbe && mProbe.success ? `${mProbe.latency} ms` : '-- ms';
-                    const latClass = mProbe && mProbe.success ? 'latency-chip lat-ok' : 'latency-chip';
 
                     return `<div class="model-single-row" data-idx="${mi}">` +
                       `<div class="model-row-line-1">` +
@@ -1469,8 +1024,9 @@ ${H('管理')}
                         catSelect +
                         statusBadge +
                         openclawBadge +
-                        `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="${latClass}" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">${latText}</span></span>` +
+                        `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>` +
                         unblockBtn +
+                        openclawTestBtn +
                         `<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-idx="${mi}" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>` +
                       `</div>` +
                     `</div>`;
@@ -1538,99 +1094,22 @@ ${H('管理')}
         <div class="section-heading section-heading--admin">
           <div><h2 id="logs-title">网关请求日志</h2><p>记录客户端 API 请求，包含耗时、HTTP 状态、调用详情与失败原因。</p></div>
           <div class="fc" style="gap:12px;flex-wrap:wrap;align-items:center;">
+            <div id="log-buffer-config-box" class="fc" style="gap:8px;align-items:center;background:var(--color-paper-2);padding:4px 10px;border-radius:var(--radius-control);border:1px solid var(--color-rule);display:${isDebug ? 'none' : 'flex'};">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);" title="队列达到该条数后立即批量写入 KV">缓存阈值:</span>
+              <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" style="width:58px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="最大缓冲条数" onchange="saveLogBufferConfig()">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);">条</span>
+              <span style="font-size:var(--text-xs);color:var(--color-muted);margin-left:4px;" title="定时器强制落盘间隔">间隔:</span>
+              <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" style="width:52px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="定时器强制落盘间隔（秒）" onchange="saveLogBufferConfig()">
+              <span style="font-size:var(--text-xs);color:var(--color-muted);">秒</span>
+            </div>
+            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条日志实时写入 KV 并前端实时刷新；关闭后启用内存缓存批量落盘策略">
+              <span style="font-size:var(--text-xs);font-weight:600;">调试模式 (实时落盘)</span>
+              <span class="tg"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)"><span class="sl"></span></span>
+            </label>
             <button class="btn btn-s" onclick="fetchLogs()"><i class="fas fa-sync" aria-hidden="true"></i>刷新日志</button>
             <button class="btn btn-d" onclick="clearAllLogs()"><i class="fas fa-trash" aria-hidden="true"></i>清空日志</button>
           </div>
         </div>
-
-        <!-- KV 写入保护与多档位日志缓冲设置控制卡片 (精致紧凑版) -->
-        <div style="background:var(--color-paper);border:1px solid var(--color-rule);border-radius:var(--radius-panel);padding:14px 16px;margin-bottom:16px;box-shadow:0 1px 2px rgba(0,0,0,0.03);">
-          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--color-rule);">
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span style="display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;background:#eff6ff;color:#2563eb;font-size:12px;">
-                <i class="fas fa-shield-alt"></i>
-              </span>
-              <div>
-                <span style="font-size:13px;font-weight:700;color:var(--color-ink);">Cloudflare KV 写入防超标与日志缓冲控制</span>
-                <span style="display:inline-block;margin-left:6px;font-size:11.5px;color:var(--color-muted);">(每日 1,000 次写入配额保护 · 顺风车打包节约 95%+)</span>
-              </div>
-            </div>
-            <div style="display:flex;align-items:center;gap:8px;">
-              <label class="switch-label" style="background:var(--color-paper-2);padding:4px 8px;border-radius:var(--radius-control);border:1px solid var(--color-rule);cursor:pointer;" title="开启后记录调试日志；关闭后仅保存异常报错">
-                <span style="font-size:11.5px;font-weight:600;color:var(--color-ink-2);">调试日志总开关</span>
-                <span class="tg" style="transform:scale(0.85);margin-left:4px;"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="updateLogConfigUI()"><span class="sl"></span></span>
-              </label>
-              <button class="btn btn-p btn-xs" style="padding:4px 10px;font-size:11.5px;height:28px;" onclick="saveLogConfigBtn()"><i class="fas fa-save"></i> 保存日志设置</button>
-            </div>
-          </div>
-
-          <!-- 三大模式紧凑卡片排版 -->
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:10px;margin-bottom:10px;">
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-eco">
-              <div style="display:flex;align-items:center;justify-content:space-between;">
-                <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
-                  <input type="radio" name="logSaveMode" value="eco" ${logConfig.logSaveMode === 'eco' || !logConfig.logSaveMode ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
-                  <span>🚀 极速省流模式</span>
-                </div>
-                <span style="font-size:10.5px;background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:4px;font-weight:600;">推荐</span>
-              </div>
-              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
-                • <strong>0 额外 KV 写入</strong>：正常成功请求仅在内存中流转，打开后台时直接直读展示；<br>
-                • <strong>错误 100% 直存</strong>：一旦发生 4xx/5xx/超时等报错，立即打包落盘，绝不漏掉排查线索。
-              </div>
-            </label>
-
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'batch' ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-batch">
-              <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
-                <input type="radio" name="logSaveMode" value="batch" ${logConfig.logSaveMode === 'batch' ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
-                <span>📦 批量顺风车落盘模式</span>
-              </div>
-              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
-                • <strong>按量打包</strong>：每积攒满下方设定的条数，或达到最大等待秒数后，才打包写入 1 次 KV；<br>
-                • <strong>适合轻度调试</strong>：既能完整持久化成功日志，又能节省 90%+ 写入额度。
-              </div>
-            </label>
-
-            <label style="border:1.5px solid ${logConfig.logSaveMode === 'realtime' ? '#2563eb;background:#f8faff;' : 'var(--color-rule);background:var(--color-paper-2);'}border-radius:var(--radius-control);padding:10px 12px;cursor:pointer;display:flex;flex-direction:column;gap:4px;transition:all 0.15s ease;" id="mode-card-realtime">
-              <div style="display:flex;align-items:center;gap:6px;font-weight:700;font-size:12.5px;color:#1e40af;">
-                <input type="radio" name="logSaveMode" value="realtime" ${logConfig.logSaveMode === 'realtime' ? 'checked' : ''} onchange="onLogModeChange(this.value)" style="margin:0;cursor:pointer;">
-                <span>🔥 实时全量落盘模式</span>
-              </div>
-              <div style="font-size:11px;color:#475569;line-height:1.45;padding-left:18px;">
-                • <strong>每条请求必写 KV</strong>：100 次请求 = 100 次 KV 写入；<br>
-                • <strong>警告</strong>：仅适合高强度短期联调（5~10分钟），调试完毕后请务必切回省流模式。
-              </div>
-            </label>
-          </div>
-
-          <!-- 批量模式下的自定义阈值调节面板 (精简条状) -->
-          <div id="batch-params-panel" style="${logConfig.logSaveMode === 'batch' ? '' : 'display:none;'}background:var(--color-paper-2);border:1px dashed #93c5fd;border-radius:var(--radius-control);padding:8px 14px;margin-bottom:10px;">
-            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;justify-content:space-between;">
-              <div style="font-size:11.5px;font-weight:700;color:var(--color-ink);display:flex;align-items:center;gap:5px;">
-                <i class="fas fa-sliders-h" style="color:#2563eb;"></i> 批量缓冲触发阈值设置:
-              </div>
-              <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <label for="log-flush-threshold" style="font-size:11.5px;color:var(--color-ink-2);">满多少条打包写入:</label>
-                  <input type="number" id="log-flush-threshold" value="${logConfig.flushThreshold || 15}" min="5" max="50" step="1" style="width:58px;height:24px;padding:2px 6px;font-size:11.5px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
-                  <span style="font-size:11px;color:var(--color-muted);">条 (5~50)</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <label for="log-flush-interval" style="font-size:11.5px;color:var(--color-ink-2);">最长等待刷新间隔:</label>
-                  <input type="number" id="log-flush-interval" value="${logConfig.flushIntervalSec || 60}" min="10" max="300" step="5" style="width:58px;height:24px;padding:2px 6px;font-size:11.5px;font-weight:700;border:1px solid var(--color-rule);border-radius:4px;background:#fff;text-align:center;">
-                  <span style="font-size:11px;color:var(--color-muted);">秒 (10~300)</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 顺风车机制小白说明条 (精简平整) -->
-          <div style="font-size:11px;color:#0369a1;background:#f0f9ff;border:1px solid #bae6fd;padding:6px 10px;border-radius:4px;display:flex;align-items:center;gap:6px;line-height:1.4;">
-            <i class="fas fa-magic" style="font-size:10.5px;"></i>
-            <span><strong>顺风车收割机制</strong>：当您在任何时候打开或刷新本日志面板，系统会自动收割当前内存中所有未存日志并打包展示，<strong>即使 Workers 闲置释放内存，您也绝不会丢失任何刚刚发生的调用与报错记录！</strong></span>
-          </div>
-        </div>
-
         <div id="logs-panel" class="logs-container">
           <!-- 日志表格组件 -->
         </div>
@@ -1645,14 +1124,12 @@ ${H('管理')}
 
 <script id="init-providers-json" type="application/json">${JSON.stringify(providers).replace(/</g, '\\u003c')}</script>
 <script id="init-proxykeys-json" type="application/json">${JSON.stringify(proxyKeys).replace(/</g, '\\u003c')}</script>
-<script id="init-probestats-json" type="application/json">${JSON.stringify(probeStats).replace(/</g, '\\u003c')}</script>
 
 <script>${SHARED_JS}
 // 1. 内存临时状态（生命周期随 Worker 实例 / 页面会话有效，所有表单修改暂存于此，不单项操作 KV）
 // 注意：Cloudflare Workers 运行在无状态多实例 Serverless Container 环境，内存变量仅在单实例生命周期内生效。
 var draftProviders = JSON.parse(document.getElementById('init-providers-json').textContent || '[]');
 var draftProxyKeys = JSON.parse(document.getElementById('init-proxykeys-json').textContent || '[]');
-var draftProbeStats = JSON.parse(document.getElementById('init-probestats-json').textContent || '{}');
 var isDirty = false;
 
 function markDirty(dirty) {
@@ -1803,6 +1280,19 @@ function testMdlBtn(btn) {
     mid = inp.value.trim();
   }
   testMdl(pid, mid, idx, btn);
+}
+
+function toggleOpenclawTagBtn(badgeEl) {
+  var pid = badgeEl.getAttribute('data-pid');
+  var mid = badgeEl.getAttribute('data-mid');
+  var isVerified = badgeEl.getAttribute('data-verified') === 'true';
+  toggleOpenclawTag(pid, mid, isVerified, badgeEl);
+}
+
+function testOpenclawBtn(btn) {
+  var pid = btn.getAttribute('data-pid');
+  var mid = btn.getAttribute('data-mid');
+  testOpenclawModel(pid, mid, btn);
 }
 
 function unblockModelBtn(btn) {
@@ -2496,6 +1986,8 @@ function addMdl(id) {
     '</select>';
 
   const statusBadge = '<span class="bd bd-on" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-check-circle"></i> 正常</span>';
+  const openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="false" title="未通过 OpenClaw 认证。点击可手动赋予认证标签"><i class="fas fa-tag"></i> 未认证</span>';
+  const openclawTestBtn = '<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>';
 
   const d = document.createElement('div')
   d.className = 'model-single-row'
@@ -2510,7 +2002,9 @@ function addMdl(id) {
   '<div class="model-row-line-2">' +
     catSelect +
     statusBadge +
+    openclawBadge +
     '<span id="lat-' + escapeHtml(id) + '-' + cnt + '" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>' +
+    openclawTestBtn +
     '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-idx="' + cnt + '" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>' +
   '</div>';
   c.appendChild(d)
@@ -2567,11 +2061,11 @@ async function testMdl(id, mid, idx, btn) {
 
       // 动态更新 OpenClaw 适合度标注
       if (d.data.openclaw && d.data.openclaw.tested) {
-        var isCompat = d.data.openclaw.compatible;
-        var reason = d.data.openclaw.reason || (isCompat ? '适合 OpenClaw (支持 Tool 与智能体交互)' : '不适合 OpenClaw (不支持 Tool 或非代码模型)');
-        var badgeHtml = isCompat
-          ? '<span class="openclaw-badge openclaw-badge--ok" title="' + escapeHtml(reason) + '"><i class="fas fa-robot"></i> OpenClaw 适合</span>'
-          : '<span class="openclaw-badge openclaw-badge--no" title="' + escapeHtml(reason) + '"><i class="fas fa-ban"></i> OpenClaw 不适合</span>';
+        var isVerified = !!d.data.openclaw.verified || !!d.data.openclaw.compatible;
+        var reason = d.data.openclaw.reason || (isVerified ? '适合 OpenClaw (支持 Tool 与智能体交互)' : '不适合 OpenClaw (不支持 Tool 或非代码模型)');
+        var badgeHtml = isVerified
+          ? '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="true" title="' + escapeHtml(reason) + '。点击可切换修改"><i class="fas fa-robot"></i> OpenClaw 认证</span>'
+          : '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="false" title="' + escapeHtml(reason) + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过 (' + (reason.length > 8 ? reason.slice(0, 8) + '...' : reason) + ')</span>';
 
         if (row) {
           var existingBadge = row.querySelector('.openclaw-badge');
@@ -2650,6 +2144,136 @@ async function testAllModelsInProviderBtn(btn) {
   } finally {
     btn.disabled = false;
     btn.style.opacity = '1';
+  }
+}
+
+async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
+  if (!pId || !mId) return;
+  var newVerified = !currentVerified;
+  var origHtml = badgeEl ? badgeEl.innerHTML : '';
+  if (badgeEl) {
+    badgeEl.style.opacity = '0.5';
+    badgeEl.style.pointerEvents = 'none';
+  }
+  try {
+    var res = await fetch('/admin/api/providers/' + encodeURIComponent(pId) + '/models/' + encodeURIComponent(mId), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ openclawVerified: newVerified })
+    });
+    var data = await res.json();
+    if (data.success) {
+      if (badgeEl) {
+        badgeEl.setAttribute('data-verified', String(newVerified));
+        if (newVerified) {
+          badgeEl.className = 'openclaw-badge openclaw-badge--manual openclaw-toggle-btn';
+          badgeEl.setAttribute('title', '已获 OpenClaw 认证（用户手动设置）。点击可取消');
+          badgeEl.innerHTML = '<i class="fas fa-robot"></i> OpenClaw 认证 (手动)';
+        } else {
+          badgeEl.className = 'openclaw-badge openclaw-badge--no openclaw-toggle-btn';
+          badgeEl.setAttribute('title', '未通过 OpenClaw 认证。点击可手动赋予认证标签');
+          badgeEl.innerHTML = '<i class="fas fa-tag"></i> 未认证';
+        }
+      }
+      // 同步内存 draftProviders
+      if (typeof draftProviders !== 'undefined' && Array.isArray(draftProviders)) {
+        var pObj = draftProviders.find(function(item) { return item.id === pId; });
+        if (pObj && pObj.models) {
+          var mObj = pObj.models.find(function(m) { return m.id === mId; });
+          if (mObj) {
+            mObj.openclawVerified = newVerified;
+            mObj.openclawCustomTagged = true;
+            mObj.openclawVerifiedAt = newVerified ? Date.now() : undefined;
+            if (newVerified) {
+              mObj.openclawTested = true;
+              mObj.openclawCompatible = true;
+              mObj.openclawReason = '用户手动自定义认证标签';
+            }
+          }
+        }
+      }
+      toast('模型 ' + mId + ' OpenClaw 标签已' + (newVerified ? '开启手动认证' : '取消认证'), 'success');
+    } else {
+      toast('修改 OpenClaw 标签失败: ' + (data.message || '未知错误'), 'error');
+    }
+  } catch (err) {
+    toast('网络请求失败', 'error');
+  } finally {
+    if (badgeEl) {
+      badgeEl.style.opacity = '1';
+      badgeEl.style.pointerEvents = 'auto';
+    }
+  }
+}
+
+async function testOpenclawModel(pId, mId, btn) {
+  if (!pId || !mId) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 实测中';
+  }
+  toast('正在对 ' + mId + ' 发起 OpenClaw 专属 calculate_sum 工具调用实测...', 'info');
+  try {
+    var res = await fetch('/admin/api/providers/' + encodeURIComponent(pId) + '/test-openclaw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelId: mId })
+    });
+    var data = await res.json();
+    var metric = data && data.data ? data.data : null;
+    var row = btn ? btn.closest('.model-single-row') : null;
+    var badgeEl = row ? row.querySelector('.openclaw-badge') : null;
+
+    if (data.success && metric) {
+      var isVerified = !!metric.openclawVerified;
+      var reason = metric.openclawReason || (isVerified ? '专属测试通过（支持实机工具调用）' : (metric.error || '不适合作为智能体模型'));
+
+      if (badgeEl) {
+        badgeEl.setAttribute('data-verified', String(isVerified));
+        if (isVerified) {
+          badgeEl.className = 'openclaw-badge openclaw-badge--ok openclaw-toggle-btn';
+          badgeEl.setAttribute('title', '已通过专属计算器实机测试！点击可切换修改');
+          badgeEl.innerHTML = '<i class="fas fa-robot"></i> OpenClaw 认证';
+        } else {
+          badgeEl.className = 'openclaw-badge openclaw-badge--no openclaw-toggle-btn';
+          badgeEl.setAttribute('title', '专属测试未通过：' + reason + '。点击可手动赋予认证');
+          badgeEl.innerHTML = '<i class="fas fa-ban"></i> 未通过 (' + (reason.length > 8 ? reason.slice(0, 8) + '...' : reason) + ')';
+        }
+      }
+
+      // 同步内存 draftProviders
+      if (typeof draftProviders !== 'undefined' && Array.isArray(draftProviders)) {
+        var pObj = draftProviders.find(function(item) { return item.id === pId; });
+        if (pObj && pObj.models) {
+          var mObj = pObj.models.find(function(m) { return m.id === mId; });
+          if (mObj) {
+            mObj.openclawVerified = isVerified;
+            mObj.openclawCustomTagged = false;
+            mObj.openclawTested = true;
+            mObj.openclawCompatible = isVerified;
+            mObj.openclawReason = reason;
+            mObj.openclawVerifiedAt = isVerified ? Date.now() : undefined;
+          }
+        }
+      }
+
+      if (isVerified) {
+        toast('🎉 ' + mId + ' 专属工具调用测试通过，已获得 OpenClaw 认证标签！', 'success');
+      } else {
+        toast('⚠️ ' + mId + ' 未通过专属测试: ' + reason, 'warning');
+      }
+    } else {
+      toast('专属测试失败: ' + ((data && data.message) || '未知错误'), 'error');
+    }
+  } catch (err) {
+    toast('专属测试网络异常', 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.style.opacity = '1';
+      btn.innerHTML = '<i class="fas fa-vial"></i> 专属测试';
+    }
   }
 }
 
@@ -2904,11 +2528,6 @@ function renderProviderList() {
         '<option value="其他" ' + (mCat === '其他' ? 'selected' : '') + '>其他</option>' +
         '</select>';
 
-      var fullModelKey = pId + '/' + (m.id || '');
-      var mProbe = (typeof draftProbeStats === 'object' && draftProbeStats) ? draftProbeStats[fullModelKey] : null;
-      var latText = mProbe && mProbe.success ? (mProbe.latency + ' ms') : '-- ms';
-      var latClass = mProbe && mProbe.success ? 'latency-chip lat-ok' : 'latency-chip';
-
       return '<div class="model-single-row" data-idx="' + mi + '">' +
         '<div class="model-row-line-1">' +
           '<input type="text" value="' + mId + '" class="model-id-input" id="mid-' + pId + '-' + mi + '" placeholder="模型 ID" ' + styleAttr + ' title="' + titleText + '">' +
@@ -2921,7 +2540,7 @@ function renderProviderList() {
           catSelect +
           statusBadge +
           openclawBadge +
-          '<span id="lat-' + pId + '-' + mi + '" class="' + latClass + '" title="海选实测通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">' + latText + '</span></span>' +
+          '<span id="lat-' + pId + '-' + mi + '" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>' +
           unblockBtn +
           '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-idx="' + mi + '" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>' +
         '</div>' +
@@ -3048,79 +2667,8 @@ adminNavLinks.forEach(function (link) {
 window.addEventListener('hashchange', function () { setActiveAdminNav(location.hash) })
 setActiveAdminNav(location.hash)
 
-// 网关日志及调试模式前端逻辑 (支持三大模式切换、自定义阈值与顺风车收割)
-
-function onLogModeChange(mode) {
-  var batchPanel = document.getElementById('batch-params-panel');
-  if (batchPanel) {
-    batchPanel.style.display = (mode === 'batch') ? '' : 'none';
-  }
-  ['eco', 'batch', 'realtime'].forEach(function(m) {
-    var card = document.getElementById('mode-card-' + m);
-    if (card) {
-      if (m === mode) {
-        card.style.borderColor = '#2563eb';
-        card.style.background = '#f8faff';
-      } else {
-        card.style.borderColor = 'var(--color-rule)';
-        card.style.background = 'var(--color-paper-2)';
-      }
-    }
-  });
-}
-
-function updateLogConfigUI() {
-  // 保持响应
-}
-
-async function saveLogConfigBtn() {
-  var dbgToggle = document.getElementById('debug-mode-toggle');
-  var isDbg = dbgToggle ? dbgToggle.checked : false;
-
-  var selectedMode = 'eco';
-  var modeRadios = document.querySelectorAll('input[name="logSaveMode"]');
-  modeRadios.forEach(function(r) {
-    if (r.checked) selectedMode = r.value;
-  });
-
-  var thInput = document.getElementById('log-flush-threshold');
-  var intInput = document.getElementById('log-flush-interval');
-
-  var flushThreshold = thInput ? parseInt(thInput.value, 10) : 15;
-  var flushIntervalSec = intInput ? parseInt(intInput.value, 10) : 60;
-
-  if (isNaN(flushThreshold) || flushThreshold < 5 || flushThreshold > 50) {
-    toast('批量缓冲条数请输入 5 ~ 50 之间的整数', 'error');
-    return;
-  }
-  if (isNaN(flushIntervalSec) || flushIntervalSec < 10 || flushIntervalSec > 300) {
-    toast('最长等待刷新间隔请输入 10 ~ 300 之间的秒数', 'error');
-    return;
-  }
-
-  toast('正在保存日志缓冲设置至 KV...', 'info');
-  try {
-    var res = await fetch('/admin/api/debug-mode', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        debugMode: isDbg,
-        logSaveMode: selectedMode,
-        flushThreshold: flushThreshold,
-        flushIntervalSec: flushIntervalSec,
-      })
-    });
-    var json = await res.json();
-    if (json.success) {
-      toast(json.message || '日志缓冲配置已成功保存至 KV！', 'success');
-      fetchLogs();
-    } else {
-      toast(json.message || '保存日志配置失败', 'error');
-    }
-  } catch (err) {
-    toast('保存日志配置请求异常', 'error');
-  }
-}
+// 网关日志及调试模式前端逻辑
+var debugAutoRefreshTimer = null;
 
 async function fetchLogs() {
   try {
@@ -3131,18 +2679,15 @@ async function fetchLogs() {
       var dbgToggle = document.getElementById('debug-mode-toggle');
       if (dbgToggle && typeof json.data.debugMode === 'boolean') {
         dbgToggle.checked = json.data.debugMode;
+        var cfgBox = document.getElementById('log-buffer-config-box');
+        if (cfgBox) cfgBox.style.display = json.data.debugMode ? 'none' : 'flex';
+        setupAutoRefresh(json.data.debugMode);
       }
       if (json.data.config) {
-        var cfg = json.data.config;
-        if (cfg.logSaveMode) {
-          var modeRadio = document.querySelector('input[name="logSaveMode"][value="' + cfg.logSaveMode + '"]');
-          if (modeRadio) modeRadio.checked = true;
-          onLogModeChange(cfg.logSaveMode);
-        }
-        var thInput = document.getElementById('log-flush-threshold');
-        if (thInput && cfg.flushThreshold) thInput.value = cfg.flushThreshold;
-        var intInput = document.getElementById('log-flush-interval');
-        if (intInput && cfg.flushIntervalSec) intInput.value = cfg.flushIntervalSec;
+        var cntInput = document.getElementById('log-cfg-max-count');
+        var intInput = document.getElementById('log-cfg-interval');
+        if (cntInput && json.data.config.bufferMaxCount) cntInput.value = json.data.config.bufferMaxCount;
+        if (intInput && json.data.config.flushIntervalSeconds) intInput.value = json.data.config.flushIntervalSeconds;
       }
     }
   } catch (err) {
@@ -3150,77 +2695,73 @@ async function fetchLogs() {
   }
 }
 
-async function saveTimeoutsBtn() {
-  var oInput = document.getElementById('timeout-openclaw');
-  var gInput = document.getElementById('timeout-general');
-  var dInput = document.getElementById('timeout-drawing');
-
-  // 获取三大池子各自独立的关闭思考开关状态
-  var oThink = document.getElementById('thinking-openclaw');
-  var gThink = document.getElementById('thinking-general');
-  var dThink = document.getElementById('thinking-drawing');
-
-  var oVal = oInput ? parseInt(oInput.value, 10) : 60;
-  var gVal = gInput ? parseInt(gInput.value, 10) : 60;
-  var dVal = dInput ? parseInt(dInput.value, 10) : 60;
-
-  if (isNaN(oVal) || oVal < 5 || oVal > 600) {
-    toast('OpenClaw 专属池超时请输入 5 ~ 600 秒之间的数字', 'error');
-    return;
+function setupAutoRefresh(enabled) {
+  if (debugAutoRefreshTimer) {
+    clearInterval(debugAutoRefreshTimer);
+    debugAutoRefreshTimer = null;
   }
-  if (isNaN(gVal) || gVal < 5 || gVal > 600) {
-    toast('第一梯队通用池超时请输入 5 ~ 600 秒之间的数字', 'error');
-    return;
-  }
-  if (isNaN(dVal) || dVal < 5 || dVal > 600) {
-    toast('绘图专属池超时请输入 5 ~ 600 秒之间的数字', 'error');
-    return;
-  }
-
-  toast('正在保存各梯队池配置（超时与思考模式）...', 'info');
-  try {
-    // 顺风车合包：将超时时间与三大池子关闭思考开关打包为 1 个请求，1 次性持久化至 KV
-    var res = await fetch('/admin/api/timeouts', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        openclawTimeout: oVal,
-        generalTimeout: gVal,
-        drawingTimeout: dVal,
-        disableThinkingOpenclaw: oThink ? oThink.checked : true,
-        disableThinkingTier1: gThink ? gThink.checked : false,
-        disableThinkingDrawing: dThink ? dThink.checked : false,
-      })
-    });
-    var json = await res.json();
-    if (json.success) {
-      toast('各梯队池配置（超时与思考模式）已成功保存并立即生效！', 'success');
-    } else {
-      toast(json.message || '保存梯队池配置失败', 'error');
-    }
-  } catch (err) {
-    toast('保存梯队池配置请求异常', 'error');
+  if (enabled) {
+    debugAutoRefreshTimer = setInterval(function() {
+      // 仅当用户在日志标签页且页面可见时才刷新，离开自动休眠，绝不浪费主线程
+      if (location.hash === '#logs' && document.visibilityState === 'visible') {
+        fetchLogs();
+      }
+    }, 4000);
   }
 }
 
 async function toggleDebugMode(checked) {
   try {
+    var cfgBox = document.getElementById('log-buffer-config-box');
+    if (cfgBox) cfgBox.style.display = checked ? 'none' : 'flex';
+    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
+    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+
     var res = await fetch('/admin/api/debug-mode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         debugMode: checked,
+        bufferMaxCount: cntVal,
+        flushIntervalSeconds: intVal,
       })
     });
     var json = await res.json();
     if (json.success) {
       toast(json.message, 'success');
+      setupAutoRefresh(checked);
       fetchLogs();
     } else {
       toast(json.message || '切换调试模式失败', 'error');
     }
   } catch (err) {
     toast('切换调试模式请求异常', 'error');
+  }
+}
+
+async function saveLogBufferConfig() {
+  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
+  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+  var dbgChecked = document.getElementById('debug-mode-toggle')?.checked || false;
+
+  try {
+    var res = await fetch('/admin/api/debug-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        debugMode: dbgChecked,
+        bufferMaxCount: cntVal,
+        flushIntervalSeconds: intVal,
+      })
+    });
+    var json = await res.json();
+    if (json.success) {
+      toast('日志缓存策略已保存（达到 ' + cntVal + ' 条或 ' + intVal + ' 秒定时清空落盘）', 'success');
+    } else {
+      toast(json.message || '保存缓存参数失败', 'error');
+    }
+  } catch (err) {
+    toast('保存缓存参数异常', 'error');
   }
 }
 
@@ -3445,7 +2986,8 @@ async function showImportModal(providerId) {
   var text = await pM('导入模型 ID 列表（支持换行、逗号或分号分隔，自动剔除重复项并自动分类）：');
   if (!text) return;
 
-  var lines = text.split(new RegExp('[\\\\n,;]+')).map(function(s) { return s.trim(); }).filter(Boolean);
+  // 按照换行符、回车符、逗号或分号切割文本，过滤前后空白与空行
+  var lines = text.split(/[\\r\\n,;]+/).map(function(s) { return s.trim(); }).filter(Boolean);
   if (!lines.length) return;
 
   p.models = p.models || [];
