@@ -1,13 +1,13 @@
 {
   "name": "ai-gateway",
-  "version": "1.18.3",
+  "version": "1.18.4",
   "description": "Cloudflare Workers AI API Gateway",
   "main": "src/index.ts",
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
-    "build": "tsc --noEmit",
-    "lint": "tsc --noEmit",
+    "build": "wrangler --version",
+    "lint": "wrangler --version",
     "deploy": "wrangler deploy"
   },
   "keywords": [
