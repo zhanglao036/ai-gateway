@@ -1233,9 +1233,26 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
   const allModels = await getAllAvailableModels(env)
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
-  // 1. 清理当前 OpenClaw 梯队中已下线、永久停用或被删除的模型
+  // 1. 清理当前 OpenClaw 梯队中已下线、已停用、被删除或被用户取消认证标签的模型
   const prevCount = storage.tierOpenclaw.length
-  storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => availableMap.has(m.fullId))
+  storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => {
+    // 基础防爆：检查提供商或模型是否已被停用/删除
+    if (!availableMap.has(m.fullId)) return false
+
+    // 获取该模型在提供商内的具体配置与探针状态
+    const item = availableMap.get(m.fullId)
+    const mConfig = item?.provider.models.find((x) => x.id === m.modelId)
+    const probeMetric = storage.probeStats[m.fullId]
+
+    // 判断逻辑 1：如果模型被手动禁用，直接踢出
+    if (mConfig && mConfig.enabled === false) return false
+
+    // 判断逻辑 2：如果用户手动取消了 OpenClaw 认证（openclawCustomTagged 且 openclawVerified 为 false），立即踢出
+    if (mConfig?.openclawCustomTagged && mConfig?.openclawVerified === false) return false
+    if (probeMetric?.openclawCustomTagged && probeMetric?.openclawVerified === false) return false
+
+    return true
+  })
   let hasChanged = storage.tierOpenclaw.length !== prevCount
   const needed = slotsConfig.tierOpenclawSlots - storage.tierOpenclaw.length
   if (needed <= 0) {

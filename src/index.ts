@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.1
- * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
+ * 版本号: v1.1.2
+ * 更新说明: 增加用户手动取消 OpenClaw 认证与关闭模型时的实时剔除与自动补位逻辑
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'

@@ -39,6 +39,7 @@ import {
   runSingleModelProbe,
   runOpenclawSpecificProbe,
   backfillTier1FromTier2,
+  backfillOpenclawTier,
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
@@ -948,21 +949,41 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
 
   await updateProvider(c.env, providerId, { models: updatedModels })
 
-  // 顺风车同步更新梯队数据中对应的 probeStats，一次性保存
-  if (typeof body.openclawVerified === 'boolean') {
-    const tierData = await getTierStorage(c.env)
-    if (tierData && tierData.probeStats) {
-      const fullId = `${providerId}/${modelId}`
-      if (tierData.probeStats[fullId]) {
+  // 顺风车同步更新梯队数据中对应的 probeStats，并联动清理与补位 OpenClaw 专属池
+  const tierData = await getTierStorage(c.env)
+  if (tierData) {
+    const fullId = `${providerId}/${modelId}`
+
+    // 逻辑 1：更新探针统计与自定义认证标记
+    if (typeof body.openclawVerified === 'boolean') {
+      if (tierData.probeStats && tierData.probeStats[fullId]) {
         tierData.probeStats[fullId].openclawVerified = body.openclawVerified
         tierData.probeStats[fullId].openclawCustomTagged = true
         tierData.probeStats[fullId].openclawVerifiedAt = body.openclawVerified ? Date.now() : undefined
         if (body.openclawVerified) {
           tierData.probeStats[fullId].openclawCompatible = true
           tierData.probeStats[fullId].openclawReason = '用户手动自定义认证标签'
+        } else {
+          tierData.probeStats[fullId].openclawCompatible = false
+          tierData.probeStats[fullId].openclawReason = '用户手动取消认证标签'
         }
+      }
+    }
+
+    // 逻辑 2：当用户取消认证 (openclawVerified === false) 或关闭该模型 (enabled === false) 时，立刻从 OpenClaw 专属池剔除
+    const shouldRemoveFromOpenclaw = body.openclawVerified === false || body.enabled === false
+    if (shouldRemoveFromOpenclaw && tierData.tierOpenclaw) {
+      const initLen = tierData.tierOpenclaw.length
+      tierData.tierOpenclaw = tierData.tierOpenclaw.filter((m) => m.fullId !== fullId)
+
+      // 如果确实触发了剔除动作，自动调用补位逻辑拉入新的健康模型，一次性写入 KV 保存
+      if (tierData.tierOpenclaw.length !== initLen) {
+        await backfillOpenclawTier(c.env, tierData)
+      } else {
         await saveTierStorage(c.env, tierData)
       }
+    } else {
+      await saveTierStorage(c.env, tierData)
     }
   }
 
