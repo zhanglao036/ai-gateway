@@ -2646,23 +2646,38 @@ function renderProviderList() {
         statusBadge = '<span class="bd bd-off" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-minus-circle"></i> 已禁用</span>';
       }
 
+      // 关键逻辑 1：判断模型是否被用户手动设置了自定义标签
       var isCustomTagged = !!m.openclawCustomTagged;
-      var isVerified = !!m.openclawVerified || !!m.openclawCompatible;
+
+      // 关键逻辑 2：兼顾模型配置本身与后端探针实测表 (probeStats)，实现数据双向联动对齐
+      var fullId = pId + '/' + mId;
+      var probeMetric = (typeof draftTierStorage !== 'undefined' && draftTierStorage && draftTierStorage.probeStats) ? draftTierStorage.probeStats[fullId] : null;
+
+      // 判断规则：优先使用模型自身的认证或兼容标记，如无则回退使用探针实测表里的认证状态
+      var isVerified = !!m.openclawVerified || !!m.openclawCompatible || (probeMetric && (!!probeMetric.openclawVerified || !!probeMetric.openclawCompatible));
+      var isTested = !!m.openclawTested || (probeMetric && !!probeMetric.openclawTested);
+      var reasonText = m.openclawReason || (probeMetric && probeMetric.openclawReason) || '';
+
       var openclawBadge = '';
 
+      // 分支 1：如果是管理员手动干预过的模型，渲染“手动认证”或“手动取消”标签
       if (isCustomTagged) {
-        if (isVerified) {
+        if (!!m.openclawVerified) {
           openclawBadge = '<span class="openclaw-badge openclaw-badge--manual openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="已获 OpenClaw 认证（用户手动设置）。点击可取消"><i class="fas fa-robot"></i> OpenClaw 认证 (手动)</span>';
         } else {
           openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="已被管理员手动取消认证，自动探针将不再强行恢复此项。点击可恢复认证"><i class="fas fa-ban"></i> 手动取消</span>';
         }
-      } else if (m.openclawTested) {
+      }
+      // 分支 2：如果模型已执行过测试（包括自动海选探针测试或单模型测试），根据测试结果渲染
+      else if (isTested) {
         if (isVerified) {
-          openclawBadge = '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="' + escapeHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)') + '。点击可手动取消认证"><i class="fas fa-robot"></i> OpenClaw 认证</span>';
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="' + escapeHtml(reasonText || '适合 OpenClaw (支持 Tool 与智能体交互)') + '。点击可手动取消认证"><i class="fas fa-robot"></i> OpenClaw 认证</span>';
         } else {
-          openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="' + escapeHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)') + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过</span>';
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="' + escapeHtml(reasonText || '不适合 OpenClaw (不支持 Tool 或非代码模型)') + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过</span>';
         }
-      } else {
+      }
+      // 分支 3：未测试且未手动干预过，渲染“未认证”标签
+      else {
         openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="暂未测试。点击可手动赋予 OpenClaw 认证"><i class="fas fa-tag"></i> 未认证</span>';
       }
 

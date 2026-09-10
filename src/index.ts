@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.3
- * 更新说明: 修复带斜杠模型 ID 无法更新状态的路由 BUG，优化前端卡片实时刷新与 OpenClaw 自愈补位
+ * 版本号: v1.1.4
+ * 更新说明: 同步模型列表与探针实测表数据，实现 OpenClaw 认证卡片 100% 联动显示
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
