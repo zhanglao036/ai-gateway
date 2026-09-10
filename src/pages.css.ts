@@ -1195,6 +1195,109 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
   color: var(--color-muted);
 }
 
+/* 日志落盘与调试控制卡片美化 */
+.log-control-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--color-paper);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+}
+
+.log-control-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.log-control-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-xs);
+}
+
+.log-control-item label {
+  font-weight: 600;
+  color: var(--color-ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.log-input-badge {
+  display: inline-flex;
+  align-items: center;
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: 6px;
+  padding: 2px 8px;
+  transition: all 0.2s ease;
+}
+
+.log-input-badge:focus-within {
+  border-color: var(--color-focus);
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.15);
+  background: var(--color-paper);
+}
+
+.log-input-badge input {
+  width: 52px;
+  border: none;
+  background: transparent;
+  padding: 2px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+  text-align: center;
+  outline: none;
+}
+
+.log-input-badge span {
+  font-size: 11px;
+  color: var(--color-muted);
+  margin-left: 4px;
+}
+
+.log-control-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--color-rule);
+}
+
+.log-debug-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: 8px;
+  padding: 6px 12px;
+  transition: all 0.2s ease;
+}
+
+.log-debug-box:hover {
+  border-color: #cbd5e1;
+}
+
+.log-debug-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-ink-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 移动端与桌面端体验细节微调 */
 @media (max-width: 48rem) {
   .admin-topbar nav a {

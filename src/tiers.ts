@@ -1442,17 +1442,24 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
  * 确保梯队数据就绪（初始化/校验）
  * 平时纯读取与元数据校验，绝不进行耗时的外部网络 HTTP 探测，保障毫秒级瞬时响应。
  */
+/**
+ * 确保梯队数据就绪与自愈校验（纯内存高速比对，顺风车单次写入 KV）
+ * 1. 自动剔除已删除/已禁用的模型
+ * 2. 自动检查第一梯队、OpenClaw 专属池、绘图池的空缺席位，并从待命模型中智能补齐
+ * 3. 严格控制 KV 写入：仅在数据有变化时一次性写入 1 次 KV，零额外消耗
+ */
 export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   let existing = await getTierStorage(env)
   if (existing && Array.isArray(existing.tier1)) {
-    // 同步并清理系统中的全部可用/已删除/已停用模型，防止新模型或被删模型导致无法补位
+    // 获取当前系统中所有真实启用且健康的可用模型
     const allModels = await getAllAvailableModels(env)
     const availableSet = new Set(allModels.map((item) => item.fullId))
+    const slotsConfig = getTierSlotsConfig(existing)
 
     let changed = false
     const now = Date.now()
 
-    // 1. 清除已不在可用列表中的模型（比如被删除、禁用、永久失效的模型）
+    // 1. 清除已不在可用列表中的模型（比如被用户禁用、删除或封禁的模型）
     const prevTier1Length = existing.tier1.length
     existing.tier1 = existing.tier1.filter((m) => availableSet.has(m.fullId))
     if (existing.tier1.length !== prevTier1Length) {
@@ -1465,10 +1472,19 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       changed = true
     }
 
+    const prevOpenclawLength = (existing.tierOpenclaw || []).length
     existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
-    existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
+    if (existing.tierOpenclaw.length !== prevOpenclawLength) {
+      changed = true
+    }
 
-    // 2. 将新增的可用模型实时同步加入第二梯队待命
+    const prevDrawingLength = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId)).length
+    existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
+    if (existing.tierDrawing.length !== prevDrawingLength) {
+      changed = true
+    }
+
+    // 2. 将新增的可用模型实时同步加入第二梯队待命队列
     for (const item of allModels) {
       const isInTier1 = existing.tier1.some((x) => x.fullId === item.fullId)
       const isInTier2 = (existing.tier2 || []).some((x) => x.fullId === item.fullId)
@@ -1483,7 +1499,62 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
+    // 3. 第一梯队若出现席位空缺，自动从第二梯队候选模型中补齐
+    if (existing.tier1.length < slotsConfig.tier1Slots && existing.tier2 && existing.tier2.length > 0) {
+      const needed = slotsConfig.tier1Slots - existing.tier1.length
+      const toPromote = existing.tier2.splice(0, needed)
+      existing.tier1.push(...toPromote.map((item) => ({ ...item, addedAt: now })))
+      changed = true
+    }
+
+    // 4. OpenClaw 专属智能体池若出现席位空缺，自动从可用模型中挑选支持工具调用的模型补齐
+    if (existing.tierOpenclaw.length < slotsConfig.tierOpenclawSlots) {
+      const openclawSet = new Set(existing.tierOpenclaw.map((x) => x.fullId))
+      const openclawCandidates = allModels.filter((item) => {
+        if (openclawSet.has(item.fullId)) return false
+        const m = item.provider.models.find((x) => x.id === item.modelId)
+        // 优先选取已通过工具调用实测或符合主流智能体命名特征的模型
+        return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder|kimi|intern|glm/i.test(item.modelId)
+      })
+
+      const openclawNeeded = slotsConfig.tierOpenclawSlots - existing.tierOpenclaw.length
+      const toFill = openclawCandidates.slice(0, openclawNeeded)
+      for (const item of toFill) {
+        existing.tierOpenclaw.push({
+          providerId: item.provider.id,
+          modelId: item.modelId,
+          fullId: item.fullId,
+          addedAt: now,
+        })
+        changed = true
+      }
+    }
+
+    // 5. 绘图专属池若出现席位空缺，自动从可用模型中挑选绘图模型补齐
+    if (existing.tierDrawing.length < slotsConfig.tierDrawingSlots) {
+      const drawingSet = new Set(existing.tierDrawing.map((x) => x.fullId))
+      const drawingCandidates = allModels.filter((item) => {
+        if (drawingSet.has(item.fullId)) return false
+        const m = item.provider.models.find((x) => x.id === item.modelId)
+        return isDrawingModel(item.modelId, m?.category)
+      })
+
+      const drawingNeeded = slotsConfig.tierDrawingSlots - existing.tierDrawing.length
+      const toFillDrawing = drawingCandidates.slice(0, drawingNeeded)
+      for (const item of toFillDrawing) {
+        existing.tierDrawing.push({
+          providerId: item.provider.id,
+          modelId: item.modelId,
+          fullId: item.fullId,
+          addedAt: now,
+        })
+        changed = true
+      }
+    }
+
+    // 若检测到任何梯队调整或补位，顺风车单次写入 KV
     if (changed) {
+      existing.updatedAt = new Date().toISOString()
       await saveTierStorage(env, existing)
     }
     return existing

@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.0.6
- * 更新说明: 各梯队池支持自定义席位设置与调节、模型卡片视觉紧凑优化、各梯队池实时展示当前主力模型
+ * 版本号: v1.0.9
+ * 更新说明: 调试模式开启/关闭均支持自定义落盘阈值与间隔，重构并美化网关请求日志控制面板 UI
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -52,7 +52,7 @@ ${H('首页')}
     <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">API CONTROL PLANE · v1.0.6</span>
+      <span class="brand__descriptor">API CONTROL PLANE · v1.0.9</span>
     </a>
     <nav class="topbar__actions" id="topbar-actions" aria-label="主导航">
       ${isLoggedIn
@@ -842,7 +842,7 @@ ${H('管理')}
   <aside class="admin-rail" aria-label="控制台导航">
     <a class="brand admin-rail__brand" href="/">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
-      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.6</small></span>
+      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.7</small></span>
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>
@@ -1136,24 +1136,44 @@ ${H('管理')}
 
       <section id="logs" class="workspace-section" aria-labelledby="logs-title">
         <div class="section-heading section-heading--admin">
-          <div><h2 id="logs-title">网关请求日志</h2><p>记录客户端 API 请求，包含耗时、HTTP 状态、调用详情与失败原因。</p></div>
-          <div class="fc" style="gap:12px;flex-wrap:wrap;align-items:center;">
-            <div id="log-buffer-config-box" class="fc" style="gap:8px;align-items:center;background:var(--color-paper-2);padding:4px 10px;border-radius:var(--radius-control);border:1px solid var(--color-rule);display:${isDebug ? 'none' : 'flex'};">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);" title="队列达到该条数后立即批量写入 KV">缓存阈值:</span>
-              <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" style="width:58px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="最大缓冲条数" onchange="saveLogBufferConfig()">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);">条</span>
-              <span style="font-size:var(--text-xs);color:var(--color-muted);margin-left:4px;" title="定时器强制落盘间隔">间隔:</span>
-              <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" style="width:52px;padding:2px 6px;font-size:var(--text-xs);border:1px solid var(--color-rule);border-radius:4px;" title="定时器强制落盘间隔（秒）" onchange="saveLogBufferConfig()">
-              <span style="font-size:var(--text-xs);color:var(--color-muted);">秒</span>
-            </div>
-            <label class="switch-label" style="background:var(--color-paper);padding:6px 12px;border-radius:var(--radius-control);border:1px solid var(--color-rule);" title="调试模式开启：每条日志实时写入 KV 并前端实时刷新；关闭后启用内存缓存批量落盘策略">
-              <span style="font-size:var(--text-xs);font-weight:600;">调试模式 (实时落盘)</span>
-              <span class="tg"><input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)"><span class="sl"></span></span>
-            </label>
-            <button class="btn btn-s" onclick="fetchLogs()"><i class="fas fa-sync" aria-hidden="true"></i>刷新日志</button>
-            <button class="btn btn-d" onclick="clearAllLogs()"><i class="fas fa-trash" aria-hidden="true"></i>清空日志</button>
+          <div>
+            <h2 id="logs-title"><i class="fas fa-receipt" style="color:var(--color-focus);margin-right:8px;"></i>网关请求日志 <span class="badge" id="logs-count-badge" style="margin-left:8px;font-size:12px;vertical-align:middle;">0</span></h2>
+            <p>记录客户端 API 请求，包含耗时、HTTP 状态、调用详情与失败原因。</p>
+          </div>
+          <div class="fc" style="gap:8px;">
+            <button class="btn btn-s" onclick="fetchLogs()"><i class="fas fa-sync-alt" aria-hidden="true"></i> 刷新日志</button>
+            <button class="btn btn-d" onclick="clearAllLogs()"><i class="fas fa-trash-alt" aria-hidden="true"></i> 清空日志</button>
           </div>
         </div>
+
+        <div class="log-control-card">
+          <div class="log-control-group">
+            <div class="log-control-item" title="内存队列达到设置条数后自动批量保存至 KV">
+              <label for="log-cfg-max-count"><i class="fas fa-layer-group" style="color:var(--color-focus);"></i> 缓存阈值</label>
+              <div class="log-input-badge">
+                <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" onchange="saveLogBufferConfig()">
+                <span>条</span>
+              </div>
+            </div>
+            <div class="log-control-divider"></div>
+            <div class="log-control-item" title="定时强制将未落盘的日志保存至 KV">
+              <label for="log-cfg-interval"><i class="fas fa-stopwatch" style="color:#0284c7;"></i> 刷盘间隔</label>
+              <div class="log-input-badge">
+                <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" onchange="saveLogBufferConfig()">
+                <span>秒</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="log-debug-box" title="开启调试模式后前端将开启每 4 秒自动刷新日志，无论开启与否均采用配置的批量落盘策略保护 KV 额度">
+            <span class="log-debug-title"><i class="fas fa-bug" style="color:#eab308;"></i> 调试模式 (自动刷新)</span>
+            <label class="tg">
+              <input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)">
+              <span class="sl"></span>
+            </label>
+          </div>
+        </div>
+
         <div id="logs-panel" class="logs-container">
           <!-- 日志表格组件 -->
         </div>
@@ -1307,11 +1327,15 @@ async function saveAllConfig() {
     var data = await resp.json();
 
     if (data && data.success) {
-      toast('保存成功！所有提供商、Key、指定路由及梯队池席位已合包一次性写入 KV。', 'success');
+      toast('保存成功！配置已合包写入 KV，梯队池与主力模型已同步自愈补位。', 'success');
       markDirty(false);
       renderProviderList();
       renderProxyKeyList();
       renderCustomRoutesTable();
+      // 顺风车自动刷新梯队池展示与当前主力模型
+      if (typeof loadTierData === 'function') {
+        loadTierData();
+      }
     } else {
       var errMsg = (data && data.message) ? data.message : '未知系统错误';
       aM('保存失败：' + errMsg, 'error');
@@ -2814,10 +2838,8 @@ function setupAutoRefresh(enabled) {
 
 async function toggleDebugMode(checked) {
   try {
-    var cfgBox = document.getElementById('log-buffer-config-box');
-    if (cfgBox) cfgBox.style.display = checked ? 'none' : 'flex';
-    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
-    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '20', 10);
+    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '60', 10);
 
     var res = await fetch('/admin/api/debug-mode', {
       method: 'POST',
@@ -2842,8 +2864,8 @@ async function toggleDebugMode(checked) {
 }
 
 async function saveLogBufferConfig() {
-  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '50', 10);
-  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '30', 10);
+  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '20', 10);
+  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '60', 10);
   var dbgChecked = document.getElementById('debug-mode-toggle')?.checked || false;
 
   try {
@@ -2858,7 +2880,7 @@ async function saveLogBufferConfig() {
     });
     var json = await res.json();
     if (json.success) {
-      toast('日志缓存策略已保存（达到 ' + cntVal + ' 条或 ' + intVal + ' 秒定时清空落盘）', 'success');
+      toast('日志落盘策略已更新并写入 KV（满足 ' + cntVal + ' 条或 ' + intVal + ' 秒自动落盘）', 'success');
     } else {
       toast(json.message || '保存缓存参数失败', 'error');
     }

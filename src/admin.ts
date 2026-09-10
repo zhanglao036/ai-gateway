@@ -435,19 +435,24 @@ export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
       slotsConfig?: TierSlotsConfig
     }>()
 
+    // 1. 一次性打包将提供商、转发Key、指定路由写入 KV
     await saveAllUnifiedConfig(c.env, {
       providers: body?.providers,
       proxyKeys: body?.proxyKeys,
       customRoutes: body?.customRoutes,
     })
 
+    // 2. 如果传递了自定义席位，更新席位配置
     if (body?.slotsConfig) {
       await updateTierSlotsConfig(c.env, body.slotsConfig)
     }
 
+    // 3. 顺风车自动执行全梯队自愈：剔除已被禁用的模型并自动选拔替补补满席位
+    await ensureTierStorage(c.env)
+
     return c.json<ApiResponse>({
       success: true,
-      message: '全部配置（提供商、转发Key、指定路由、梯队席位）已一次性成功保存至 KV！',
+      message: '全部配置已一次性成功保存至 KV，三大梯队池已完成自动校验与补位！',
     })
   } catch (err) {
     return c.json<ApiResponse>({

@@ -1,3 +1,7 @@
+/**
+ * 版本号: v1.0.9
+ * 更新说明: 调试模式开启/关闭均支持自定义落盘阈值与间隔，重构并美化网关请求日志控制面板 UI
+ */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
 import { createLocalKV } from './localKv'
@@ -17,8 +21,7 @@ function getKV(env?: Env) {
 /**
  * 注意：Cloudflare Workers 运行在无状态多实例（Serverless Edge Container）环境。
  * 内存变量仅在单个隔离实例内生效，不同实例间无法共享内存状态。
- * 在正式模式下通过单实例内存缓存合并/延迟落盘，以规避 Cloudflare 免费版 KV 每日 1000 次写入限额。
- * 调试模式（MODE='debug' 或 DEBUG='true'）下跳过内存合并，即时写入 KV。
+ * 通过单实例内存高速队列 + 满足定量/定时条件时批量落盘 + 顺风车打包写入，极致节省 Cloudflare KV 写入额度。
  */
 
 // 内存二级缓存（单实例有效）
@@ -30,6 +33,10 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 let dynamicDebugMode: boolean | null = null
 let dynamicBufferMaxCount: number | null = null
 let dynamicFlushIntervalSeconds: number | null = null
+
+// 日志落盘计数器与上次落盘时间戳（单实例有效）
+let unflushedLogCount = 0
+let lastLogFlushTime = Date.now()
 
 export function isDebugMode(env?: Env): boolean {
   if (dynamicDebugMode !== null) return dynamicDebugMode
@@ -59,8 +66,8 @@ export async function getLogConfig(env: Env): Promise<{ debugMode: boolean; buff
     const kvVal = await getKV(env).get(KV_KEYS.DEBUG_MODE)
     debug = kvVal !== null ? kvVal === 'true' : isDebugMode(env)
   }
-  if (maxCount === null) maxCount = 5 // 默认 5 条批量落盘，节约 80% 写入
-  if (intervalSec === null) intervalSec = 15 // 默认 15 秒定时合并
+  if (maxCount === null) maxCount = 20 // 默认 20 条定量落盘，大幅降低 KV 写入频率
+  if (intervalSec === null) intervalSec = 60 // 默认 60 秒定时落盘
 
   dynamicDebugMode = debug
   dynamicBufferMaxCount = maxCount
@@ -167,6 +174,10 @@ function scheduleFlush(env: Env) {
 }
 
 export async function flushPendingWrites(env: Env): Promise<void> {
+  // 顺风车捎带：如果有写操作落盘，将未保存的请求日志顺便保存至 KV
+  if (unflushedLogCount > 0) {
+    await flushPendingLogs(env)
+  }
   if (pendingWrites.size === 0) return
   const entries = Array.from(pendingWrites.entries())
   pendingWrites.clear()
@@ -382,35 +393,50 @@ export async function seedInitialData(env: Env): Promise<void> {
   }
 }
 
-// ===== 网关请求日志管理 (纯内存高速队列，0 KV 写入消耗) =====
+// ===== 网关请求日志管理 (内存高速队列 + 定量/定时/顺风车落盘 KV) =====
 
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
-  // 优先直接返回内存中的实时请求日志
+  // 1. 优先直接返回内存中的实时请求日志
   if (inMemoryLogs.length > 0) {
     return inMemoryLogs.slice(0, 100)
   }
-  // 仅在首次启动且内存为空时，尝试从 KV 读取一次历史日志缓存填充内存
+  // 2. 内存为空（如 Serverless 节点冷启动/跨节点响应），从 KV 读取上一次保存的历史日志填充内存
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
-      if (Array.isArray(storedLogs)) {
+      if (Array.isArray(storedLogs) && storedLogs.length > 0) {
         inMemoryLogs.push(...storedLogs.slice(0, MAX_MEMORY_LOGS))
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[storage] 从 KV 获取历史日志缓存失败:', err instanceof Error ? err.message : String(err))
+  }
   return inMemoryLogs.slice(0, 100)
 }
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    // 纯内存维护滚动队列，零网络耗时、永远不消耗 KV 写入额度！
+    // 将最新请求日志放入内存队列首部
     inMemoryLogs.unshift(log)
     if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
       inMemoryLogs.length = MAX_MEMORY_LOGS
+    }
+
+    unflushedLogCount++
+
+    // 检查定量 / 定时落盘条件
+    const config = await getLogConfig(env)
+    const bufferMax = config.bufferMaxCount || 20
+    const flushInterval = (config.flushIntervalSeconds || 60) * 1000
+    const now = Date.now()
+
+    // 满足定量（例如积累满 20 条）或定时（距离上次落盘已满 60 秒）时触发批量落盘至 KV
+    if (unflushedLogCount >= bufferMax || (now - lastLogFlushTime >= flushInterval && unflushedLogCount > 0)) {
+      await flushPendingLogs(env)
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
@@ -418,11 +444,22 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
 }
 
 export async function flushPendingLogs(env: Env): Promise<void> {
-  // 保留接口兼容，不再主动向 KV 刷写普通日志
+  // 内存无日志则退出
+  if (inMemoryLogs.length === 0) return
+  try {
+    const logsToSave = inMemoryLogs.slice(0, 100)
+    await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(logsToSave))
+    unflushedLogCount = 0
+    lastLogFlushTime = Date.now()
+  } catch (err) {
+    console.warn('[storage] 落盘/顺风车保存日志至 KV 异常:', err instanceof Error ? err.message : String(err))
+  }
 }
 
 export async function clearLogs(env: Env): Promise<void> {
   inMemoryLogs.length = 0
+  unflushedLogCount = 0
+  lastLogFlushTime = Date.now()
   try {
     await getKV(env).delete(KV_KEYS.REQUEST_LOGS)
   } catch {}
@@ -440,11 +477,14 @@ export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]
 }
 
 export async function saveCustomModelRoutes(env: Env, routes: CustomModelRoute[]): Promise<void> {
+  if (unflushedLogCount > 0) {
+    await flushPendingLogs(env)
+  }
   await kvPut(env, KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(routes))
 }
 
 /**
- * 核心统一保存：将所有配置（提供商、转发Key、指定模型路由）打包合流，一次性落盘
+ * 核心统一保存：将所有配置（提供商、转发Key、指定模型路由）打包合流，一次性落盘，并顺风车捎带保存最新日志
  */
 export async function saveAllUnifiedConfig(
   env: Env,
@@ -454,6 +494,10 @@ export async function saveAllUnifiedConfig(
     customRoutes?: CustomModelRoute[]
   }
 ): Promise<void> {
+  // 顺风车捎带：保存配置时捎带将未保存的内存日志写入 KV
+  if (unflushedLogCount > 0) {
+    await flushPendingLogs(env)
+  }
   if (Array.isArray(data.providers)) {
     const cleaned = data.providers.map((p) => {
       const seenKeys = new Set<string>()
