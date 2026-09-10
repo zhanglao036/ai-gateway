@@ -1,3 +1,7 @@
+/**
+ * 版本号: v1.1.6
+ * 更新说明: 实现全部保存时全系统探针、健康度、梯队自愈与请求日志 100% 顺风车打包落盘
+ */
 import { Context } from 'hono'
 import {
   getProviders,
@@ -20,6 +24,7 @@ import {
   getCustomModelRoutes,
   saveCustomModelRoutes,
   saveAllUnifiedConfig,
+  flushPendingWrites,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
@@ -450,6 +455,9 @@ export async function handleSaveAll(c: Context<{ Bindings: Env }>) {
 
     // 3. 顺风车自动执行全梯队自愈：剔除已被禁用的模型并自动选拔替补补满席位
     await ensureTierStorage(c.env)
+
+    // 4. 全链路终点收尾：检查并打包内存中所有未落盘的日志与状态，顺风车一次性全部带走
+    await flushPendingWrites(c.env)
 
     return c.json<ApiResponse>({
       success: true,

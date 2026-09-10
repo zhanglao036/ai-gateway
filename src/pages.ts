@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.1
- * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
+ * 版本号: v1.1.6
+ * 更新说明: 实现梯队数据保存、配置统一保存与探针探测数据全面联动顺风车，一次性打包写入 KV
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -1148,19 +1148,11 @@ ${H('管理')}
 
         <div class="log-control-card">
           <div class="log-control-group">
-            <div class="log-control-item" title="内存队列达到设置条数后自动批量保存至 KV">
+            <div class="log-control-item" title="正常请求达到设置条数后批量写入 KV。注意：超时、断连、报错异常将立即直接写入 KV，正常请求随系统写操作顺风车打包落盘">
               <label for="log-cfg-max-count"><i class="fas fa-layer-group" style="color:var(--color-focus);"></i> 缓存阈值</label>
               <div class="log-input-badge">
-                <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="5" max="500" onchange="saveLogBufferConfig()">
+                <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="1" max="500" onchange="saveLogBufferConfig()">
                 <span>条</span>
-              </div>
-            </div>
-            <div class="log-control-divider"></div>
-            <div class="log-control-item" title="定时强制将未落盘的日志保存至 KV">
-              <label for="log-cfg-interval"><i class="fas fa-stopwatch" style="color:#0284c7;"></i> 刷盘间隔</label>
-              <div class="log-input-badge">
-                <input type="number" id="log-cfg-interval" value="${logConfig.flushIntervalSeconds}" min="5" max="300" onchange="saveLogBufferConfig()">
-                <span>秒</span>
               </div>
             </div>
           </div>

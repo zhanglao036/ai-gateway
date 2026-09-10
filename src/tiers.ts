@@ -1,3 +1,7 @@
+/**
+ * 版本号: v1.1.6
+ * 更新说明: 实现梯队数据保存与探针探测数据全面联动顺风车，一次性打包写入 KV
+ */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
 import { testModelConnection } from './proxy'
@@ -33,12 +37,14 @@ export async function getTierStorage(env: Env): Promise<TierStorage | null> {
 
 /**
  * 批量写入/保存梯队数据到 KV
- * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)
+ * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)，并顺风车一次性带走内存中的请求日志
  */
 export async function saveTierStorage(env: Env, data: TierStorage): Promise<void> {
   try {
     data.updatedAt = new Date().toISOString()
     await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
+    // 顺风车捎带：只要写入梯队池（含探针实测、延迟、梯队席位），顺便把内存中排队的请求日志一并打包写入 KV，0 额外开销
+    await flushPendingWrites(env)
   } catch (err) {
     console.warn('[tiers] 保存梯队数据异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }

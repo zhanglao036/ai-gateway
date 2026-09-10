@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.1
- * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
+ * 版本号: v1.1.6
+ * 更新说明: 实现梯队数据保存与探针探测数据全面联动顺风车，一次性打包写入 KV
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -174,9 +174,9 @@ function scheduleFlush(env: Env) {
 }
 
 export async function flushPendingWrites(env: Env): Promise<void> {
-  // 顺风车捎带：仅当未落盘日志达到满额阀值或处于调试模式时，才在顺风车写 KV 时捎带落盘日志，避免打断日志定量拦截
-  const config = await getLogConfig(env)
-  if (unflushedLogCount >= (config.bufferMaxCount || 20) || config.debugMode) {
+  // 顺风车捎带：只要系统有任何必须写入 KV 的操作（保存配置、故障降级、梯队补位等），
+  // 检查内存中是否有未保存的请求日志，只要有（> 0 条），就顺路打包一次性写入 KV，0 额外写入成本！
+  if (unflushedLogCount > 0) {
     await flushPendingLogs(env)
   }
   if (pendingWrites.size === 0) return
@@ -429,11 +429,18 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
 
     unflushedLogCount++
 
-    // 检查定量落盘条件（满额定量 20 条或开启调试模式时批量落盘至 KV，适应 Workers 内存生命周期）
+    // 关键判断 1：检查是否属于超时、网络连接失败、上游报错或 HTTP 异常状态码 (status >= 400 或存在 error)
+    const isErrorOrTimeout = (typeof log.status === 'number' && log.status >= 400) || !!log.error
+
+    // 关键判断 2：读取用户设置的定量缓存阈值（默认 20 条）或调试模式
     const config = await getLogConfig(env)
     const bufferMax = config.bufferMaxCount || 20
 
-    if (unflushedLogCount >= bufferMax || config.debugMode) {
+    // 核心落盘规则：
+    // 1. 如果发生超时、报错、连接失败等异常，第一时间直接写入 KV，确保故障排查随时刷新可见；
+    // 2. 如果开启了调试模式，或者内存中积攒的日志达到了设定的批量缓存阈值，执行落盘写入 KV；
+    // 3. 普通成功请求平时在内存平稳排队，等待系统下一次任意写 KV 时通过“顺风车”打包带走，极度节省 KV 免费额度。
+    if (isErrorOrTimeout || unflushedLogCount >= bufferMax || config.debugMode) {
       await flushPendingLogs(env)
     }
   } catch (err) {
@@ -492,10 +499,12 @@ export async function saveAllUnifiedConfig(
     customRoutes?: CustomModelRoute[]
   }
 ): Promise<void> {
-  // 顺风车捎带：保存配置时捎带将未保存的内存日志写入 KV
+  // 顺风车捎带：保存配置时检查内存未落盘日志并打包写入 KV
   if (unflushedLogCount > 0) {
     await flushPendingLogs(env)
   }
+  // 顺风车捎带：将内存中排队的待落盘状态数据（如 Key 健康度、降级冷却等）一次性落盘
+  await flushPendingWrites(env)
   if (Array.isArray(data.providers)) {
     const cleaned = data.providers.map((p) => {
       const seenKeys = new Set<string>()
@@ -536,5 +545,8 @@ export async function saveAllUnifiedConfig(
     memoryCache.set(KV_KEYS.CUSTOM_MODEL_ROUTES, { value: JSON.stringify(data.customRoutes) })
     await getKV(env).put(KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(data.customRoutes))
   }
+
+  // 终点再次核对：确保全链路所有待写入项全部顺风车打包完成
+  await flushPendingWrites(env)
 }
 

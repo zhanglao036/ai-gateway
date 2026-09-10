@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.1.1
- * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
+ * 版本号: v1.1.6
+ * 更新说明: 实现梯队数据保存、配置统一保存与探针探测数据全面联动顺风车，一次性打包写入 KV
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.1.4'
+export const VERSION = 'v1.1.6'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
