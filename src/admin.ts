@@ -899,7 +899,8 @@ export async function handleClearProviderModels(c: Context<{ Bindings: Env }>) {
 // ===== 修改单个模型分类/状态解封 =====
 export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
   const providerId = c.req.param('id')
-  const modelId = decodeURIComponent(c.req.param('modelId') || '')
+  const rawModelId = c.req.param('*') || c.req.param('modelId') || ''
+  const modelId = decodeURIComponent(rawModelId)
 
   if (!providerId || !modelId) return c.json<ApiResponse>({ success: false, message: '参数错误' }, 400)
 

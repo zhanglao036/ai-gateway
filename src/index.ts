@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.2
- * 更新说明: 增加用户手动取消 OpenClaw 认证与关闭模型时的实时剔除与自动补位逻辑
+ * 版本号: v1.1.3
+ * 更新说明: 修复带斜杠模型 ID 无法更新状态的路由 BUG，优化前端卡片实时刷新与 OpenClaw 自愈补位
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -145,7 +145,7 @@ app.post('/admin/api/providers/:id/reset-models', handleResetProviderModels)
 app.post('/admin/api/providers/:id/fetch-models', handleFetchUpstreamModels)
 app.post('/admin/api/providers/:id/import-models', handleImportModels)
 app.delete('/admin/api/providers/:id/models', handleClearProviderModels)
-app.patch('/admin/api/providers/:id/models/:modelId', handleUpdateModelStatus)
+app.patch('/admin/api/providers/:id/models/*', handleUpdateModelStatus)
 app.post('/admin/api/providers/:id/test-openclaw', handleTestOpenclawModel)
 
 // 批量统一保存配置 (一次性写入 KV)

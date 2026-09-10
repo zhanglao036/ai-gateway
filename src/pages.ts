@@ -2323,6 +2323,7 @@ async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
         }
       }
       toast('模型 ' + mId + ' OpenClaw 标签已' + (newVerified ? '开启手动认证' : '取消认证'), 'success');
+      if (typeof loadTierData === 'function') loadTierData();
     } else {
       toast('修改 OpenClaw 标签失败: ' + (data.message || '未知错误'), 'error');
     }

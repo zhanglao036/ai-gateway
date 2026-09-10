@@ -4,7 +4,7 @@
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.1.2'
+export const VERSION = 'v1.1.3'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
