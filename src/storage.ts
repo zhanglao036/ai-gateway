@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.0
- * 更新说明: OpenClaw 席位不足时智能探针海选补位闭环，优化人工手动取消认证视觉标识 (手动取消)
+ * 版本号: v1.1.1
+ * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -174,8 +174,9 @@ function scheduleFlush(env: Env) {
 }
 
 export async function flushPendingWrites(env: Env): Promise<void> {
-  // 顺风车捎带：如果有写操作落盘，将未保存的请求日志顺便保存至 KV
-  if (unflushedLogCount > 0) {
+  // 顺风车捎带：仅当未落盘日志达到满额阀值或处于调试模式时，才在顺风车写 KV 时捎带落盘日志，避免打断日志定量拦截
+  const config = await getLogConfig(env)
+  if (unflushedLogCount >= (config.bufferMaxCount || 20) || config.debugMode) {
     await flushPendingLogs(env)
   }
   if (pendingWrites.size === 0) return
@@ -428,14 +429,11 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
 
     unflushedLogCount++
 
-    // 检查定量 / 定时落盘条件
+    // 检查定量落盘条件（满额定量 20 条或开启调试模式时批量落盘至 KV，适应 Workers 内存生命周期）
     const config = await getLogConfig(env)
     const bufferMax = config.bufferMaxCount || 20
-    const flushInterval = (config.flushIntervalSeconds || 60) * 1000
-    const now = Date.now()
 
-    // 满足定量（例如积累满 20 条）或定时（距离上次落盘已满 60 秒）时触发批量落盘至 KV
-    if (unflushedLogCount >= bufferMax || (now - lastLogFlushTime >= flushInterval && unflushedLogCount > 0)) {
+    if (unflushedLogCount >= bufferMax || config.debugMode) {
       await flushPendingLogs(env)
     }
   } catch (err) {

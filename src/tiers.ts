@@ -959,9 +959,9 @@ export async function backfillTier1FromTier2(
     // 筛选第二梯队中可用的候选模型
     const candidates = storage.tier2.filter((m) => availableMap.has(m.fullId))
     if (candidates.length === 0) {
-      await saveTierStorage(env, storage)
       return storage
     }
+    let hasChanged = false
 
     // 统计当前活跃提供商总数与当前各提供商在 Tier 1 中的占位
     const allProviders = await getProviders(env)
@@ -1155,6 +1155,7 @@ export async function backfillTier1FromTier2(
             storage.tier2 = storage.tier2.filter((m) => m.fullId !== item.ref.fullId)
 
             currentSlotsNeeded--
+            hasChanged = true
           }
 
           // 只要缺额被补满，立即停止海选
@@ -1181,8 +1182,10 @@ export async function backfillTier1FromTier2(
       await runWheelForGroup(otherCandidates, false)
     }
 
-    // 全部状态、游标、梯队变更落盘
-    await saveTierStorage(env, storage)
+    // 仅在有实际晋升或变更时保存 KV
+    if (hasChanged) {
+      await saveTierStorage(env, storage)
+    }
 
   } finally {
     setIsProbeRunning(false)
@@ -1231,9 +1234,14 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
   // 1. 清理当前 OpenClaw 梯队中已下线、永久停用或被删除的模型
+  const prevCount = storage.tierOpenclaw.length
   storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => availableMap.has(m.fullId))
+  let hasChanged = storage.tierOpenclaw.length !== prevCount
   const needed = slotsConfig.tierOpenclawSlots - storage.tierOpenclaw.length
-  if (needed <= 0) return storage // 席位已满，无需测试
+  if (needed <= 0) {
+    if (hasChanged) await saveTierStorage(env, storage)
+    return storage // 席位已满，无需测试
+  }
 
   // 初始化专属游标与扫描状态字典
   storage.openclawCursors = storage.openclawCursors || {}
@@ -1322,6 +1330,7 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
             addedAt: Date.now(),
           })
           existingFullIds.add(candidate.fullId)
+          hasChanged = true
         }
       }
     }
@@ -1372,16 +1381,17 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
             addedAt: Date.now(),
           })
           existingFullIds.add(item.fullId)
+          hasChanged = true
         }
       }
     }
   }
 
-  // 同步更新已知模型列表
-  storage.knownModelKeys = currentModelKeys
-
-  // 严格遵守 Cloudflare 免费政策：全轮所有计算与测试完成，顺风车单次写入 KV！
-  await saveTierStorage(env, storage)
+  // 仅在有实际变更（例如补入新模型）时才保存 KV，避免无新模型通过时重复死循环落盘
+  if (hasChanged) {
+    storage.knownModelKeys = currentModelKeys
+    await saveTierStorage(env, storage)
+  }
   return storage
 }
 
@@ -1397,9 +1407,14 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
   const availableMap = new Map(allModels.map((item) => [item.fullId, item]))
 
   // 1. 清理当前绘图梯队中已下线或不可用的模型
+  const prevCount = storage.tierDrawing.length
   storage.tierDrawing = storage.tierDrawing.filter((m) => availableMap.has(m.fullId))
+  let hasChanged = storage.tierDrawing.length !== prevCount
   const needed = slotsConfig.tierDrawingSlots - storage.tierDrawing.length
-  if (needed <= 0) return storage
+  if (needed <= 0) {
+    if (hasChanged) await saveTierStorage(env, storage)
+    return storage
+  }
 
   const existingFullIds = new Set(storage.tierDrawing.map((m) => m.fullId))
 
@@ -1431,10 +1446,13 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
         fullId: item.fullId,
         addedAt: Date.now(),
       })
+      hasChanged = true
     }
   }
 
-  await saveTierStorage(env, storage)
+  if (hasChanged) {
+    await saveTierStorage(env, storage)
+  }
   return storage
 }
 

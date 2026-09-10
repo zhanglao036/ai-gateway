@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.0
- * 更新说明: OpenClaw 席位不足时智能探针海选补位闭环，优化人工手动取消认证视觉标识 (手动取消)
+ * 版本号: v1.1.1
+ * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -52,7 +52,7 @@ ${H('首页')}
     <a class="brand" href="/" aria-label="AI Gateway 首页">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
       <span class="brand__name">${SITE_CONFIG.title}</span>
-      <span class="brand__descriptor">API CONTROL PLANE · v1.0.9</span>
+      <span class="brand__descriptor">API CONTROL PLANE · ${SITE_CONFIG.version}</span>
     </a>
     <nav class="topbar__actions" id="topbar-actions" aria-label="主导航">
       ${isLoggedIn
@@ -842,7 +842,7 @@ ${H('管理')}
   <aside class="admin-rail" aria-label="控制台导航">
     <a class="brand admin-rail__brand" href="/">
       <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
-      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · v1.0.7</small></span>
+      <span><strong>${SITE_CONFIG.title}</strong><small>CONTROL PLANE · ${SITE_CONFIG.version}</small></span>
     </a>
     <nav class="admin-nav">
       <a class="admin-nav__link is-active" href="#overview"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>概览</span></a>

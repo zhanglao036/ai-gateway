@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.0
- * 更新说明: OpenClaw 席位不足时智能探针海选补位闭环，优化人工手动取消认证视觉标识 (手动取消)
+ * 版本号: v1.1.1
+ * 更新说明: 彻底消除 OpenClaw 席位不足时重复写入 KV 的死循环，优化内存队列落盘与省流策略
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
