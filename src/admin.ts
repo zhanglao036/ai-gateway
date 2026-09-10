@@ -921,12 +921,16 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
     if (typeof body.category === 'string' && body.category) copy.category = body.category
     if (typeof body.openclawVerified === 'boolean') {
       copy.openclawVerified = body.openclawVerified
-      copy.openclawCustomTagged = true // 标记为用户手动自定义覆盖
+      copy.openclawCustomTagged = true // 标记为用户手动自定义覆盖，阻断自动探针强行覆写
       copy.openclawVerifiedAt = body.openclawVerified ? Date.now() : undefined
       if (body.openclawVerified) {
         copy.openclawTested = true
         copy.openclawCompatible = true
         copy.openclawReason = '用户手动自定义认证标签'
+      } else {
+        copy.openclawTested = true
+        copy.openclawCompatible = false
+        copy.openclawReason = '用户手动取消认证标签'
       }
     }
     if (body.unblockPermanent) {

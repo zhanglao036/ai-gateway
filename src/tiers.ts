@@ -1654,8 +1654,9 @@ export async function selectAutoModel(
   // 1. OpenClaw 专属梯队池选择
   if (poolType === 'openclaw') {
     let pool = (storage.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
-    // 只有在池子完全为空时才紧急补位，平时直接使用池内就绪模型
-    if (pool.length === 0) {
+    const slotsConfig = getTierSlotsConfig(storage)
+    // 当 OpenClaw 池当前模型数量少于配置的目标席位数时，自动触发探针探测并自动补齐席位
+    if (pool.length < slotsConfig.tierOpenclawSlots) {
       const backfilled = await backfillOpenclawTier(env, storage)
       pool = (backfilled.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     }

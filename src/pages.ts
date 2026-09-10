@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.0.9
- * 更新说明: 调试模式开启/关闭均支持自定义落盘阈值与间隔，重构并美化网关请求日志控制面板 UI
+ * 版本号: v1.1.0
+ * 更新说明: OpenClaw 席位不足时智能探针海选补位闭环，优化人工手动取消认证视觉标识 (手动取消)
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -2297,8 +2297,8 @@ async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
           badgeEl.innerHTML = '<i class="fas fa-robot"></i> OpenClaw 认证 (手动)';
         } else {
           badgeEl.className = 'openclaw-badge openclaw-badge--no openclaw-toggle-btn';
-          badgeEl.setAttribute('title', '未通过 OpenClaw 认证。点击可手动赋予认证标签');
-          badgeEl.innerHTML = '<i class="fas fa-tag"></i> 未认证';
+          badgeEl.setAttribute('title', '已被管理员手动取消认证，自动探针将不再强行恢复此项。点击可恢复认证');
+          badgeEl.innerHTML = '<i class="fas fa-ban"></i> 手动取消';
         }
       }
       // 同步内存 draftProviders
@@ -2314,6 +2314,10 @@ async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
               mObj.openclawTested = true;
               mObj.openclawCompatible = true;
               mObj.openclawReason = '用户手动自定义认证标签';
+            } else {
+              mObj.openclawTested = true;
+              mObj.openclawCompatible = false;
+              mObj.openclawReason = '用户手动取消认证标签';
             }
           }
         }
@@ -2641,11 +2645,25 @@ function renderProviderList() {
         statusBadge = '<span class="bd bd-off" style="padding:2px 6px;font-size:11px;border-radius:4px;"><i class="fas fa-minus-circle"></i> 已禁用</span>';
       }
 
-      var openclawBadge = m.openclawTested
-        ? (m.openclawCompatible
-            ? '<span class="openclaw-badge openclaw-badge--ok" title="' + escapeHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)') + '"><i class="fas fa-robot"></i> OpenClaw 适合</span>'
-            : '<span class="openclaw-badge openclaw-badge--no" title="' + escapeHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)') + '"><i class="fas fa-ban"></i> OpenClaw 不适合</span>')
-        : '';
+      var isCustomTagged = !!m.openclawCustomTagged;
+      var isVerified = !!m.openclawVerified || !!m.openclawCompatible;
+      var openclawBadge = '';
+
+      if (isCustomTagged) {
+        if (isVerified) {
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--manual openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="已获 OpenClaw 认证（用户手动设置）。点击可取消"><i class="fas fa-robot"></i> OpenClaw 认证 (手动)</span>';
+        } else {
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="已被管理员手动取消认证，自动探针将不再强行恢复此项。点击可恢复认证"><i class="fas fa-ban"></i> 手动取消</span>';
+        }
+      } else if (m.openclawTested) {
+        if (isVerified) {
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="' + escapeHtml(m.openclawReason || '适合 OpenClaw (支持 Tool 与智能体交互)') + '。点击可手动取消认证"><i class="fas fa-robot"></i> OpenClaw 认证</span>';
+        } else {
+          openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="' + escapeHtml(m.openclawReason || '不适合 OpenClaw (不支持 Tool 或非代码模型)') + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过</span>';
+        }
+      } else {
+        openclawBadge = '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="false" title="暂未测试。点击可手动赋予 OpenClaw 认证"><i class="fas fa-tag"></i> 未认证</span>';
+      }
 
       var catSelect = '<select class="select-xs" style="padding:2px 6px;font-size:11px;border-radius:4px;" onchange="updateModelCatBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" title="修改智能分类">' +
         '<option value="文本" ' + (mCat === '文本' ? 'selected' : '') + '>文本</option>' +
