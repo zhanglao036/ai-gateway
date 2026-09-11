@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.2
- * 更新说明: 修复模型测速前端变量未定义异常导致误报网络失败与请求错误，智能豁免绘图模型智能体测试并支持图像模型无损连通测速。
+ * 版本号: v1.2.3
+ * 更新说明: 增加海选频控保护锁（限制单提供商单次探测上限为3个，杜绝上游5分钟30模型报警），并优化一键重置逻辑，杜绝不可用模型盲目入选黄金池。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.2'
+export const VERSION = 'v1.2.3'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

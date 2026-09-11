@@ -200,9 +200,50 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
           }))
       )
 
+    // 重置梯队池：清空探测失败/故障避让统计，保留已有的健康状态，不盲目抓取前9个死模型
+    let existingStorage: TierStorage | null = null
+    try {
+      const raw = await kvGet(env, KV_KEYS.TIER_DATA)
+      if (raw) existingStorage = JSON.parse(raw)
+    } catch {
+      // 忽略读取失败
+    }
+
+    // 保留原本就在第一梯队且未被禁用的有效模型
+    const availableSet = new Set(allAvailable.map((m) => m.fullId))
+    const preservedTier1 = (existingStorage?.tier1 || []).filter((m) => availableSet.has(m.fullId))
+    const preservedTier1Keys = new Set(preservedTier1.map((m) => m.fullId))
+    const remainingCandidates = allAvailable.filter((m) => !preservedTier1Keys.has(m.fullId))
+
+    // 如果第一梯队完全为空（例如初次部署），则均匀抽取各提供商首个模型，否则维持原有的健康池席位
+    let initialTier1 = preservedTier1
+    if (initialTier1.length === 0) {
+      // 均匀抽取各个提供商的模型，避免单个提供商独占
+      const providerBuckets = new Map<string, typeof allAvailable>()
+      for (const item of remainingCandidates) {
+        if (!providerBuckets.has(item.providerId)) {
+          providerBuckets.set(item.providerId, [])
+        }
+        providerBuckets.get(item.providerId)!.push(item)
+      }
+      const buckets = Array.from(providerBuckets.values())
+      let maxLen = Math.max(...buckets.map((b) => b.length), 0)
+      for (let col = 0; col < maxLen && initialTier1.length < 8; col++) {
+        for (const bucket of buckets) {
+          if (initialTier1.length >= 8) break
+          if (col < bucket.length) {
+            initialTier1.push(bucket[col])
+          }
+        }
+      }
+    }
+
+    const tier1Set = new Set(initialTier1.map((m) => m.fullId))
+    const initialTier2 = allAvailable.filter((m) => !tier1Set.has(m.fullId))
+
     const cleanTierStorage: TierStorage = {
-      tier1: allAvailable.slice(0, 9),
-      tier2: allAvailable.slice(9),
+      tier1: initialTier1,
+      tier2: initialTier2,
       probeStats: {},
       businessStats: {},
       updatedAt: new Date().toISOString(),

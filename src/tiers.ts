@@ -733,6 +733,9 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
   }
 
   let remainingProviders = providerIds.length
+  // 单提供商探测频控保护锁（最多探测 3 个）
+  const initProbesPerProvider = new Map<string, number>()
+  const MAX_INIT_PROBES_PER_PROVIDER = 3
 
   // 轮询交叉测试，严格受控于单厂家配额
   while (tier1.length < TIER_1_MAX_SLOTS && remainingProviders > 0) {
@@ -745,6 +748,11 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
         continue // 该提供商已达均匀配额上限
       }
 
+      const alreadyProbed = initProbesPerProvider.get(pid) || 0
+      if (alreadyProbed >= MAX_INIT_PROBES_PER_PROVIDER) {
+        continue // 🔒 频控保护锁触发：该提供商本次初始化已达 3 个上限
+      }
+
       const models = providerModelsMap.get(pid) || []
       const ptr = providerPointers.get(pid) || 0
 
@@ -752,6 +760,7 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
         remainingProviders++
         const item = models[ptr]
         providerPointers.set(pid, ptr + 1)
+        initProbesPerProvider.set(pid, alreadyProbed + 1)
 
         // 轻量探测
         const metric = await runSingleModelProbe(env, item.provider, item.modelId)
@@ -777,19 +786,26 @@ export async function runInitCrossProbe(env: Env): Promise<TierStorage> {
     }
   }
 
-  // 如果各厂家严格配额后仍未补满 9 席（例如部分厂家模型不足或测试失败），放宽配额继续填充剩余席位
+  // 如果各厂家严格配额后仍未补满 8 席（例如部分厂家模型不足或测试失败），放宽配额继续填充剩余席位（同样受 3 个上限保护）
   if (tier1.length < TIER_1_MAX_SLOTS) {
     let hasMore = true
     while (tier1.length < TIER_1_MAX_SLOTS && hasMore) {
       hasMore = false
       for (const pid of providerIds) {
         if (tier1.length >= TIER_1_MAX_SLOTS) break
+
+        const alreadyProbed = initProbesPerProvider.get(pid) || 0
+        if (alreadyProbed >= MAX_INIT_PROBES_PER_PROVIDER) {
+          continue // 🔒 频控保护锁触发
+        }
+
         const models = providerModelsMap.get(pid) || []
         const ptr = providerPointers.get(pid) || 0
         if (ptr < models.length) {
           hasMore = true
           const item = models[ptr]
           providerPointers.set(pid, ptr + 1)
+          initProbesPerProvider.set(pid, alreadyProbed + 1)
 
           const metric = await runSingleModelProbe(env, item.provider, item.modelId)
           probeStats[item.fullId] = metric
@@ -1017,9 +1033,15 @@ export async function backfillTier1FromTier2(
 
     let currentSlotsNeeded = slotsConfig.tier1Slots - storage.tier1.length
 
+    // 频控保护锁：记录本轮海选中每个提供商已经探测的模型数量（硬限制单提供商最多 3 个）
+    const probedCountPerProvider = new Map<string, number>()
+    const MAX_PROBES_PER_PROVIDER_PER_SESSION = 3
+    let totalProbesInSession = 0
+    const MAX_TOTAL_PROBES_PER_SESSION = 16
+
     // 辅助函数：针对候选模型组运行轮询交叉探测
     const runWheelForGroup = async (groupCandidates: typeof candidates, enforceQuota: boolean) => {
-      if (groupCandidates.length === 0 || currentSlotsNeeded <= 0) return
+      if (groupCandidates.length === 0 || currentSlotsNeeded <= 0 || totalProbesInSession >= MAX_TOTAL_PROBES_PER_SESSION) return
 
       const allProviderIds = allProviders.map((p) => p.id).sort()
 
@@ -1096,15 +1118,24 @@ export async function backfillTier1FromTier2(
       let blockedPointer = 0
 
       let hasMoreToTest = true
+      let roundCount = 0
+      const MAX_ROUNDS = 5 // 限制最大轮次为 5 轮，防止死循环
+
       // 一轮一轮地交叉轮抽与并发测试
-      while (currentSlotsNeeded > 0 && hasMoreToTest) {
+      while (currentSlotsNeeded > 0 && hasMoreToTest && roundCount < MAX_ROUNDS && totalProbesInSession < MAX_TOTAL_PROBES_PER_SESSION) {
         hasMoreToTest = false
+        roundCount++
         const roundToTest: typeof candidates = []
 
-        // 各个提供商轮抽 1 个正常候选模型（若受配额控制，超额提供商本轮跳过）
+        // 各个提供商轮抽 1 个正常候选模型（若受配额控制或频控保护锁，跳过该提供商）
         for (const pid of providerIds) {
           if (enforceQuota && getProviderTier1Count(pid) >= maxQuotaPerProvider) {
             continue // 该提供商已达均匀配额
+          }
+
+          const alreadyProbed = probedCountPerProvider.get(pid) || 0
+          if (alreadyProbed >= MAX_PROBES_PER_PROVIDER_PER_SESSION) {
+            continue // 🔒 频控保护锁触发：该提供商本次海选已探测满 3 个模型，停止继续探查该提供商
           }
 
           const idx = providerPointers[pid]
@@ -1114,22 +1145,30 @@ export async function backfillTier1FromTier2(
             const cand = list[idx]
             providerPointers[pid] = idx + 1
             roundToTest.push(cand)
+            probedCountPerProvider.set(pid, alreadyProbed + 1)
+            totalProbesInSession++
           }
         }
 
-        // 附带抽测最多 1~2 个符合复测间隔的封禁模型（以正常模型为主）
+        // 附带抽测最多 1 个符合复测间隔的封禁模型（以正常模型为主）
         let attachedBlockedCount = 0
-        while (blockedPointer < eligibleBlocked.length && attachedBlockedCount < 2) {
+        while (blockedPointer < eligibleBlocked.length && attachedBlockedCount < 1) {
           const blockedItem = eligibleBlocked[blockedPointer++]
-          roundToTest.push(blockedItem.cand)
-          if (!availableMap.has(blockedItem.cand.fullId)) {
-            availableMap.set(blockedItem.cand.fullId, {
-              provider: blockedItem.provider,
-              modelId: blockedItem.cand.modelId,
-              fullId: blockedItem.cand.fullId,
-            })
+          const pid = blockedItem.cand.providerId
+          const alreadyProbed = probedCountPerProvider.get(pid) || 0
+          if (alreadyProbed < MAX_PROBES_PER_PROVIDER_PER_SESSION) {
+            roundToTest.push(blockedItem.cand)
+            probedCountPerProvider.set(pid, alreadyProbed + 1)
+            totalProbesInSession++
+            if (!availableMap.has(blockedItem.cand.fullId)) {
+              availableMap.set(blockedItem.cand.fullId, {
+                provider: blockedItem.provider,
+                modelId: blockedItem.cand.modelId,
+                fullId: blockedItem.cand.fullId,
+              })
+            }
+            attachedBlockedCount++
           }
-          attachedBlockedCount++
         }
 
         if (roundToTest.length === 0) break
