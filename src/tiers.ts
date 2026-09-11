@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.8
- * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
+ * 版本号: v1.1.9
+ * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'

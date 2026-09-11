@@ -1323,4 +1323,24 @@ label, legend { color: var(--color-ink-2); font-size: var(--text-xs); font-weigh
     padding: 16px !important;
   }
 }
+
+/* 🟢 正在连接状态的绿色呼吸灯动效，让当前处于第一席位的活动模型带有视觉呼吸感 */
+@keyframes pulse-green {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 5px rgba(22, 163, 74, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0);
+  }
+}
+
+.pulse-dot-green {
+  animation: pulse-green 2s infinite;
+}
 `

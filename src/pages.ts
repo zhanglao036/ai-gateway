@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.8
- * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
+ * 版本号: v1.1.9
+ * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -644,10 +644,20 @@ function renderAdminTierPools(tierData: TierStorage): string {
         html += '      <span style="font-size:0.7rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.1rem 0.35rem;border-radius:0.2rem;">'
         html += '        ' + slotPrefix + ' #' + (idx + 1)
         html += '      </span>'
-        html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.25rem;">'
-        html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
-        html += '        运行中'
-        html += '      </span>'
+        // 判断当前卡片是否为第 1 顺位卡片。1 顺位为主力活动模型，其余为备用就绪模型。
+        if (idx === 0) {
+          // 🏆 1号主力席位：显示带动态绿色呼吸灯的高亮“当前连接”字样，一目了然
+          html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:700;display:flex;align-items:center;gap:0.25rem;" title="当前优先连接的主力模型">'
+          html += '        <span class="pulse-dot-green" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
+          html += '        当前连接'
+          html += '      </span>'
+        } else {
+          // 🛡️ 备用席位：显示优雅低调的灰色“备用就绪”字样，作为后备健康池保障
+          html += '      <span style="font-size:0.6875rem;color:#64748b;font-weight:600;display:flex;align-items:center;gap:0.25rem;" title="备用模型，主力故障时自动无感切换">'
+          html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;"></span>'
+          html += '        备用就绪'
+          html += '      </span>'
+        }
         html += '    </div>'
         html += '    <div style="margin-bottom:0.35rem;">'
         html += '      <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #e2e8f0;padding:0.2rem 0.35rem;border-radius:0.3rem;gap:0.35rem;">'
@@ -723,7 +733,7 @@ function renderAdminTierPools(tierData: TierStorage): string {
   const tierOpenclawPrimaryModel = tierOpenclawModels[0] ? escapePageHtml(tierOpenclawModels[0].fullId) : '暂无连接模型'
   const tierDrawingPrimaryModel = tierDrawingModels[0] ? escapePageHtml(tierDrawingModels[0].fullId) : '暂无连接模型'
 
-  // 第一梯队黄金模型池
+  // 第一梯队黄金模型池 (已剔除顶部冗余的主力文字显示，聚焦于席位卡片高亮状态)
   out += '  <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.02);">'
   out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #f1f5f9;padding-bottom:0.5rem;">'
   out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
@@ -731,7 +741,6 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '          <span style="color:#2563eb;">👑 第一梯队 (Tier 1) 黄金模型池</span>'
   out += '          <span id="tier1-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#dbeafe;color:#1e40af;border-radius:0.25rem;font-weight:600;">已连接 ' + tier1Models.length + ' / ' + tier1Slots + ' 席</span>'
   out += '        </h3>'
-  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-bolt" style="color:#059669;"></i> 当前主力: <code id="tier1-primary-model" style="font-weight:700;font-family:monospace;">' + tier1PrimaryModel + '</code></span>'
   out += '      </div>'
   out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
   out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#f8fafc;padding:0.2rem 0.45rem;border:1px solid #cbd5e1;border-radius:0.375rem;font-size:0.75rem;">'
@@ -748,7 +757,7 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += renderPoolCards(tier1Models, tier1Slots, '席位', '#0284c7', '#f8fafc', '#cbd5e1', '#dbeafe', '#1e40af', '<i class="fas fa-bolt"></i> 黄金席位', 'tier1')
   out += '  </div>'
 
-  // OpenClaw 专属智能体池
+  // OpenClaw 专属智能体池 (已剔除顶部冗余的主力文字显示，聚焦于席位卡片高亮状态)
   out += '  <div style="background:#ffffff;border:1px solid #f3e8ff;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(139,92,246,0.03);">'
   out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #faf5ff;padding-bottom:0.5rem;">'
   out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
@@ -756,7 +765,6 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '          <span style="color:#9333ea;">🤖 OpenClaw 专属智能体梯队池</span>'
   out += '          <span id="tier-openclaw-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#ede9fe;color:#6d28d9;border-radius:0.25rem;font-weight:600;">已连接 ' + tierOpenclawModels.length + ' / ' + tierOpenclawSlots + ' 席</span>'
   out += '        </h3>'
-  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#faf5ff;color:#6b21a8;border:1px solid #e9d5ff;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-robot" style="color:#9333ea;"></i> 当前主力: <code id="tier-openclaw-primary-model" style="font-weight:700;font-family:monospace;">' + tierOpenclawPrimaryModel + '</code></span>'
   out += '      </div>'
   out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
   out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#faf5ff;padding:0.2rem 0.45rem;border:1px solid #d8b4fe;border-radius:0.375rem;font-size:0.75rem;">'
@@ -773,7 +781,7 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += renderPoolCards(tierOpenclawModels, tierOpenclawSlots, 'OpenClaw 席位', '#9333ea', '#faf5ff', '#d8b4fe', '#ede9fe', '#6d28d9', '<i class="fas fa-check-double"></i> 工具调用实测认证', 'openclaw')
   out += '  </div>'
 
-  // 绘图专属池
+  // 绘图专属池 (已剔除顶部冗余的主力文字显示，聚焦于席位卡片高亮状态)
   out += '  <div style="background:#ffffff;border:1px solid #ffe4e6;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(236,72,153,0.03);">'
   out += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #fff1f2;padding-bottom:0.5rem;">'
   out += '      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:0.5rem;">'
@@ -781,7 +789,6 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '          <span style="color:#e11d48;">🎨 绘图专属梯队池 (Drawing Tier)</span>'
   out += '          <span id="tier-drawing-slots-badge" style="font-size:0.75rem;padding:0.15rem 0.45rem;background:#ffe4e6;color:#9f1239;border-radius:0.25rem;font-weight:600;">已连接 ' + tierDrawingModels.length + ' / ' + tierDrawingSlots + ' 席</span>'
   out += '        </h3>'
-  out += '        <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#fff1f2;color:#9f1239;border:1px solid #fecdd3;border-radius:0.25rem;font-weight:600;display:inline-flex;align-items:center;gap:0.25rem;"><i class="fas fa-palette" style="color:#e11d48;"></i> 当前主力: <code id="tier-drawing-primary-model" style="font-weight:700;font-family:monospace;">' + tierDrawingPrimaryModel + '</code></span>'
   out += '      </div>'
   out += '      <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">'
   out += '        <div style="display:flex;align-items:center;gap:0.25rem;background:#fff1f2;padding:0.2rem 0.45rem;border:1px solid #fecdd3;border-radius:0.375rem;font-size:0.75rem;">'
