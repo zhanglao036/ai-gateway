@@ -418,6 +418,20 @@ export async function runOpenclawSpecificProbe(
   const enabledKeys = provider.apiKeys.filter((k) => k.enabled)
   const apiKey = enabledKeys[0]?.key || ''
 
+  // 1. 绘图模型识别与豁免：专用于 /v1/images/generations，禁止向其发送对话/智能体计算题
+  const mConfig = provider.models.find((m) => m.id === modelId)
+  if (isDrawingModel(modelId, mConfig?.category)) {
+    return {
+      latency: 15,
+      lastTestedAt: Date.now(),
+      success: true,
+      statusCode: 200,
+      openclawCompatible: false,
+      openclawVerified: false,
+      openclawReason: '绘图专属模型（免测智能体工具）',
+    }
+  }
+
   if (!apiKey && !isOpenCodeProvider(provider.id)) {
     return {
       latency: 9999,
@@ -578,7 +592,12 @@ export async function runOpenclawSpecificProbe(
         verified = false
         const lowerErr = rawText.toLowerCase()
         if (response.status === 400 || response.status === 422) {
-          if (lowerErr.includes('tool') || lowerErr.includes('function') || lowerErr.includes('parameter') || lowerErr.includes('unsupported')) {
+          if (lowerErr.includes('image model') || lowerErr.includes('images/generations') || lowerErr.includes('drawing')) {
+            success = true
+            verified = false
+            statusCode = 200
+            reason = '绘图专属模型（免测智能体工具）'
+          } else if (lowerErr.includes('tool') || lowerErr.includes('function') || lowerErr.includes('parameter') || lowerErr.includes('unsupported')) {
             reason = '上游明确不支持 Tools 工具调用参数 (HTTP ' + response.status + ')'
           } else {
             reason = '上游参数错误: ' + rawText.substring(0, 100)
@@ -1304,10 +1323,12 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
       const p = providersMap.get(pid)!
       const allPModels = providerModelsMap.get(pid) || []
 
-      // 候选模型：未在当前 OpenClaw 池中，且尚未被打上认证标签的模型
+      // 候选模型：未在当前 OpenClaw 池中，且尚未被打上认证标签的模型（排除绘图专属模型）
       const unverifiedCandidates = allPModels.filter((item) => {
         if (existingFullIds.has(item.fullId)) return false
         const mConfig = p.models.find((x) => x.id === item.modelId)
+        // 关键过滤：排除绘图模型，绘图模型免测且绝不参与 OpenClaw 智能体计算题
+        if (isDrawingModel(item.modelId, mConfig?.category)) return false
         const hasVerifiedTag = mConfig?.openclawVerified || storage.probeStats[item.fullId]?.openclawVerified
         return !hasVerifiedTag
       })

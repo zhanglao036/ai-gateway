@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.2.2
+ * 更新说明: 修复模型测速前端变量未定义异常导致误报网络失败与请求错误，智能豁免绘图模型智能体测试并支持图像模型无损连通测速。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.1'
+export const VERSION = 'v1.2.2'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

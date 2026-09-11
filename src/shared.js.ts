@@ -77,9 +77,15 @@ function showSpinner(el) {
   el.innerHTML = '<span class="mu"><i class="fas fa-spinner fa-spin"></i> 测试中...</span>'
 }
 function showResult(el, success, msg) {
+  if (!el) return
   el.innerHTML = success
-    ? '<div class="al al-s"><i class="fas fa-check-circle"></i> 连接成功</div>'
+    ? '<div class="al al-s"><i class="fas fa-check-circle"></i> ' + escapeHtml(msg || '连接成功') + '</div>'
     : '<div class="al al-e"><i class="fas fa-times-circle"></i> ' + escapeHtml(msg || '连接失败') + '</div>'
+  // 提示显示 6 秒后自动清理，避免长期常驻引起误解
+  if (el._tmt) clearTimeout(el._tmt)
+  el._tmt = setTimeout(function() {
+    if (el) el.innerHTML = ''
+  }, 6000)
 }
 
 // ── API 请求函数 ──

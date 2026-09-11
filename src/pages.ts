@@ -1111,19 +1111,23 @@ ${H('管理')}
                     }
 
                     let openclawBadge = '';
-                    if (m.openclawVerified) {
+                    let openclawTestBtn = '';
+                    if (mCat === '绘图') {
+                      openclawBadge = `<span class="openclaw-badge" style="background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;" title="绘图专属模型，专用于图像生成（免测智能体计算工具）"><i class="fas fa-palette"></i> 绘图模型</span>`;
+                    } else if (m.openclawVerified) {
                       if (m.openclawCustomTagged) {
                         openclawBadge = `<span class="openclaw-badge openclaw-badge--manual openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="true" title="已获 OpenClaw 认证（用户手动设置）。点击可取消"><i class="fas fa-robot"></i> OpenClaw 认证 (手动)</span>`;
                       } else {
                         openclawBadge = `<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="true" title="已通过专属计算器实机测试！点击可切换修改"><i class="fas fa-robot"></i> OpenClaw 认证</span>`;
                       }
+                      openclawTestBtn = `<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>`;
                     } else if (m.openclawTested && !m.openclawCompatible) {
                       openclawBadge = `<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="false" title="专属测试未通过：${escapePageHtml(m.openclawReason || '不兼容工具调用')}。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过 (${escapePageHtml(m.openclawReason || '不兼容')})</span>`;
+                      openclawTestBtn = `<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>`;
                     } else {
                       openclawBadge = `<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-verified="false" title="未通过 OpenClaw 认证。点击可手动赋予认证标签"><i class="fas fa-tag"></i> 未认证</span>`;
+                      openclawTestBtn = `<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>`;
                     }
-
-                    const openclawTestBtn = `<button class="btn btn-s btn-xs test-openclaw-btn" onclick="testOpenclawBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="执行 OpenClaw 专属实机测试（验证 calculate_sum 工具调用）" style="padding:2px 6px;font-size:11px;color:#0284c7;border-color:#bae6fd;background:#f0f9ff;"><i class="fas fa-vial"></i> 专属测试</button>`;
 
                     const catSelect = `<select class="select-xs" style="padding:2px 6px;font-size:11px;border-radius:4px;" onchange="updateModelCatBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" title="修改智能分类">` +
                       `<option value="文本" ${mCat === '文本' ? 'selected' : ''}>文本</option>` +
@@ -2293,13 +2297,21 @@ async function testMdl(id, mid, idx, btn) {
         toast(mid + ' 测试失败: ' + (d.data.message || '连接错误'), 'error')
       }
 
-      // 动态更新 OpenClaw 适合度标注
+      // 动态更新 OpenClaw 适合度标注或绘图模型标识
       if (d.data.openclaw && d.data.openclaw.tested) {
         var isVerified = !!d.data.openclaw.verified || !!d.data.openclaw.compatible;
         var reason = d.data.openclaw.reason || (isVerified ? '适合 OpenClaw (支持 Tool 与智能体交互)' : '不适合 OpenClaw (不支持 Tool 或非代码模型)');
-        var badgeHtml = isVerified
-          ? '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="true" title="' + escapeHtml(reason) + '。点击可切换修改"><i class="fas fa-robot"></i> OpenClaw 认证</span>'
-          : '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="false" title="' + escapeHtml(reason) + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过 (' + (reason.length > 8 ? reason.slice(0, 8) + '...' : reason) + ')</span>';
+        
+        // 识别是否为绘图专属模型
+        var isDrawing = (d.data.category === '绘图') || (d.data.openclaw.reason && d.data.openclaw.reason.indexOf('绘图专属') !== -1) || /(image|dall-e|flux|midjourney|sd-|stable-diffusion|draw|paint)/i.test(mid);
+        var badgeHtml = '';
+        if (isDrawing) {
+          badgeHtml = '<span class="openclaw-badge" style="background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;" title="绘图专属模型，专用于图像生成（免测智能体计算工具）"><i class="fas fa-palette"></i> 绘图模型</span>';
+        } else {
+          badgeHtml = isVerified
+            ? '<span class="openclaw-badge openclaw-badge--ok openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="true" title="' + escapeHtml(reason) + '。点击可切换修改"><i class="fas fa-robot"></i> OpenClaw 认证</span>'
+            : '<span class="openclaw-badge openclaw-badge--no openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + escapeHtml(id) + '" data-mid="' + escapeHtml(mid) + '" data-verified="false" title="' + escapeHtml(reason) + '。点击可手动赋予认证"><i class="fas fa-ban"></i> 未通过 (' + (reason.length > 8 ? reason.slice(0, 8) + '...' : reason) + ')</span>';
+        }
 
         if (row) {
           var existingBadge = row.querySelector('.openclaw-badge');
@@ -2316,18 +2328,26 @@ async function testMdl(id, mid, idx, btn) {
               }
             }
           }
+          // 如果是绘图模型，移除无意义的智能体专属测试按钮
+          if (isDrawing) {
+            var clawBtn = row.querySelector('.test-openclaw-btn');
+            if (clawBtn) clawBtn.remove();
+          }
         }
 
-        // 同步至内存 draftProviders
+        // 同步至内存 draftProviders（使用已安全声明的 isVerified 变量，绝不引发运行时未定义异常）
         if (typeof draftProviders !== 'undefined' && Array.isArray(draftProviders)) {
           var pObj = draftProviders.find(function(item) { return item.id === id; });
           if (pObj && pObj.models) {
             var mObj = pObj.models.find(function(m) { return m.id === mid; });
             if (mObj) {
               mObj.openclawTested = true;
-              mObj.openclawCompatible = isCompat;
+              mObj.openclawCompatible = isVerified;
               mObj.openclawReason = reason;
               mObj.openclawTestedAt = Date.now();
+              if (isDrawing && mObj.category !== '绘图') {
+                mObj.category = '绘图';
+              }
             }
           }
         }
@@ -2447,6 +2467,14 @@ async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
 
 async function testOpenclawModel(pId, mId, btn) {
   if (!pId || !mId) return;
+  // 绘图模型拦截与友好提示：无需执行对话工具测试
+  var pObj = typeof draftProviders !== 'undefined' ? draftProviders.find(function(x) { return x.id === pId; }) : null;
+  var mObj = pObj && pObj.models ? pObj.models.find(function(x) { return x.id === mId; }) : null;
+  var isDrawing = (mObj && mObj.category === '绘图') || /(image|dall-e|flux|midjourney|sd-|stable-diffusion|draw|paint)/i.test(mId);
+  if (isDrawing) {
+    toast(mId + ' 是绘图专属模型（专用于图像生成），无需进行智能体计算器测试。', 'info');
+    return;
+  }
   if (btn) {
     btn.disabled = true;
     btn.style.opacity = '0.6';
@@ -2768,8 +2796,12 @@ function renderProviderList() {
 
       var openclawBadge = '';
 
+      // 分支 0：如果是绘图模型，直接渲染绘图专属标签，无需显示未通过或未认证
+      if (mCat === '绘图' || /(image|dall-e|flux|midjourney|sd-|stable-diffusion|draw|paint)/i.test(mId)) {
+        openclawBadge = '<span class="openclaw-badge" style="background:#f5f3ff;color:#7c3aed;border:1px solid #ddd6fe;" title="绘图专属模型，专用于图像生成（免测智能体计算工具）"><i class="fas fa-palette"></i> 绘图模型</span>';
+      }
       // 分支 1：如果是管理员手动干预过的模型，渲染“手动认证”或“手动取消”标签
-      if (isCustomTagged) {
+      else if (isCustomTagged) {
         if (!!m.openclawVerified) {
           openclawBadge = '<span class="openclaw-badge openclaw-badge--manual openclaw-toggle-btn" onclick="toggleOpenclawTagBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-verified="true" title="已获 OpenClaw 认证（用户手动设置）。点击可取消"><i class="fas fa-robot"></i> OpenClaw 认证 (手动)</span>';
         } else {

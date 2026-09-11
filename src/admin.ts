@@ -631,9 +631,23 @@ export async function handleTestCustomRoute(c: Context<{ Bindings: Env }>) {
     })
   }
 
+  const targetModelConfig = provider.models.find((m) => m.id === targetModelId)
   const testRes = isOpenCodeProvider(provider.id)
     ? await testOpenCodeModel(provider.baseUrl, enabledKeys, targetModelId, resolveOpenCodeUrls(c.env))
-    : await testModelConnection(provider.baseUrl, enabledKeys[0]?.key || '', targetModelId, provider.apiType)
+    : await testModelConnection(
+        provider.baseUrl,
+        enabledKeys[0]?.key || '',
+        targetModelId,
+        provider.apiType,
+        targetModelConfig?.category,
+        targetModelConfig
+          ? {
+              openclawTested: targetModelConfig.openclawTested,
+              openclawCompatible: targetModelConfig.openclawCompatible,
+              openclawReason: targetModelConfig.openclawReason,
+            }
+          : undefined
+      )
 
   return c.json<ApiResponse>({
     success: true,
@@ -643,6 +657,8 @@ export async function handleTestCustomRoute(c: Context<{ Bindings: Env }>) {
       latencyMs: testRes.latencyMs,
       statusCode: testRes.statusCode,
       message: testRes.message,
+      category: (testRes as any).category || targetModelConfig?.category,
+      openclaw: (testRes as any).openclaw,
     },
   })
 }

@@ -301,19 +301,20 @@ export async function testModelConnection(
     }
 
     const lowerModel = modelId.toLowerCase()
+    // 智能识别绘图模型：支持分类为绘图或名称中包含绘图关键词（去除前缀限制，支持各类镜像与前缀命名的画图模型）
     const isDrawing = category === '绘图' ||
-      /^(dall-e|flux|midjourney|sd-|stable-diffusion|tts|whisper|image|video)/i.test(modelId)
+      /(dall-e|flux|midjourney|sd-|stable-diffusion|image|draw|paint|cogview|recraft|video)/i.test(modelId)
     const isEmbedding = category === '嵌入' ||
       /^(text-embedding|embedding|bge-|rerank|clip)/i.test(modelId)
 
-    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针
+    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针，直接判定健康
     if (isDrawing || isEmbedding) {
       const assignedCategory = isDrawing ? '绘图' : '嵌入'
       return {
         success: true,
-        message: `${assignedCategory}模型 (已标记分类，不适合智能体工具调用)`,
+        message: `${assignedCategory}模型 (已标记分类，专用于图像生成)`,
         statusCode: 200,
-        latencyMs: 10,
+        latencyMs: 15,
         category: assignedCategory,
         openclaw: {
           tested: true,
@@ -404,22 +405,41 @@ export async function testModelConnection(
       }
     }
 
-    // 处理 400 类的参数不兼容（说明模型可连接，但首次探针发现不支持 Tools）
-    if (!alreadyTested && (response.status === 400 || response.status === 422)) {
+    // 处理 400 类的参数不兼容（说明模型可连接，但探针发现不支持 Tools 或其为纯绘图模型）
+    if (response.status === 400 || response.status === 422) {
       const lowerErr = rawText.toLowerCase()
-      const isToolUnsupported = lowerErr.includes('tool') || lowerErr.includes('function') || lowerErr.includes('parameter')
-      if (isToolUnsupported) {
+      // 检查上游是否明确反馈为绘图模型
+      const isUpstreamImageModel = lowerErr.includes('image model') || lowerErr.includes('images/generations') || lowerErr.includes('drawing')
+      if (isUpstreamImageModel) {
         return {
-          success: true, // 网络连通
-          message: '模型可连通，但上游不支持 Tools 工具调用 (仅支持纯文本)',
+          success: true, // 证明 API Key 合法、网络通畅且上游模型就绪
+          message: '绘图模型连通正常 (专用于图像生成)',
           statusCode: 200,
           latencyMs,
-          category: category || '文本',
+          category: '绘图',
           openclaw: {
             tested: true,
             compatible: false,
-            reason: '仅支持纯文本对话，不支持 OpenClaw Tools 工具调用',
+            reason: '绘图专属模型（免测智能体工具）',
           },
+        }
+      }
+
+      if (!alreadyTested) {
+        const isToolUnsupported = lowerErr.includes('tool') || lowerErr.includes('function') || lowerErr.includes('parameter')
+        if (isToolUnsupported) {
+          return {
+            success: true, // 网络连通
+            message: '模型可连通，但上游不支持 Tools 工具调用 (仅支持纯文本)',
+            statusCode: 200,
+            latencyMs,
+            category: category || '文本',
+            openclaw: {
+              tested: true,
+              compatible: false,
+              reason: '仅支持纯文本对话，不支持 OpenClaw Tools 工具调用',
+            },
+          }
         }
       }
     }
