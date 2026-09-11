@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.0
+ * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'

@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.0
+ * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1685,7 +1685,8 @@ export async function selectAutoModel(
   isLongText: boolean = false,
   sessionId: string | null = null,
   excludedProviderIds?: Set<string>,
-  poolType: 'general' | 'openclaw' | 'drawing' = 'general'
+  poolType: 'general' | 'openclaw' | 'drawing' = 'general',
+  excludedModelIds?: Set<string>
 ): Promise<{ providerId: string; modelId: string; fullId: string } | null> {
   const storage = await ensureTierStorage(env)
 
@@ -1701,6 +1702,21 @@ export async function selectAutoModel(
       const backfilled = await backfillOpenclawTier(env, storage)
       pool = (backfilled.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     }
+    // 排除已经在本次请求中尝试失败的具体模型
+    if (excludedModelIds && excludedModelIds.size > 0) {
+      pool = pool.filter((m) => !excludedModelIds.has(m.fullId))
+    }
+    // 排除处于冷却中或已被永久禁用的模型
+    const now = Date.now()
+    pool = pool.filter((m) => {
+      const item = modelMap.get(m.fullId)
+      if (!item) return false
+      const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+      if (mConfig?.permanentlyDisabled) return false
+      if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+      return true
+    })
+    // 优先选择不同厂商
     if (excludedProviderIds && excludedProviderIds.size > 0) {
       const filtered = pool.filter((m) => !excludedProviderIds.has(m.providerId))
       if (filtered.length > 0) pool = filtered
@@ -1723,11 +1739,27 @@ export async function selectAutoModel(
   // 2. 绘图专属梯队池选择
   if (poolType === 'drawing') {
     let pool = (storage.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
-    // 只有在池子完全为空时才紧急补位，平时直接使用池内就绪模型
-    if (pool.length === 0) {
+    const slotsConfig = getTierSlotsConfig(storage)
+    // 绘图池模型数量少于配置席位时全力补位
+    if (pool.length < slotsConfig.tierDrawingSlots) {
       const backfilled = await backfillDrawingTier(env, storage)
       pool = (backfilled.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
     }
+    // 排除已经在本次请求中尝试失败的具体模型
+    if (excludedModelIds && excludedModelIds.size > 0) {
+      pool = pool.filter((m) => !excludedModelIds.has(m.fullId))
+    }
+    // 排除处于冷却中或已被永久禁用的模型
+    const now = Date.now()
+    pool = pool.filter((m) => {
+      const item = modelMap.get(m.fullId)
+      if (!item) return false
+      const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+      if (mConfig?.permanentlyDisabled) return false
+      if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+      return true
+    })
+    // 优先选择不同厂商
     if (excludedProviderIds && excludedProviderIds.size > 0) {
       const filtered = pool.filter((m) => !excludedProviderIds.has(m.providerId))
       if (filtered.length > 0) pool = filtered
@@ -1744,9 +1776,11 @@ export async function selectAutoModel(
       const chosen = sorted[0]
       return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
     }
-    // 若绘图池空，尝试从全部可用模型中找一个绘图模型
+    // 若绘图池空，尝试从全部可用模型中找一个未尝试过的绘图模型
     const fallbackDrawing = allModels.filter((m) => {
+      if (excludedModelIds && excludedModelIds.has(m.fullId)) return false
       const mConfig = m.provider.models.find((x) => x.id === m.modelId)
+      if (mConfig?.permanentlyDisabled || (mConfig?.cooldownUntil && mConfig.cooldownUntil > now)) return false
       return isDrawingModel(m.modelId, mConfig?.category)
     })
     if (fallbackDrawing.length > 0) {
@@ -1758,15 +1792,43 @@ export async function selectAutoModel(
   // 3. 通用第一梯队池 (Tier 1) 选择
   let activeTier1 = storage.tier1.filter((m) => modelMap.has(m.fullId))
 
-  // 只有在第一梯队完全没有可用模型时才紧急补位，平时直接使用池内就绪模型
+  // 排除已经在本次请求中尝试失败的具体模型
+  if (excludedModelIds && excludedModelIds.size > 0) {
+    activeTier1 = activeTier1.filter((m) => !excludedModelIds.has(m.fullId))
+  }
+
+  // 排除处于冷却中或已被永久禁用的模型
+  const now = Date.now()
+  activeTier1 = activeTier1.filter((m) => {
+    const item = modelMap.get(m.fullId)
+    if (!item) return false
+    const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+    if (mConfig?.permanentlyDisabled) return false
+    if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+    return true
+  })
+
+  // 只有在第一梯队完全没有可用模型时才紧急补位
   if (activeTier1.length === 0) {
     const backfilled = await backfillTier1FromTier2(env, storage)
-    activeTier1 = backfilled.tier1.filter((m) => modelMap.has(m.fullId))
+    let refreshed = backfilled.tier1.filter((m) => modelMap.has(m.fullId))
+    if (excludedModelIds && excludedModelIds.size > 0) {
+      refreshed = refreshed.filter((m) => !excludedModelIds.has(m.fullId))
+    }
+    refreshed = refreshed.filter((m) => {
+      const item = modelMap.get(m.fullId)
+      if (!item) return false
+      const mConfig = item.provider.models.find((x) => x.id === item.modelId)
+      if (mConfig?.permanentlyDisabled) return false
+      if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+      return true
+    })
+    activeTier1 = refreshed
   }
 
   if (activeTier1.length === 0) return null
 
-  // 4. 不同提供商模型更换：如果有要排除的提供商（例如因 402/余额不足等原因报错），优先排除它们
+  // 4. 不同提供商模型更换：如果有要排除的提供商（例如上一次尝试失败），优先排除它们
   if (excludedProviderIds && excludedProviderIds.size > 0) {
     const filtered = activeTier1.filter((m) => !excludedProviderIds.has(m.providerId))
     if (filtered.length > 0) {
@@ -1847,6 +1909,8 @@ export async function recordBusinessLatency(
       bStat.avgLatency = Math.round(bStat.avgLatency * 0.7 + latency * 0.3)
     } else {
       bStat.failureCount++
+      // 业务故障惩罚：将平均延迟拉升至 9999ms，使故障模型在下次选择时自动沉底
+      bStat.avgLatency = 9999
     }
 
     storage.businessStats[fullId] = bStat

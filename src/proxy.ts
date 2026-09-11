@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.0
+ * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -8,7 +8,7 @@ import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './conf
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
 import { detectPermanentFailure } from './models'
-import { selectAutoModel, recordBusinessLatency, getTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
+import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
 
 async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
   try {
@@ -118,6 +118,17 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
           lastTestedAt: Date.now(),
           error: `HTTP ${status}: ${errorMsg}`,
         }
+        // 惩罚故障模型的业务平均延迟，确保其排序沉底
+        storage.businessStats[fullId] = {
+          ...(storage.businessStats[fullId] || { totalRequests: 0, successCount: 0, lastUsedAt: Date.now() }),
+          avgLatency: 9999,
+          failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
+        }
+        // 核心修复：立即持久化保存更新后的梯队池状态到 KV，杜绝剔除状态丢失
+        storage.updatedAt = new Date().toISOString()
+        await saveTierStorage(env, storage)
+
+        // 尝试自动补位新模型填补空位
         if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
         if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
         if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
@@ -569,6 +580,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     }
 
     const triedProviders = new Set<string>()
+    const triedModels = new Set<string>() // 记录本次请求中已经尝试过的具体模型，防止死循环重复请求同一个故障模型
     let currentModel = model
     let attempts = 0
     const maxAttempts = isAutoRequest ? 3 : 1 // 指定具体模型时严格只尝试 1 次，不切换不漂移
@@ -577,17 +589,18 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       attempts++
 
       if (isAutoRequest) {
-        const autoRes = await selectAutoModel(c.env, isLongText, sessionId, triedProviders, poolType)
+        // 传递 triedModels 给 selectAutoModel，保证已尝试失败的具体模型绝不会被重复选中
+        const autoRes = await selectAutoModel(c.env, isLongText, sessionId, triedProviders, poolType, triedModels)
         if (!autoRes) {
-          // 如果尝试了所有提供商，重置重新选，避免死循环
-          const fallbackRes = await selectAutoModel(c.env, isLongText, sessionId, new Set(), poolType)
+          // 如果排除了已尝试提供商后找不到模型，尝试放宽提供商限制，但绝对继续排除已失败的具体模型！
+          const fallbackRes = await selectAutoModel(c.env, isLongText, sessionId, new Set(), poolType, triedModels)
           if (!fallbackRes) {
-            await recordLog(c.env, startTime, requestedModel, 503, '当前梯队池无可用的模型', {
+            await recordLog(c.env, startTime, requestedModel, 503, '当前梯队池无可用的健康模型', {
               routePath,
               isStream: isStreamReq,
               clientIp,
             })
-            return c.json({ error: { message: '当前梯队池暂无可用的模型，请先配置模型或进行探测补位', type: 'service_unavailable' } }, 503)
+            return c.json({ error: { message: '当前梯队池暂无可用的健康模型，请先配置模型或进行探测补位', type: 'service_unavailable' } }, 503)
           }
           currentModel = fallbackRes.fullId
         } else {
@@ -613,6 +626,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       const { providerId, modelId } = parsed
       triedProviders.add(providerId)
+      triedModels.add(currentModel)
 
       const provider = await getProvider(c.env, providerId)
 

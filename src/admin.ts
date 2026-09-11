@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.0
+ * 更新说明: 全池子故障自动切换与席位满额保障机制重构：增删改提供商及模型时自动触发梯队补满校验。
  */
 import { Context } from 'hono'
 import {
@@ -144,6 +144,8 @@ export async function handleCreateProvider(c: Context<{ Bindings: Env }>) {
   }
 
   await addProvider(c.env, provider)
+  // 顺风车唤醒梯队自愈与补位校验
+  await ensureTierStorage(c.env).catch(() => {})
   return c.json<ApiResponse<Provider>>({ success: true, data: provider }, 201)
 }
 
@@ -169,6 +171,9 @@ export async function handleUpdateProvider(c: Context<{ Bindings: Env }>) {
     return c.json<ApiResponse>({ success: false, message: '提供商不存在' }, 404)
   }
 
+  // 顺风车唤醒梯队自愈与补位校验
+  await ensureTierStorage(c.env).catch(() => {})
+
   return c.json<ApiResponse<Provider>>({ success: true, data: updated })
 }
 
@@ -179,6 +184,8 @@ export async function handleDeleteProvider(c: Context<{ Bindings: Env }>) {
   if (!deleted) {
     return c.json<ApiResponse>({ success: false, message: '提供商不存在' }, 404)
   }
+  // 顺风车唤醒梯队自愈与补位校验
+  await ensureTierStorage(c.env).catch(() => {})
   return c.json<ApiResponse>({ success: true, message: '提供商已删除' })
 }
 
