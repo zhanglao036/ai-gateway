@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 新增控制台顶部“实时连接模型看板”，一目了然显示当前正在连接模型与真实流量追踪，强化优先连接席位标识
+ * 版本号: v1.1.8
+ * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -9,7 +9,6 @@ import type { Env, TierStorage, TierSlotsConfig } from './types'
 import { CSS_CONTENT } from './pages.css'
 import { SHARED_JS, renderSiteFooter } from './shared.js'
 import { getTierStorage, getTierSlotsConfig } from './tiers'
-import { getLastActiveConnection, type ActiveConnectionState } from './proxy'
 
 // 前端页面模板：仅重构视觉与交互，保持后端路由、KV 结构和 API 契约不变。
 const escapePageHtml = (value: unknown) => String(value ?? '')
@@ -597,184 +596,6 @@ ${H('登录')}
  * 2. 独立函数渲染，确保 HTML 结构安全与转义完全闭合
  * 3. 清晰直观展示三大梯队池每个席位当前连接的模型全称、所属渠道标识与延迟指标
  */
-/**
- * 实时连接监控看板（控制台顶部专属模块）
- * 1. 一目了然展示当前正在优先连接的三大通道主力模型（#1 黄金席位）
- * 2. 实时追踪最新真实业务请求的实际上游直连模型与响应耗时
- * 3. 严格遵循 0 KV 开销策略，使用前端秒级轻量同步与纯内存状态
- */
-function renderActiveConnectionHub(tierData: TierStorage, lastActive: ActiveConnectionState | null): string {
-  const tier1Primary = tierData.tier1 && tierData.tier1[0]
-  const openclawPrimary = tierData.tierOpenclaw && tierData.tierOpenclaw[0]
-  const drawingPrimary = tierData.tierDrawing && tierData.tierDrawing[0]
-
-  const t1Model = tier1Primary ? escapePageHtml(tier1Primary.fullId) : '暂未连接'
-  const t1Provider = tier1Primary ? escapePageHtml(tier1Primary.fullId.split('/')[0]) : '-'
-  const t1ProbeLat = tier1Primary && tierData.probeStats[tier1Primary.fullId]?.latency ? tierData.probeStats[tier1Primary.fullId].latency + ' ms' : '就绪中'
-  const t1BusLat = tier1Primary && tierData.businessStats[tier1Primary.fullId]?.avgLatency ? tierData.businessStats[tier1Primary.fullId].avgLatency + ' ms' : '暂无请求'
-
-  const ocModel = openclawPrimary ? escapePageHtml(openclawPrimary.fullId) : '暂未连接'
-  const ocProvider = openclawPrimary ? escapePageHtml(openclawPrimary.fullId.split('/')[0]) : '-'
-  const ocProbeLat = openclawPrimary && tierData.probeStats[openclawPrimary.fullId]?.latency ? tierData.probeStats[openclawPrimary.fullId].latency + ' ms' : '就绪中'
-  const ocBusLat = openclawPrimary && tierData.businessStats[openclawPrimary.fullId]?.avgLatency ? tierData.businessStats[openclawPrimary.fullId].avgLatency + ' ms' : '暂无请求'
-
-  const drModel = drawingPrimary ? escapePageHtml(drawingPrimary.fullId) : '暂未连接'
-  const drProvider = drawingPrimary ? escapePageHtml(drawingPrimary.fullId.split('/')[0]) : '-'
-  const drProbeLat = drawingPrimary && tierData.probeStats[drawingPrimary.fullId]?.latency ? tierData.probeStats[drawingPrimary.fullId].latency + ' ms' : '就绪中'
-
-  let lastActiveHtml = ''
-  if (lastActive) {
-    const safeLastModel = escapePageHtml(lastActive.model)
-    const safeReq = escapePageHtml(lastActive.requestedModel)
-    const safeProv = escapePageHtml(lastActive.providerName || lastActive.providerId)
-    lastActiveHtml = `
-      <div id="hub-last-active-box" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:0.5rem;padding:0.65rem 1rem;margin-top:1rem;">
-        <div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;">
-          <span style="display:inline-flex;align-items:center;gap:0.35rem;font-size:0.75rem;font-weight:700;color:#166534;background:#dcfce7;padding:0.2rem 0.5rem;border-radius:0.3rem;">
-            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 2px rgba(22,163,74,0.25);"></span>
-            最新真实流量连接
-          </span>
-          <span style="font-size:0.8125rem;color:#1e293b;font-weight:600;">
-            客户端请求 <code style="font-weight:700;color:#0284c7;background:#e0f2fe;padding:0.15rem 0.35rem;border-radius:0.2rem;">${safeReq}</code>
-            ➔ 实际上游直连 <code style="font-weight:800;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;padding:0.15rem 0.4rem;border-radius:0.2rem;font-family:monospace;">${safeLastModel}</code>
-          </span>
-          <span style="font-size:0.75rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.35rem;border-radius:0.2rem;font-weight:600;">${safeProv}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:0.75rem;font-size:0.75rem;color:#166534;font-weight:600;">
-          <span><i class="fas fa-stopwatch"></i> 耗时: <b>${lastActive.latency} ms</b></span>
-          <span><i class="fas fa-clock"></i> 时间: <b>${lastActive.time}</b></span>
-          <span><i class="fas fa-check-circle" style="color:#16a34a;"></i> 状态: <b>HTTP ${lastActive.status}</b></span>
-        </div>
-      </div>
-    `
-  } else {
-    lastActiveHtml = `
-      <div id="hub-last-active-box" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;background:#f8fafc;border:1px solid #e2e8f0;border-radius:0.5rem;padding:0.65rem 1rem;margin-top:1rem;">
-        <div style="display:flex;align-items:center;gap:0.5rem;font-size:0.8125rem;color:#64748b;">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#94a3b8;"></span>
-          <span><b>真实流量监听就绪</b>：网关服务正常运行中。当客户端（如 OpenClaw / Cursor 等）发起请求时，此处将毫秒级同步展示实际连接的上游模型与耗时。</span>
-        </div>
-        <div style="font-size:0.75rem;color:#94a3b8;"><i class="fas fa-satellite-dish"></i> 实时监听中 · 0 额外KV开销</div>
-      </div>
-    `
-  }
-
-  return `
-  <section id="active-connection-hub" class="workspace-section" style="margin-bottom:1.5rem;" aria-label="实时连接模型看板">
-    <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.03);">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem;border-bottom:1px solid #f1f5f9;padding-bottom:0.75rem;">
-        <div style="display:flex;align-items:center;gap:0.5rem;">
-          <span style="display:inline-flex;width:10px;height:10px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,0.2);"></span>
-          <h2 style="font-size:1.1rem;font-weight:800;color:#0f172a;margin:0;display:flex;align-items:center;gap:0.4rem;">
-            <i class="fas fa-network-wired" style="color:#2563eb;"></i> 当前正在连接模型 (实时看板)
-          </h2>
-          <span style="font-size:0.75rem;padding:0.15rem 0.5rem;background:#ecfdf5;color:#065f46;border-radius:0.25rem;font-weight:600;">
-            三大路由通道优先席位一目了然
-          </span>
-        </div>
-        <div style="display:flex;align-items:center;gap:0.5rem;">
-          <span id="hub-refresh-timer" style="font-size:0.75rem;color:#94a3b8;"><i class="fas fa-sync-alt fa-spin" style="font-size:0.7rem;display:none;" id="hub-spin"></i> 内存秒级同步</span>
-          <button type="button" class="btn btn-gh btn-xs" onclick="refreshActiveConnectionHub(true)" title="立即刷新连接状态"><i class="fas fa-sync-alt"></i> 手动刷新</button>
-        </div>
-      </div>
-
-      <!-- 三大通道当前连接主力模型 -->
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:0.85rem;">
-        
-        <!-- 1. 通用对话主力 -->
-        <div style="background:#f0f9ff;border:2px solid #0284c7;border-radius:0.625rem;padding:0.85rem 1rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 2px 4px rgba(2,132,199,0.06);">
-          <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-              <span style="font-size:0.75rem;font-weight:800;color:#ffffff;background:#0284c7;padding:0.15rem 0.5rem;border-radius:0.25rem;display:inline-flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-crown"></i> 👑 通用对话主力 (#1 席位)
-              </span>
-              <span style="font-size:0.7rem;color:#0369a1;font-weight:700;">model: auto</span>
-            </div>
-            <div style="font-size:0.7rem;color:#0369a1;margin-bottom:0.35rem;font-weight:600;">当前正在优先连接：</div>
-            <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #bae6fd;padding:0.35rem 0.5rem;border-radius:0.375rem;gap:0.5rem;margin-bottom:0.5rem;">
-              <code id="hub-t1-model" style="font-size:0.875rem;font-weight:800;color:#0f172a;font-family:monospace;word-break:break-all;" title="${t1Model}">${t1Model}</code>
-              <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText('${t1Model}');toast('已复制模型ID','success')" title="复制模型ID" style="flex-shrink:0;"><i class="far fa-copy"></i></button>
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem;">
-              <span style="font-size:0.6875rem;background:#e0f2fe;color:#0369a1;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:700;"><i class="fas fa-server"></i> 提供商: <span id="hub-t1-provider">${t1Provider}</span></span>
-              <span style="font-size:0.6875rem;background:#ffffff;border:1px solid #bae6fd;color:#0284c7;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:600;"><i class="fas fa-bolt"></i> 黄金首选</span>
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.35rem;background:#ffffff;border:1px solid #bae6fd;padding:0.3rem 0.5rem;border-radius:0.3rem;font-size:0.7rem;">
-            <div><span style="color:#64748b;">探测延迟:</span> <b id="hub-t1-probe" style="color:#0284c7;">${t1ProbeLat}</b></div>
-            <div><span style="color:#64748b;">业务延迟:</span> <b id="hub-t1-bus" style="color:#16a34a;">${t1BusLat}</b></div>
-          </div>
-        </div>
-
-        <!-- 2. OpenClaw 智能体主力 -->
-        <div style="background:#faf5ff;border:2px solid #9333ea;border-radius:0.625rem;padding:0.85rem 1rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 2px 4px rgba(147,51,234,0.06);">
-          <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-              <span style="font-size:0.75rem;font-weight:800;color:#ffffff;background:#9333ea;padding:0.15rem 0.5rem;border-radius:0.25rem;display:inline-flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-robot"></i> 🤖 OpenClaw 主力 (#1 席位)
-              </span>
-              <span style="font-size:0.7rem;color:#7e22ce;font-weight:700;">model: openclaw/auto</span>
-            </div>
-            <div style="font-size:0.7rem;color:#7e22ce;margin-bottom:0.35rem;font-weight:600;">当前正在优先连接：</div>
-            <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #d8b4fe;padding:0.35rem 0.5rem;border-radius:0.375rem;gap:0.5rem;margin-bottom:0.5rem;">
-              <code id="hub-oc-model" style="font-size:0.875rem;font-weight:800;color:#0f172a;font-family:monospace;word-break:break-all;" title="${ocModel}">${ocModel}</code>
-              <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText('${ocModel}');toast('已复制模型ID','success')" title="复制模型ID" style="flex-shrink:0;"><i class="far fa-copy"></i></button>
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem;">
-              <span style="font-size:0.6875rem;background:#ede9fe;color:#6d28d9;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:700;"><i class="fas fa-server"></i> 提供商: <span id="hub-oc-provider">${ocProvider}</span></span>
-              <span style="font-size:0.6875rem;background:#ffffff;border:1px solid #d8b4fe;color:#7e22ce;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:600;"><i class="fas fa-check-double"></i> 工具实测通过</span>
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.35rem;background:#ffffff;border:1px solid #d8b4fe;padding:0.3rem 0.5rem;border-radius:0.3rem;font-size:0.7rem;">
-            <div><span style="color:#64748b;">探测延迟:</span> <b id="hub-oc-probe" style="color:#9333ea;">${ocProbeLat}</b></div>
-            <div><span style="color:#64748b;">业务延迟:</span> <b id="hub-oc-bus" style="color:#16a34a;">${ocBusLat}</b></div>
-          </div>
-        </div>
-
-        <!-- 3. 绘图生图主力 -->
-        <div style="background:#fff1f2;border:2px solid #e11d48;border-radius:0.625rem;padding:0.85rem 1rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 2px 4px rgba(225,29,72,0.06);">
-          <div>
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
-              <span style="font-size:0.75rem;font-weight:800;color:#ffffff;background:#e11d48;padding:0.15rem 0.5rem;border-radius:0.25rem;display:inline-flex;align-items:center;gap:0.25rem;">
-                <i class="fas fa-paint-brush"></i> 🎨 绘图专属主力 (#1 席位)
-              </span>
-              <span style="font-size:0.7rem;color:#be123c;font-weight:700;">model: drawing/auto</span>
-            </div>
-            <div style="font-size:0.7rem;color:#be123c;margin-bottom:0.35rem;font-weight:600;">当前正在优先连接：</div>
-            <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #fecdd3;padding:0.35rem 0.5rem;border-radius:0.375rem;gap:0.5rem;margin-bottom:0.5rem;">
-              <code id="hub-dr-model" style="font-size:0.875rem;font-weight:800;color:#0f172a;font-family:monospace;word-break:break-all;" title="${drModel}">${drModel}</code>
-              <button class="icon-btn" type="button" onclick="navigator.clipboard.writeText('${drModel}');toast('已复制模型ID','success')" title="复制模型ID" style="flex-shrink:0;"><i class="far fa-copy"></i></button>
-            </div>
-            <div style="display:flex;gap:0.35rem;align-items:center;flex-wrap:wrap;margin-bottom:0.5rem;">
-              <span style="font-size:0.6875rem;background:#ffe4e6;color:#9f1239;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:700;"><i class="fas fa-server"></i> 提供商: <span id="hub-dr-provider">${drProvider}</span></span>
-              <span style="font-size:0.6875rem;background:#ffffff;border:1px solid #fecdd3;color:#be123c;padding:0.1rem 0.4rem;border-radius:0.2rem;font-weight:600;"><i class="fas fa-images"></i> 图像生图通道</span>
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.35rem;background:#ffffff;border:1px solid #fecdd3;padding:0.3rem 0.5rem;border-radius:0.3rem;font-size:0.7rem;">
-            <div><span style="color:#64748b;">探测延迟:</span> <b id="hub-dr-probe" style="color:#e11d48;">${drProbeLat}</b></div>
-            <div><span style="color:#64748b;">就绪状态:</span> <b style="color:#16a34a;">正常服务中</b></div>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- 真实流量连接实时展示条 -->
-      <div id="hub-last-active-container">
-        ${lastActiveHtml}
-      </div>
-
-    </div>
-  </section>
-  `
-}
-
-/**
- * 梯队池模型卡片渲染函数
- * 优化点：
- * 1. 严格遵守零额外 KV 消耗原则，只读取传入的 tierData 缓存
- * 2. 独立函数渲染，确保 HTML 结构安全与转义完全闭合
- * 3. 清晰直观展示三大梯队池每个席位当前连接的模型全称、所属渠道标识与延迟指标，且重点高亮 #1 席位正在优先连接
- */
 function renderAdminTierPools(tierData: TierStorage): string {
   // 提取三大梯队池当前连接的模型数据
   const tier1Models = tierData.tier1 || []
@@ -817,31 +638,16 @@ function renderAdminTierPools(tierData: TierStorage): string {
         const safeProvider = escapePageHtml(providerPart)
         const categoryText = escapePageHtml(probeStat?.category || '通用模型')
 
-        const isPrimarySlot = idx === 0
-        const cardBorder = isPrimarySlot ? '2px solid ' + themeColor : '1px solid ' + borderColor
-        const cardBg = isPrimarySlot ? '#ffffff' : bgColor
-        const cardShadow = isPrimarySlot ? '0 2px 8px rgba(0,0,0,0.06), 0 0 0 1px ' + themeColor + '25' : '0 1px 2px rgba(0,0,0,0.02)'
-
-        html += '<div style="background:' + cardBg + ';border:' + cardBorder + ';border-radius:0.5rem;padding:0.5rem 0.65rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:' + cardShadow + ';">'
+        html += '<div style="background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:0.5rem;padding:0.5rem 0.65rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 1px 2px rgba(0,0,0,0.02);">'
         html += '  <div>'
         html += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">'
-        if (isPrimarySlot) {
-          html += '      <span style="font-size:0.7rem;font-weight:800;color:#ffffff;background:' + themeColor + ';padding:0.12rem 0.45rem;border-radius:0.25rem;display:inline-flex;align-items:center;gap:0.25rem;box-shadow:0 1px 2px rgba(0,0,0,0.1);">'
-          html += '        <i class="fas fa-crown"></i> 👑 优先连接 (#1)'
-          html += '      </span>'
-          html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:700;display:flex;align-items:center;gap:0.25rem;">'
-          html += '        <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 2px rgba(22,163,74,0.25);"></span>'
-          html += '        优先就绪'
-          html += '      </span>'
-        } else {
-          html += '      <span style="font-size:0.7rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.1rem 0.35rem;border-radius:0.2rem;">'
-          html += '        ' + slotPrefix + ' #' + (idx + 1)
-          html += '      </span>'
-          html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.25rem;">'
-          html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
-          html += '        运行中'
-          html += '      </span>'
-        }
+        html += '      <span style="font-size:0.7rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.1rem 0.35rem;border-radius:0.2rem;">'
+        html += '        ' + slotPrefix + ' #' + (idx + 1)
+        html += '      </span>'
+        html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:600;display:flex;align-items:center;gap:0.25rem;">'
+        html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
+        html += '        运行中'
+        html += '      </span>'
         html += '    </div>'
         html += '    <div style="margin-bottom:0.35rem;">'
         html += '      <div style="display:flex;align-items:center;justify-content:space-between;background:#ffffff;border:1px solid #e2e8f0;padding:0.2rem 0.35rem;border-radius:0.3rem;gap:0.35rem;">'
@@ -1017,7 +823,6 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
     modelCursors: {},
   }
   const tierData = (await getTierStorage(c.env)) || defaultTierData
-  const lastActive = getLastActiveConnection()
   const tier1Models = tierData.tier1 || []
   const tierOpenclawModels = tierData.tierOpenclaw || []
   const tierDrawingModels = tierData.tierDrawing || []
@@ -1095,8 +900,6 @@ ${H('管理')}
           <div><span>${proxyKeys.length}</span><p>转发 Key</p><small>${enabledProxyKeysCount} 个可用</small></div>
         </div>
       </section>
-
-      ${renderActiveConnectionHub(tierData, lastActive)}
 
       ${renderAdminTierPools(tierData)}
 
@@ -4076,89 +3879,6 @@ async function saveCustomRoutesToServer() {
     aM('保存指定路由异常：' + ((err && err.message) || String(err)), 'error');
   }
 }
-
-async function refreshActiveConnectionHub(isManual) {
-  var spin = document.getElementById('hub-spin');
-  if (spin) spin.style.display = 'inline-block';
-  try {
-    var res = await fetch('/admin/api/active-connection');
-    var json = await res.json();
-    if (json.success && json.data) {
-      var d = json.data;
-      var primaries = d.primaries || {};
-      
-      var t1 = primaries.tier1;
-      var t1El = document.getElementById('hub-t1-model');
-      var t1ProvEl = document.getElementById('hub-t1-provider');
-      var t1ProbeEl = document.getElementById('hub-t1-probe');
-      var t1BusEl = document.getElementById('hub-t1-bus');
-      if (t1 && t1El) {
-        t1El.textContent = t1.fullId;
-        t1El.title = t1.fullId;
-        if (t1ProvEl) t1ProvEl.textContent = t1.providerId;
-        if (t1ProbeEl) t1ProbeEl.textContent = t1.probeLatency ? t1.probeLatency + ' ms' : '就绪中';
-        if (t1BusEl) t1BusEl.textContent = t1.businessLatency ? t1.businessLatency + ' ms' : '暂无请求';
-      }
-
-      var oc = primaries.openclaw;
-      var ocEl = document.getElementById('hub-oc-model');
-      var ocProvEl = document.getElementById('hub-oc-provider');
-      var ocProbeEl = document.getElementById('hub-oc-probe');
-      var ocBusEl = document.getElementById('hub-oc-bus');
-      if (oc && ocEl) {
-        ocEl.textContent = oc.fullId;
-        ocEl.title = oc.fullId;
-        if (ocProvEl) ocProvEl.textContent = oc.providerId;
-        if (ocProbeEl) ocProbeEl.textContent = oc.probeLatency ? oc.probeLatency + ' ms' : '就绪中';
-        if (ocBusEl) ocBusEl.textContent = oc.businessLatency ? oc.businessLatency + ' ms' : '暂无请求';
-      }
-
-      var dr = primaries.drawing;
-      var drEl = document.getElementById('hub-dr-model');
-      var drProvEl = document.getElementById('hub-dr-provider');
-      var drProbeEl = document.getElementById('hub-dr-probe');
-      if (dr && drEl) {
-        drEl.textContent = dr.fullId;
-        drEl.title = dr.fullId;
-        if (drProvEl) drProvEl.textContent = dr.providerId;
-        if (drProbeEl) drProbeEl.textContent = dr.probeLatency ? dr.probeLatency + ' ms' : '就绪中';
-      }
-
-      var last = d.lastActive;
-      var container = document.getElementById('hub-last-active-container');
-      if (container && last) {
-        container.innerHTML = '<div id="hub-last-active-box" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:0.5rem;padding:0.65rem 1rem;margin-top:1rem;">' +
-          '<div style="display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;">' +
-            '<span style="display:inline-flex;align-items:center;gap:0.35rem;font-size:0.75rem;font-weight:700;color:#166534;background:#dcfce7;padding:0.2rem 0.5rem;border-radius:0.3rem;">' +
-              '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 2px rgba(22,163,74,0.25);"></span>' +
-              '最新真实流量连接' +
-            '</span>' +
-            '<span style="font-size:0.8125rem;color:#1e293b;font-weight:600;">' +
-              '客户端请求 <code style="font-weight:700;color:#0284c7;background:#e0f2fe;padding:0.15rem 0.35rem;border-radius:0.2rem;">' + escapeHtml(last.requestedModel || '') + '</code>' +
-              ' ➔ 实际上游直连 <code style="font-weight:800;color:#0f172a;background:#ffffff;border:1px solid #cbd5e1;padding:0.15rem 0.4rem;border-radius:0.2rem;font-family:monospace;">' + escapeHtml(last.model || '') + '</code>' +
-            '</span>' +
-            '<span style="font-size:0.75rem;background:#f1f5f9;color:#475569;padding:0.1rem 0.35rem;border-radius:0.2rem;font-weight:600;">' + escapeHtml(last.providerName || last.providerId || '') + '</span>' +
-          '</div>' +
-          '<div style="display:flex;align-items:center;gap:0.75rem;font-size:0.75rem;color:#166534;font-weight:600;">' +
-            '<span><i class="fas fa-stopwatch"></i> 耗时: <b>' + (last.latency || 0) + ' ms</b></span>' +
-            '<span><i class="fas fa-clock"></i> 时间: <b>' + escapeHtml(last.time || '') + '</b></span>' +
-            '<span><i class="fas fa-check-circle" style="color:#16a34a;"></i> 状态: <b>HTTP ' + (last.status || 200) + '</b></span>' +
-          '</div>' +
-        '</div>';
-      }
-      if (isManual) toast('实时连接看板已同步', 'success');
-    }
-  } catch (e) {
-    console.error('刷新实时连接状态失败', e);
-  } finally {
-    if (spin) spin.style.display = 'none';
-  }
-}
-
-// 页面加载启动 5 秒纯内存自动轮询 (0 KV 读写消耗)
-setInterval(function() {
-  refreshActiveConnectionHub(false);
-}, 5000);
 
 loadCustomRoutes();
 </script>
