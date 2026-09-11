@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.1.6
- * 更新说明: 实现梯队数据保存、配置统一保存与探针探测数据全面联动顺风车，一次性打包写入 KV
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.1.6'
+export const VERSION = 'v1.1.7'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

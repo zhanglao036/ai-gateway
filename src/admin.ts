@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.6
- * 更新说明: 实现全部保存时全系统探针、健康度、梯队自愈与请求日志 100% 顺风车打包落盘
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
  */
 import { Context } from 'hono'
 import {
@@ -45,6 +45,7 @@ import {
   runOpenclawSpecificProbe,
   backfillTier1FromTier2,
   backfillOpenclawTier,
+  backfillDrawingTier,
   runInitCrossProbe,
   applyModelProbeResult,
   selectAutoModel,
@@ -904,25 +905,33 @@ export async function handleClearProviderModels(c: Context<{ Bindings: Env }>) {
   })
 }
 
-// ===== 修改单个模型分类/状态解封 =====
+// ===== 修改单个模型分类/状态解封/启用状态与标签切换 =====
 export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
   const providerId = c.req.param('id')
-  const rawModelId = c.req.param('*') || c.req.param('modelId') || ''
-  const modelId = decodeURIComponent(rawModelId)
+  let rawModelId = c.req.param('modelId') || c.req.param('*') || ''
 
-  if (!providerId || !modelId) return c.json<ApiResponse>({ success: false, message: '参数错误' }, 400)
-
-  const provider = await getProvider(c.env, providerId)
-  if (!provider) return c.json<ApiResponse>({ success: false, message: '提供商不存在' }, 404)
-
+  // 1. 安全读取请求体，并支持从 body 自动兜底读取 modelId（兼容带斜杠的模型全称）
   const body = await c.req.json<{
     enabled?: boolean
     category?: '文本' | '绘图' | '多模态' | '其他' | string
     unblockPermanent?: boolean
     openclawVerified?: boolean
-  }>()
+    modelId?: string
+    id?: string
+  }>().catch(() => ({} as any))
+
+  if (!rawModelId && body) {
+    rawModelId = body.modelId || body.id || ''
+  }
+  const modelId = decodeURIComponent(rawModelId)
+
+  if (!providerId || !modelId) return c.json<ApiResponse>({ success: false, message: '参数错误: 缺少提供商ID或模型ID' }, 400)
+
+  const provider = await getProvider(c.env, providerId)
+  if (!provider) return c.json<ApiResponse>({ success: false, message: '提供商不存在' }, 404)
 
   let found = false
+  // 2. 遍历更新提供商内特定模型的属性
   const updatedModels = provider.models.map((m) => {
     if (m.id !== modelId) return m
     found = true
@@ -956,14 +965,15 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
 
   if (!found) return c.json<ApiResponse>({ success: false, message: '模型不存在' }, 404)
 
+  // 3. 更新提供商模型配置至内存与KV
   await updateProvider(c.env, providerId, { models: updatedModels })
 
-  // 顺风车同步更新梯队数据中对应的 probeStats，并联动清理与补位 OpenClaw 专属池
+  // 4. 顺风车同步联动梯队池自愈：若模型被禁用或取消认证，彻底从各池剔除并自动补齐席位
   const tierData = await getTierStorage(c.env)
   if (tierData) {
     const fullId = `${providerId}/${modelId}`
 
-    // 逻辑 1：更新探针统计与自定义认证标记
+    // 逻辑 A：更新探针统计与自定义认证标记
     if (typeof body.openclawVerified === 'boolean') {
       if (tierData.probeStats && tierData.probeStats[fullId]) {
         tierData.probeStats[fullId].openclawVerified = body.openclawVerified
@@ -979,18 +989,38 @@ export async function handleUpdateModelStatus(c: Context<{ Bindings: Env }>) {
       }
     }
 
-    // 逻辑 2：当用户取消认证 (openclawVerified === false) 或关闭该模型 (enabled === false) 时，立刻从 OpenClaw 专属池剔除
-    const shouldRemoveFromOpenclaw = body.openclawVerified === false || body.enabled === false
-    if (shouldRemoveFromOpenclaw && tierData.tierOpenclaw) {
-      const initLen = tierData.tierOpenclaw.length
-      tierData.tierOpenclaw = tierData.tierOpenclaw.filter((m) => m.fullId !== fullId)
-
-      // 如果确实触发了剔除动作，自动调用补位逻辑拉入新的健康模型，一次性写入 KV 保存
-      if (tierData.tierOpenclaw.length !== initLen) {
-        await backfillOpenclawTier(c.env, tierData)
-      } else {
-        await saveTierStorage(c.env, tierData)
+    // 逻辑 B：当模型被管理员关闭（enabled === false）时，立即从所有梯队池彻底踢出并自动补齐健康席位
+    if (body.enabled === false) {
+      let tierChanged = false
+      if (tierData.tier1 && tierData.tier1.some((m) => m.fullId === fullId)) {
+        tierData.tier1 = tierData.tier1.filter((m) => m.fullId !== fullId)
+        tierChanged = true
+        await backfillTier1FromTier2(c.env, tierData)
       }
+      if (tierData.tier2 && tierData.tier2.some((m) => m.fullId === fullId)) {
+        tierData.tier2 = tierData.tier2.filter((m) => m.fullId !== fullId)
+        tierChanged = true
+      }
+      if (tierData.tierOpenclaw && tierData.tierOpenclaw.some((m) => m.fullId === fullId)) {
+        tierData.tierOpenclaw = tierData.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        tierChanged = true
+        await backfillOpenclawTier(c.env, tierData)
+      }
+      if (tierData.tierDrawing && tierData.tierDrawing.some((m) => m.fullId === fullId)) {
+        tierData.tierDrawing = tierData.tierDrawing.filter((m) => m.fullId !== fullId)
+        tierChanged = true
+        await backfillDrawingTier(c.env, tierData)
+      }
+      tierData.updatedAt = new Date().toISOString()
+      await saveTierStorage(c.env, tierData)
+    } else if (body.openclawVerified === false) {
+      // 逻辑 C：用户仅手动取消了 OpenClaw 标签，从 OpenClaw 专属池剔除并拉入新替补
+      if (tierData.tierOpenclaw && tierData.tierOpenclaw.some((m) => m.fullId === fullId)) {
+        tierData.tierOpenclaw = tierData.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        await backfillOpenclawTier(c.env, tierData)
+      }
+      tierData.updatedAt = new Date().toISOString()
+      await saveTierStorage(c.env, tierData)
     } else {
       await saveTierStorage(c.env, tierData)
     }

@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.6
- * 更新说明: 实现梯队数据保存、配置统一保存与探针探测数据全面联动顺风车，一次性打包写入 KV
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
@@ -145,6 +145,7 @@ app.post('/admin/api/providers/:id/reset-models', handleResetProviderModels)
 app.post('/admin/api/providers/:id/fetch-models', handleFetchUpstreamModels)
 app.post('/admin/api/providers/:id/import-models', handleImportModels)
 app.delete('/admin/api/providers/:id/models', handleClearProviderModels)
+app.patch('/admin/api/providers/:id/models/:modelId{.*}', handleUpdateModelStatus)
 app.patch('/admin/api/providers/:id/models/*', handleUpdateModelStatus)
 app.post('/admin/api/providers/:id/test-openclaw', handleTestOpenclawModel)
 

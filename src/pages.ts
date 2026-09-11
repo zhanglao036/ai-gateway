@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.6
- * 更新说明: 实现梯队数据保存、配置统一保存与探针探测数据全面联动顺风车，一次性打包写入 KV
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -868,7 +868,7 @@ ${H('管理')}
 
   <div class="admin-main">
     <header class="admin-topbar">
-      <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span></a>
+      <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span><span class="version-badge" style="font-size:11px;padding:2px 7px;border-radius:999px;background:rgba(37,99,235,0.1);color:#2563eb;margin-left:8px;font-weight:600;border:1px solid rgba(37,99,235,0.2);">${SITE_CONFIG.version}</span></a>
       <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#tiers">梯队池</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
       <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
       <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
@@ -1060,7 +1060,7 @@ ${H('管理')}
                       `<div class="model-row-line-1">` +
                         `<input type="text" value="${escapePageHtml(m.id)}" class="model-id-input" id="mid-${escapePageHtml(p.id)}-${mi}" placeholder="模型 ID" ${styleAttr} title="${titleText}">` +
                         `<div class="model-row-actions-1">` +
-                          `<label class="tg" title="启用模型"><input type="checkbox" ${m.enabled !== false ? 'checked' : ''} id="men-${escapePageHtml(p.id)}-${mi}" aria-label="启用模型"><span class="sl"></span></label>` +
+                          `<label class="tg" title="启用/禁用模型"><input type="checkbox" ${m.enabled !== false ? 'checked' : ''} id="men-${escapePageHtml(p.id)}-${mi}" onchange="toggleModelEnabledBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" aria-label="启用/禁用模型"><span class="sl"></span></label>` +
                           `<button class="icon-btn" onclick="rmMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-idx="${mi}" title="移除模型" aria-label="移除模型"><i class="fas fa-times" aria-hidden="true"></i></button>` +
                         `</div>` +
                       `</div>` +
@@ -1428,6 +1428,46 @@ function updateModelCatBtn(selectEl) {
   var pid = selectEl.getAttribute('data-pid');
   var mid = selectEl.getAttribute('data-mid');
   updateModelCat(pid, mid, selectEl.value);
+}
+
+// 模型单行启用/禁用开关即时切换：点击后立即请求后台，同步踢出各梯队池并自动补齐健康席位
+async function toggleModelEnabledBtn(chk) {
+  var pid = chk.getAttribute('data-pid');
+  var mid = chk.getAttribute('data-mid');
+  var enabled = chk.checked;
+  if (!pid || !mid) return;
+  chk.disabled = true;
+  chk.style.opacity = '0.5';
+  try {
+    var res = await fetch('/admin/api/providers/' + encodeURIComponent(pid) + '/models/' + encodeURIComponent(mid), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: enabled, modelId: mid })
+    });
+    var data = await res.json();
+    if (data.success) {
+      toast('模型 ' + mid + ' 已' + (enabled ? '启用' : '禁用（已从各梯队池剔除并自动补齐替补）'), 'success');
+      // 同步内存中的草稿数据，防止后续统一保存覆盖
+      if (typeof draftProviders !== 'undefined' && Array.isArray(draftProviders)) {
+        var p = draftProviders.find(function(item) { return item.id === pid; });
+        if (p && p.models) {
+          var m = p.models.find(function(x) { return x.id === mid; });
+          if (m) m.enabled = enabled;
+        }
+      }
+      // 重新拉取并渲染梯队池看板，实时查看新席位与替补模型
+      if (typeof loadTierData === 'function') loadTierData();
+    } else {
+      toast('修改模型状态失败: ' + (data.message || '未知错误'), 'error');
+      chk.checked = !enabled; // 失败则还原勾选状态
+    }
+  } catch (err) {
+    toast('网络请求失败', 'error');
+    chk.checked = !enabled; // 失败则还原勾选状态
+  } finally {
+    chk.disabled = false;
+    chk.style.opacity = '1';
+  }
 }
 
 function hideMdlPanelBtn(btn) {
@@ -2277,7 +2317,7 @@ async function toggleOpenclawTag(pId, mId, currentVerified, badgeEl) {
     var res = await fetch('/admin/api/providers/' + encodeURIComponent(pId) + '/models/' + encodeURIComponent(mId), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ openclawVerified: newVerified })
+      body: JSON.stringify({ openclawVerified: newVerified, modelId: mId })
     });
     var data = await res.json();
     if (data.success) {
@@ -2684,7 +2724,7 @@ function renderProviderList() {
         '<div class="model-row-line-1">' +
           '<input type="text" value="' + mId + '" class="model-id-input" id="mid-' + pId + '-' + mi + '" placeholder="模型 ID" ' + styleAttr + ' title="' + titleText + '">' +
           '<div class="model-row-actions-1">' +
-            '<label class="tg" title="启用模型"><input type="checkbox" ' + (m.enabled !== false ? 'checked' : '') + ' id="men-' + pId + '-' + mi + '" onchange="markDirty(true)" aria-label="启用模型"><span class="sl"></span></label>' +
+            '<label class="tg" title="启用/禁用模型"><input type="checkbox" ' + (m.enabled !== false ? 'checked' : '') + ' id="men-' + pId + '-' + mi + '" onchange="toggleModelEnabledBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" aria-label="启用/禁用模型"><span class="sl"></span></label>' +
             '<button class="icon-btn" onclick="rmMdlBtn(this)" data-pid="' + pId + '" data-idx="' + mi + '" title="移除模型" aria-label="移除模型"><i class="fas fa-times" aria-hidden="true"></i></button>' +
           '</div>' +
         '</div>' +

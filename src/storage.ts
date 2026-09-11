@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.6
- * 更新说明: 实现梯队数据保存与探针探测数据全面联动顺风车，一次性打包写入 KV
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'

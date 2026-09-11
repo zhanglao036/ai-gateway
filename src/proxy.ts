@@ -1,3 +1,7 @@
+/**
+ * 版本号: v1.1.7
+ * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
+ */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
 import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './config'
@@ -633,8 +637,23 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
 
       const modelConfig = provider.models.find((m) => m.id === modelId)
-      // 如果是 auto 智能调度请求，需要严格检查模型配置与健康状态；
-      // 如果是用户指定具体模型（精准调用），无条件放行直连上游，不拦截冷却或封禁状态
+      // 核心安全防线：只要模型已被禁用（enabled: false），不论是自动调度还是指定调用，一律坚决拦截阻断
+      if (modelConfig && modelConfig.enabled === false) {
+        if (isAutoRequest && attempts < maxAttempts) {
+          continue
+        }
+        await recordLog(c.env, startTime, requestedModel, 403, `模型 "${modelId}" 已在控制台被禁用`, {
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+        })
+        return c.json({
+          error: { message: `模型 "${modelId}" 已被禁用，拒绝连接`, type: 'model_disabled' },
+        }, 403)
+      }
+
+      // 如果是 auto 智能调度请求，进一步严格检查模型未配置、永久失效或冷却期；
+      // 如果是用户指定具体模型（精准调用），放行健康探测
       if (isAutoRequest) {
         if (!modelConfig) {
           if (attempts < maxAttempts) continue
@@ -642,13 +661,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           return c.json({
             error: { message: `模型 "${modelId}" 未在提供商 "${provider.name}" 中配置`, type: 'invalid_request_error' },
           }, 404)
-        }
-        if (!modelConfig.enabled) {
-          if (attempts < maxAttempts) continue
-          await recordLog(c.env, startTime, requestedModel, 403, `模型 "${modelId}" 已禁用`)
-          return c.json({
-            error: { message: `模型 "${modelId}" 已禁用`, type: 'model_disabled' },
-          }, 403)
         }
         if (modelConfig.permanentlyDisabled) {
           if (attempts < maxAttempts) continue
