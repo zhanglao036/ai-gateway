@@ -171,6 +171,12 @@ export interface TierStorage {
   openclawVerifiedCursors?: Record<string, number>
   // 已知模型列表指纹（用于识别新添加的提供商或新模型，以优先插队测试）
   knownModelKeys?: string[]
+  // 各梯队池当前实际连接干活的模型标识
+  activeConnections?: {
+    general?: string
+    openclaw?: string
+    drawing?: string
+  }
 }
 
 export interface ApiResponse<T = unknown> {

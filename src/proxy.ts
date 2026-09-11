@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.0
- * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -759,7 +759,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           const errStatus = isContentEmpty ? 502 : response.status
           await recordModelFailure(c.env, providerId, modelId, errStatus, errReason)
           await recordLog(c.env, startTime, requestedModel, errStatus, errReason)
-          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
           if (isAutoRequest && attempts < maxAttempts) {
             continue
           }
@@ -769,7 +769,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         }
 
         await recordLog(c.env, startTime, requestedModel, response.status, null)
-        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
         await recordModelSuccess(c.env, providerId, modelId)
         const opHeaders = new Headers(response.headers)
         if (isStreamReq) {
@@ -935,7 +935,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             isStream: isStreamReq,
             clientIp,
           })
-          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest)
+          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
           await recordModelSuccess(c.env, providerId, modelId)
           return new Response(resText !== null ? resText : response.body, {
             status: response.status,
@@ -1015,7 +1015,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           isStream: isStreamReq,
           clientIp,
         })
-        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
       }
       if (isAutoRequest && attempts < maxAttempts) {
         continue // outer while-loop continue to next provider in Tier 1

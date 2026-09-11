@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.0
- * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1881,7 +1881,8 @@ export async function recordBusinessLatency(
   fullId: string,
   latency: number,
   success: boolean,
-  isAutoRequest: boolean = false
+  isAutoRequest: boolean = false,
+  poolType: 'general' | 'openclaw' | 'drawing' = 'general'
 ): Promise<void> {
   try {
     // 仅针对 auto/auto 业务流量生效
@@ -1907,10 +1908,17 @@ export async function recordBusinessLatency(
       bStat.failureCount = 0 // 成功重置连续失败计数
       // 滑动平均更新真实业务延迟
       bStat.avgLatency = Math.round(bStat.avgLatency * 0.7 + latency * 0.3)
+      // 记录当前梯队池实际成功连接的模型
+      if (!storage.activeConnections) storage.activeConnections = {}
+      storage.activeConnections[poolType] = fullId
     } else {
       bStat.failureCount++
       // 业务故障惩罚：将平均延迟拉升至 9999ms，使故障模型在下次选择时自动沉底
       bStat.avgLatency = 9999
+      // 若当前故障模型是该池最后记录的连接模型，清除连接记录，以便动态平滑切换到备用模型
+      if (storage.activeConnections && storage.activeConnections[poolType] === fullId) {
+        delete storage.activeConnections[poolType]
+      }
     }
 
     storage.businessStats[fullId] = bStat

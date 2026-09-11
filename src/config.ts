@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.0
- * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.0'
+export const VERSION = 'v1.2.1'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

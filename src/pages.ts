@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.0
- * 更新说明: 全池子故障自动切换与席位满额保障机制重构：加入已尝试具体模型追踪杜绝死循环，强化故障即时持久化与冷却隔离防回弹，修复多别名兼容与延迟惩罚。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -610,6 +610,59 @@ function renderAdminTierPools(tierData: TierStorage): string {
   const tierOpenclawSlots: number = slotsConfig.tierOpenclawSlots ?? 6
   const tierDrawingSlots: number = slotsConfig.tierDrawingSlots ?? 6
 
+  // 辅助函数：根据真实业务调用记录与网关优选决策，动态计算当前池子真正连接干活的模型
+  function getActiveConnectedModelFullId(
+    poolModels: typeof tier1Models,
+    poolType: 'general' | 'openclaw' | 'drawing'
+  ): string {
+    if (!poolModels || poolModels.length === 0) return ''
+
+    // 1. 优先检查系统明确记录的最近一次成功活跃连接（只要该模型仍在池中且未发生故障）
+    const recordedActive = tierData.activeConnections?.[poolType]
+    if (recordedActive && poolModels.some((m) => m.fullId === recordedActive)) {
+      const bStat = tierData.businessStats[recordedActive]
+      // 确保未被故障惩罚拉黑（9999ms 或 failureCount > 0）
+      if (!bStat || ((bStat.avgLatency ?? 999) < 9000 && (bStat.failureCount || 0) === 0)) {
+        return recordedActive
+      }
+    }
+
+    // 2. 其次在当前池内寻找最近一次成功调用的健康模型
+    let latestSuccessTime = 0
+    let latestSuccessFullId = ''
+    for (const m of poolModels) {
+      const bStat = tierData.businessStats[m.fullId]
+      if (bStat && bStat.lastUsedAt && bStat.lastUsedAt > latestSuccessTime) {
+        if ((bStat.avgLatency ?? 999) < 9000 && (bStat.failureCount || 0) === 0) {
+          latestSuccessTime = bStat.lastUsedAt
+          latestSuccessFullId = m.fullId
+        }
+      }
+    }
+    if (latestSuccessFullId) {
+      return latestSuccessFullId
+    }
+
+    // 3. 若尚未产生成功业务调用，按网关调度器算法优选延迟最低、最健康的就绪模型
+    const sorted = [...poolModels].sort((a, b) => {
+      const bStatA = tierData.businessStats[a.fullId]
+      const bStatB = tierData.businessStats[b.fullId]
+      const bFailA = (bStatA?.failureCount || 0) > 0 || (bStatA?.avgLatency ?? 999) >= 9000 ? 1 : 0
+      const bFailB = (bStatB?.failureCount || 0) > 0 || (bStatB?.avgLatency ?? 999) >= 9000 ? 1 : 0
+      if (bFailA !== bFailB) return bFailA - bFailB
+
+      const bLatA = bStatA?.avgLatency ?? 999
+      const bLatB = bStatB?.avgLatency ?? 999
+      if (bLatA !== bLatB) return bLatA - bLatB
+
+      const pLatA = tierData.probeStats[a.fullId]?.latency || 9999
+      const pLatB = tierData.probeStats[b.fullId]?.latency || 9999
+      return pLatA - pLatB
+    })
+
+    return sorted[0]?.fullId || poolModels[0]?.fullId || ''
+  }
+
   // 辅助函数：渲染单个梯队池的席位卡片网格
   function renderPoolCards(
     models: typeof tier1Models,
@@ -623,37 +676,58 @@ function renderAdminTierPools(tierData: TierStorage): string {
     extraBadgeText: string,
     poolId: string
   ): string {
+    const poolType: 'general' | 'openclaw' | 'drawing' =
+      poolId === 'openclaw' ? 'openclaw' : poolId === 'drawing' ? 'drawing' : 'general'
+    const activeModelFullId = getActiveConnectedModelFullId(models, poolType)
+
     let html = '<div id="' + poolId + '-cards-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(230px, 1fr));gap:0.55rem;">'
     // 遍历每一个固定席位
     for (let idx = 0; idx < maxSlots; idx++) {
       const item = models[idx]
       // 判断该席位是否有连接中的模型
       if (item) {
+        const isConnected = item.fullId === activeModelFullId
         const probeStat = tierData.probeStats[item.fullId]
         const bStat = tierData.businessStats[item.fullId]
+        const isModelPenalized = (bStat?.avgLatency ?? 0) >= 9000 || (bStat?.failureCount || 0) > 0
         const probeLatText = probeStat && probeStat.success ? probeStat.latency + ' ms' : '海选中'
-        const busLatText = bStat && bStat.totalRequests > 0 ? bStat.avgLatency + ' ms' : '暂无请求'
+        const busLatText = isModelPenalized
+          ? '<span style="color:#ef4444;font-weight:700;">故障避让</span>'
+          : (bStat && bStat.totalRequests > 0 ? bStat.avgLatency + ' ms' : '暂无请求')
         const providerPart = item.fullId.split('/')[0] || '默认'
         const safeFullId = escapePageHtml(item.fullId)
         const safeProvider = escapePageHtml(providerPart)
         const categoryText = escapePageHtml(probeStat?.category || '通用模型')
 
-        html += '<div style="background:' + bgColor + ';border:1px solid ' + borderColor + ';border-radius:0.5rem;padding:0.5rem 0.65rem;display:flex;flex-direction:column;justify-content:space-between;box-shadow:0 1px 2px rgba(0,0,0,0.02);">'
+        // 动态卡片样式：如果是当前活跃连接卡片，呈现微绿色边框与高亮阴影，直观醒目
+        const cardBg = isConnected ? '#f0fdf4' : bgColor
+        const cardBorder = isConnected ? '#86efac' : borderColor
+        const cardShadow = isConnected
+          ? 'box-shadow:0 0 0 1px #86efac, 0 1px 3px rgba(22,163,74,0.1);'
+          : 'box-shadow:0 1px 2px rgba(0,0,0,0.02);'
+
+        html += '<div style="background:' + cardBg + ';border:1px solid ' + cardBorder + ';border-radius:0.5rem;padding:0.5rem 0.65rem;display:flex;flex-direction:column;justify-content:space-between;' + cardShadow + '">'
         html += '  <div>'
         html += '    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.35rem;">'
         html += '      <span style="font-size:0.7rem;font-weight:700;color:' + badgeText + ';background:' + badgeBg + ';padding:0.1rem 0.35rem;border-radius:0.2rem;">'
         html += '        ' + slotPrefix + ' #' + (idx + 1)
         html += '      </span>'
-        // 判断当前卡片是否为第 1 顺位卡片。1 顺位为主力活动模型，其余为备用就绪模型。
-        if (idx === 0) {
-          // 🏆 1号主力席位：显示带动态绿色呼吸灯的高亮“当前连接”字样，一目了然
-          html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:700;display:flex;align-items:center;gap:0.25rem;" title="当前优先连接的主力模型">'
+        // 根据动态识别结果准确呈现连接状态与呼吸灯
+        if (isConnected) {
+          // 🏆 当前实际连接模型：显示带动态绿色呼吸灯的高亮“当前连接”字样
+          html += '      <span style="font-size:0.6875rem;color:#16a34a;font-weight:700;display:flex;align-items:center;gap:0.25rem;" title="当前优先连接与活跃调用的模型">'
           html += '        <span class="pulse-dot-green" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#16a34a;"></span>'
           html += '        当前连接'
           html += '      </span>'
+        } else if (isModelPenalized) {
+          // ⚠️ 故障避让中的席位
+          html += '      <span style="font-size:0.6875rem;color:#ef4444;font-weight:600;display:flex;align-items:center;gap:0.25rem;" title="该模型近期调用出现故障，网关已自动切换至其他健康模型并进行延迟惩罚">'
+          html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#ef4444;"></span>'
+          html += '        故障避让'
+          html += '      </span>'
         } else {
-          // 🛡️ 备用席位：显示优雅低调的灰色“备用就绪”字样，作为后备健康池保障
-          html += '      <span style="font-size:0.6875rem;color:#64748b;font-weight:600;display:flex;align-items:center;gap:0.25rem;" title="备用模型，主力故障时自动无感切换">'
+          // 🛡️ 备用席位：显示优雅低调的灰色“备用就绪”字样
+          html += '      <span style="font-size:0.6875rem;color:#64748b;font-weight:600;display:flex;align-items:center;gap:0.25rem;" title="备用模型，主力故障或重载时自动无感切换">'
           html += '        <span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;"></span>'
           html += '        备用就绪'
           html += '      </span>'
@@ -727,11 +801,6 @@ function renderAdminTierPools(tierData: TierStorage): string {
   out += '      <code style="background:#ffe4e6;color:#be123c;padding:0.2rem 0.4rem;border-radius:0.25rem;font-size:0.8rem;font-weight:600;">model: &quot;drawing/auto&quot;</code>'
   out += '    </div>'
   out += '  </div>'
-
-  // 第一梯队主力模型高亮
-  const tier1PrimaryModel = tier1Models[0] ? escapePageHtml(tier1Models[0].fullId) : '暂无连接模型'
-  const tierOpenclawPrimaryModel = tierOpenclawModels[0] ? escapePageHtml(tierOpenclawModels[0].fullId) : '暂无连接模型'
-  const tierDrawingPrimaryModel = tierDrawingModels[0] ? escapePageHtml(tierDrawingModels[0].fullId) : '暂无连接模型'
 
   // 第一梯队黄金模型池 (已剔除顶部冗余的主力文字显示，聚焦于席位卡片高亮状态)
   out += '  <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:0.75rem;padding:1rem;margin-bottom:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,0.02);">'
