@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.7
- * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
+ * 版本号: v1.1.8
+ * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -436,11 +436,11 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
     const config = await getLogConfig(env)
     const bufferMax = config.bufferMaxCount || 20
 
-    // 核心落盘规则：
-    // 1. 如果发生超时、报错、连接失败等异常，第一时间直接写入 KV，确保故障排查随时刷新可见；
-    // 2. 如果开启了调试模式，或者内存中积攒的日志达到了设定的批量缓存阈值，执行落盘写入 KV；
-    // 3. 普通成功请求平时在内存平稳排队，等待系统下一次任意写 KV 时通过“顺风车”打包带走，极度节省 KV 免费额度。
-    if (isErrorOrTimeout || unflushedLogCount >= bufferMax || config.debugMode) {
+    // 核心落盘规则（严格遵守 Cloudflare 免费额度政策）：
+    // 1. 【调试模式下】：如果发生超时、报错、连接失败或积攒达到定量阈值，立即写入 KV，便于排查；
+    // 2. 【正式模式下】（调试模式关闭）：严禁因请求报错或积攒主动刷写 KV！所有日志纯内存排队，
+    //    仅在管理员保存配置等必要操作时通过“顺风车”顺路写入，日常请求完全 0 KV 写入消耗！
+    if (config.debugMode && (isErrorOrTimeout || unflushedLogCount >= bufferMax)) {
       await flushPendingLogs(env)
     }
   } catch (err) {

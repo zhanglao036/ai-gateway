@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.7
- * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
+ * 版本号: v1.1.8
+ * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
  */
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'

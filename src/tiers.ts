@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.7
- * 更新说明: 修复 OpenClaw 标签切换路由参数异常，强化模型禁用即刻剔除梯队池并阻断连接机制
+ * 版本号: v1.1.8
+ * 更新说明: 根治 KV 写入偷跑漏洞，剔除梯队未变动时的无效写入，正式模式日志零主动写 KV，守护 Cloudflare 免费额度
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -947,7 +947,7 @@ export async function backfillTier1FromTier2(
   const slotsConfig = getTierSlotsConfig(storage)
   const slotsNeeded = slotsConfig.tier1Slots - storage.tier1.length
   if (slotsNeeded <= 0 || storage.tier2.length === 0) {
-    await saveTierStorage(env, storage)
+    // 席位未缺或无候选模型，直接安全返回，绝不触发无意义的 KV 写入
     return storage
   }
 
@@ -1912,10 +1912,11 @@ export async function recordBusinessLatency(
       // 触发空位海选补位
       storage = await backfillTier1FromTier2(env, storage)
     } else {
-      if (storage.tier1.length < TIER_1_MAX_SLOTS) {
+      const slotsConfig = getTierSlotsConfig(storage)
+      if (storage.tier1.length < slotsConfig.tier1Slots) {
         storage = await backfillTier1FromTier2(env, storage)
       }
-      // 成功且席位完备时，不写 KV，极大节约免费额度
+      // 成功且席位完备时，完全零 KV 操作，极大节约免费额度
     }
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
