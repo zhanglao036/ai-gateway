@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.6
+ * 更新说明: 优化顺风车模式与日志落盘机制：模型切换与关键异常即时落盘，日常普通请求内存打包定时批量写入；读取日志时跨节点智能排重合并，彻底杜绝日志丢失。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -400,17 +400,25 @@ const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
-  // 1. 优先直接返回内存中的实时请求日志
-  if (inMemoryLogs.length > 0) {
-    return inMemoryLogs.slice(0, 100)
-  }
-  // 2. 内存为空（如 Serverless 节点冷启动/跨节点响应），从 KV 读取上一次保存的历史日志填充内存
+  // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
       if (Array.isArray(storedLogs) && storedLogs.length > 0) {
-        inMemoryLogs.push(...storedLogs.slice(0, MAX_MEMORY_LOGS))
+        // 构建已有 ID 的集合以快速排重
+        const existingIds = new Set(inMemoryLogs.map(l => l.id))
+        for (const log of storedLogs) {
+          if (!existingIds.has(log.id)) {
+            inMemoryLogs.push(log)
+            existingIds.add(log.id)
+          }
+        }
+        // 按时间倒序重新排列（最新的在前，time 字段为 ISO 字符串）
+        inMemoryLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+        if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+          inMemoryLogs.length = MAX_MEMORY_LOGS
+        }
       }
     }
   } catch (err) {
@@ -429,18 +437,28 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
 
     unflushedLogCount++
 
-    // 关键判断 1：检查是否属于超时、网络连接失败、上游报错或 HTTP 异常状态码 (status >= 400 或存在 error)
+    // 核心判定：
+    // 1. 是否为模型切换事件（首发连接或调度变动，对管理员最关键）
+    const isSwitchEvent = !!log.isModelSwitch
+    // 2. 是否属于超时、报错、上游失败或 HTTP 异常状态码 (status >= 400 或存在 error)
     const isErrorOrTimeout = (typeof log.status === 'number' && log.status >= 400) || !!log.error
 
-    // 关键判断 2：读取用户设置的定量缓存阈值（默认 20 条）或调试模式
+    // 读取用户配置的定量阈值与调试模式
     const config = await getLogConfig(env)
     const bufferMax = config.bufferMaxCount || 20
 
-    // 核心落盘规则（严格遵守 Cloudflare 免费额度政策）：
-    // 1. 【调试模式下】：如果发生超时、报错、连接失败或积攒达到定量阈值，立即写入 KV，便于排查；
-    // 2. 【正式模式下】（调试模式关闭）：严禁因请求报错或积攒主动刷写 KV！所有日志纯内存排队，
-    //    仅在管理员保存配置等必要操作时通过“顺风车”顺路写入，日常请求完全 0 KV 写入消耗！
-    if (config.debugMode && (isErrorOrTimeout || unflushedLogCount >= bufferMax)) {
+    // 智能落盘规则（严格保障 1000次/天 免费限制）：
+    // 1. 调试模式开启：任何报错或积攒达到阈值即刻落盘
+    // 2. 正式模式下：
+    //    - 模型发生切换（isSwitchEvent）：特事特办立即写入全局 KV，确保跨节点/刷新后台 100% 实时可见
+    //    - 出现异常报错（isErrorOrTimeout）：立即写入全局 KV 便于排查
+    //    - 日常平稳请求：内存积攒达到定量（如 20 条）或保存配置触发顺风车时批量打包写入 1 次，极度节省 KV 写入额度
+    if (
+      config.debugMode ||
+      isSwitchEvent ||
+      isErrorOrTimeout ||
+      unflushedLogCount >= bufferMax
+    ) {
       await flushPendingLogs(env)
     }
   } catch (err) {
@@ -452,7 +470,23 @@ export async function flushPendingLogs(env: Env): Promise<void> {
   // 内存无日志则退出
   if (inMemoryLogs.length === 0) return
   try {
-    const logsToSave = inMemoryLogs.slice(0, 100)
+    // 写入前尝试与 KV 中现存数据合并，防止并发实例写覆盖
+    let mergedLogs = [...inMemoryLogs]
+    const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
+    if (kvData) {
+      const storedLogs: RequestLog[] = JSON.parse(kvData)
+      if (Array.isArray(storedLogs)) {
+        const idSet = new Set(mergedLogs.map(l => l.id))
+        for (const s of storedLogs) {
+          if (!idSet.has(s.id)) {
+            mergedLogs.push(s)
+            idSet.add(s.id)
+          }
+        }
+        mergedLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+      }
+    }
+    const logsToSave = mergedLogs.slice(0, 100)
     await getKV(env).put(KV_KEYS.REQUEST_LOGS, JSON.stringify(logsToSave))
     unflushedLogCount = 0
     lastLogFlushTime = Date.now()

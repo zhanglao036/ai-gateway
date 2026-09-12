@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.5
- * 更新说明: 新增模型切换首条日志提醒功能（无论成功失败均首发提醒当前接管模型，纯内存 0 KV 开销）。
+ * 版本号: v1.2.6
+ * 更新说明: 优化顺风车模式与日志落盘机制：模型切换与关键异常即时落盘，日常普通请求内存打包定时批量写入；读取日志时跨节点智能排重合并，彻底杜绝日志丢失。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
