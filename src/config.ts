@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
+ * 版本号: v1.2.4
+ * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.1'
+export const VERSION = 'v1.2.4'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

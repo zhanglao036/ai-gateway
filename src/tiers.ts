@@ -1,9 +1,6 @@
 /**
- * 版本号: v1.2.7
- * 更新说明: 根治三大梯队池（通用/智能体/绘图）坏模型反复横跳与秒级回补死循环：
- * 1. 业务调用只要失败 1 次，强制移出当前池并打入 10 分钟冷却隔离区；
- * 2. 彻底封死 ensureTierStorage 和 backfill 补位漏洞，严禁将处于冷却或永久失效的模型录入任何活跃池；
- * 3. 连续失败 3 次直接标记永久失效，全面杜绝坏模型反复切换。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -25,29 +22,14 @@ export function getTierSlotsConfig(storage?: TierStorage | null): Required<TierS
   }
 }
 
-// 内存中维护的实时业务延迟与连接状态（平稳日常请求0 KV写入，顺风车触发时一并打包落盘）
-const inMemoryBusinessStats: Record<string, BusinessMetric> = {}
-const inMemoryActiveConnections: Record<string, string> = {}
-
 /**
- * 获取 KV 中的梯队存储数据，并自动与本地内存的实时业务指标合并
+ * 获取 KV 中的梯队存储数据
  */
 export async function getTierStorage(env: Env): Promise<TierStorage | null> {
   const raw = await kvGet(env, KV_KEYS.TIER_DATA)
   if (!raw) return null
   try {
-    const storage = JSON.parse(raw) as TierStorage
-    if (storage) {
-      storage.businessStats = {
-        ...(storage.businessStats || {}),
-        ...inMemoryBusinessStats,
-      }
-      storage.activeConnections = {
-        ...(storage.activeConnections || {}),
-        ...inMemoryActiveConnections,
-      }
-    }
-    return storage
+    return JSON.parse(raw) as TierStorage
   } catch {
     return null
   }
@@ -55,20 +37,11 @@ export async function getTierStorage(env: Env): Promise<TierStorage | null> {
 
 /**
  * 批量写入/保存梯队数据到 KV
- * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)，并顺风车一次性带走内存中的全部业务指标与请求日志
+ * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)，并顺风车一次性带走内存中的请求日志
  */
 export async function saveTierStorage(env: Env, data: TierStorage): Promise<void> {
   try {
     data.updatedAt = new Date().toISOString()
-    // 顺风车全量保全：写入前将内存中的最新业务延迟指标与连接状态深度合并打包，一并带走落盘
-    data.businessStats = {
-      ...(data.businessStats || {}),
-      ...inMemoryBusinessStats,
-    }
-    data.activeConnections = {
-      ...(data.activeConnections || {}),
-      ...inMemoryActiveConnections,
-    }
     await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
     // 顺风车捎带：只要写入梯队池（含探针实测、延迟、梯队席位），顺便把内存中排队的请求日志一并打包写入 KV，0 额外开销
     await flushPendingWrites(env)
@@ -1627,26 +1600,12 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 3. 第一梯队若出现席位空缺，从第二梯队中严格挑选【未处于冷却期且未永久失效】的可用候选模型补齐
+    // 3. 第一梯队若出现席位空缺，自动从第二梯队候选模型中补齐
     if (existing.tier1.length < slotsConfig.tier1Slots && existing.tier2 && existing.tier2.length > 0) {
       const needed = slotsConfig.tier1Slots - existing.tier1.length
-      // 严格检查健康状态：只允许补入在 availableSet（已排除冷却与失效）中的模型
-      const eligibleToPromote: typeof existing.tier2 = []
-      const remainingTier2: typeof existing.tier2 = []
-
-      for (const cand of existing.tier2) {
-        if (eligibleToPromote.length < needed && availableSet.has(cand.fullId)) {
-          eligibleToPromote.push(cand)
-        } else {
-          remainingTier2.push(cand)
-        }
-      }
-
-      if (eligibleToPromote.length > 0) {
-        existing.tier2 = remainingTier2
-        existing.tier1.push(...eligibleToPromote.map((item) => ({ ...item, addedAt: now })))
-        changed = true
-      }
+      const toPromote = existing.tier2.splice(0, needed)
+      existing.tier1.push(...toPromote.map((item) => ({ ...item, addedAt: now })))
+      changed = true
     }
 
     // 4. OpenClaw 专属智能体池若出现席位空缺，自动从可用模型中挑选支持工具调用的模型补齐
@@ -1778,59 +1737,8 @@ export function isLongContextModel(modelId: string): boolean {
 }
 
 /**
- * 公益平台高阻尼模型优选算法（完全自适应高延迟环境）：
- * 1. 优先检查当前已连接的活跃模型是否依然健康（未被禁用、未在冷却、未在当前尝试中失败）。
- * 2. 相对动态倍率：无论平均延迟是 2 秒还是 30 秒，只要当前模型健康，除非候选模型比当前模型快 3 倍以上且绝对差距超过 8000ms，否则坚定锁定当前模型，坚决不发生无意义跳换。
- * 3. 严格本池闭环，绝不跨池降级。
- */
-function pickStableModelFromPool(
-  pool: TierModelRef[],
-  storage: TierStorage,
-  poolType: 'general' | 'openclaw' | 'drawing',
-  modelMap: Map<string, { provider: any; modelId: string; fullId: string }>
-): { providerId: string; modelId: string; fullId: string } | null {
-  // 如果池内无可用候选模型，直接返回空
-  if (pool.length === 0) return null
-
-  // 按照历史业务平均延迟及探针测试结果对候选模型进行排序
-  const sorted = [...pool].sort((a, b) => {
-    const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
-    const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
-    if (bLatA !== bLatB) return bLatA - bLatB
-    const pLatA = storage.probeStats[a.fullId]?.latency || 9999
-    const pLatB = storage.probeStats[b.fullId]?.latency || 9999
-    return pLatA - pLatB
-  })
-
-  // 获取排序最优的候选模型
-  const bestCandidate = sorted[0]
-  // 获取当前正在连接活跃的模型 ID
-  const currentActiveFullId = storage.activeConnections?.[poolType]
-
-  // 检查当前连接的模型是否依然在本次有效健康的候选池中
-  if (currentActiveFullId) {
-    const activeItem = pool.find((m) => m.fullId === currentActiveFullId)
-    if (activeItem) {
-      // 当前模型依然处于健康、未被冷却、未报错状态
-      const currentLat = storage.businessStats[currentActiveFullId]?.avgLatency ?? 3000
-      const bestLat = storage.businessStats[bestCandidate.fullId]?.avgLatency ?? 3000
-
-      // 自适应相对倍率防抖：自适应任何基准延迟（如 20000ms+ 高延迟），只有当最佳模型快 3 倍以上且绝对差距大于 8000ms 时才切换
-      const isMassiveImprovement = bestLat > 0 && currentLat > bestLat * 3 && (currentLat - bestLat) > 8000
-      if (!isMassiveImprovement) {
-        // 判定：当前模型完全健康且处于正常波动范围内，继续锁定使用当前模型！
-        return { providerId: activeItem.providerId, modelId: activeItem.modelId, fullId: activeItem.fullId }
-      }
-    }
-  }
-
-  // 若当前无活跃连接、或当前模型已故障报错被移出池子、或候选模型具备碾压级优势，则选用当前最佳模型
-  return { providerId: bestCandidate.providerId, modelId: bestCandidate.modelId, fullId: bestCandidate.fullId }
-}
-
-/**
  * 智能路由模型选取：
- * 严格本池闭环调度：通用第一梯队 ('general')、OpenClaw 专属梯队 ('openclaw')、绘图专属梯队 ('drawing')
+ * 支持通用第一梯队 ('general')、OpenClaw 专属梯队 ('openclaw')、绘图专属梯队 ('drawing')
  */
 export async function selectAutoModel(
   env: Env,
@@ -1845,7 +1753,7 @@ export async function selectAutoModel(
   const allModels = await getAllAvailableModels(env)
   const modelMap = new Map(allModels.map((item) => [item.fullId, item]))
 
-  // 1. OpenClaw 专属梯队池选择（严格闭环于 OpenClaw 池，绝不跨出本池）
+  // 1. OpenClaw 专属梯队池选择
   if (poolType === 'openclaw') {
     let pool = (storage.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     const slotsConfig = getTierSlotsConfig(storage)
@@ -1874,13 +1782,21 @@ export async function selectAutoModel(
       if (filtered.length > 0) pool = filtered
     }
     if (pool.length > 0) {
-      return pickStableModelFromPool(pool, storage, 'openclaw', modelMap)
+      const sorted = [...pool].sort((a, b) => {
+        const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
+        const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
+        if (bLatA !== bLatB) return bLatA - bLatB
+        const pLatA = storage.probeStats[a.fullId]?.latency || 9999
+        const pLatB = storage.probeStats[b.fullId]?.latency || 9999
+        return pLatA - pLatB
+      })
+      const chosen = sorted[0]
+      return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
     }
-    // 严格本池闭环：若 OpenClaw 专属池暂无可用，直接返回 null 触发优雅报错或等待补位，绝不跨池偷换
-    return null
+    // 若 OpenClaw 专属池暂空，平滑降级至通用第一梯队
   }
 
-  // 2. 绘图专属梯队池选择（严格闭环于绘图池，绝不跨出本池）
+  // 2. 绘图专属梯队池选择
   if (poolType === 'drawing') {
     let pool = (storage.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
     const slotsConfig = getTierSlotsConfig(storage)
@@ -1909,9 +1825,18 @@ export async function selectAutoModel(
       if (filtered.length > 0) pool = filtered
     }
     if (pool.length > 0) {
-      return pickStableModelFromPool(pool, storage, 'drawing', modelMap)
+      const sorted = [...pool].sort((a, b) => {
+        const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
+        const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
+        if (bLatA !== bLatB) return bLatA - bLatB
+        const pLatA = storage.probeStats[a.fullId]?.latency || 9999
+        const pLatB = storage.probeStats[b.fullId]?.latency || 9999
+        return pLatA - pLatB
+      })
+      const chosen = sorted[0]
+      return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
     }
-    // 若绘图池空，仅从全部可用模型中挑选符合绘图分类的模型补位
+    // 若绘图池空，尝试从全部可用模型中找一个未尝试过的绘图模型
     const fallbackDrawing = allModels.filter((m) => {
       if (excludedModelIds && excludedModelIds.has(m.fullId)) return false
       const mConfig = m.provider.models.find((x) => x.id === m.modelId)
@@ -1922,7 +1847,6 @@ export async function selectAutoModel(
       const chosen = fallbackDrawing[0]
       return { providerId: chosen.provider.id, modelId: chosen.modelId, fullId: chosen.fullId }
     }
-    return null
   }
 
   // 3. 通用第一梯队池 (Tier 1) 选择
@@ -1985,11 +1909,27 @@ export async function selectAutoModel(
   }
 
   if (candidates.length === 0) {
+    // Fallback: 如果过滤后无可用模型，使用原本的候选（确保服务可用性）
     candidates = activeTier1
   }
 
-  // 使用高阻尼稳定模型选取算法
-  return pickStableModelFromPool(candidates, storage, 'general', modelMap)
+  // 2.分组内优先选择适配长上下文标记的文本模型。
+  // 按照长上下文标记优先，其次按真实业务延迟 (businessStats) 排序选择最佳模型（完全不使用轻量探测延迟！）
+  const sorted = [...candidates].sort((a, b) => {
+    const isLongA = isLongContextModel(a.modelId) ? 1 : 0
+    const isLongB = isLongContextModel(b.modelId) ? 1 : 0
+    if (isLongA !== isLongB) {
+      return isLongB - isLongA // True (1) comes before False (0)
+    }
+
+    const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
+    const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
+    return bLatA - bLatB
+  })
+
+  const chosen = sorted[0]
+  if (!chosen) return null
+  return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
 }
 
 /**
@@ -2041,14 +1981,6 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 内存直接更新最新业务指标与活跃连接（0 KV 开销）
-    inMemoryBusinessStats[fullId] = bStat
-    if (success) {
-      inMemoryActiveConnections[poolType] = fullId
-    } else {
-      delete inMemoryActiveConnections[poolType]
-    }
-
     storage.businessStats[fullId] = bStat
 
     const debugMode = await getDebugMode(env)
@@ -2062,20 +1994,27 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 检查该模型在哪个池子中，无论处于哪个池，只要失败一律立即踢出并冷却 10 分钟
+    // 检查该模型是否在第一梯队中
     const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
-    const isInOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
-    const isInDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
-
-    if (!isInTier1 && !isInOpenclaw && !isInDrawing) {
-      // 不在任何活跃池中，内存已记录指标，直接平稳返回（0 KV 写入）
+    if (!isInTier1) {
+      // 非第一梯队的正常调用，仅内存累加指标，避免频繁刷写 KV
       return
     }
 
-    if (!success) {
-      console.log(`[tiers] 业务请求失败，立即将模型 ${fullId} 从活跃池中剔除并启动 10 分钟冷却`)
+    let shouldEliminate = false
+    let eliminationReason = ''
 
-      // 1. 将该模型在提供商配置中增加失败计数，并设置 10 分钟冷却（或 3 次失败永久失效）
+    if (!success) {
+      // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
+      shouldEliminate = true
+      eliminationReason = `业务请求失败 1 次`
+    }
+
+    if (shouldEliminate) {
+      console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
+
+      // 模型标黄，移出第一梯队，冷却 10 分钟
+      // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
       const parts = fullId.split('/')
       const providerId = parts[0]
       const modelId = parts.slice(1).join('/')
@@ -2084,14 +2023,9 @@ export async function recordBusinessLatency(
         if (provider) {
           const updatedModels = provider.models.map((m: Model) => {
             if (m.id === modelId) {
-              const newFailCount = (m.failureCount || 0) + 1
-              const isPermanentlyDisabled = newFailCount >= 3
               return {
                 ...m,
-                failureCount: newFailCount,
-                cooldownUntil: isPermanentlyDisabled ? null : (now + 10 * 60 * 1000), // 冷却 10 分钟
-                permanentlyDisabled: isPermanentlyDisabled,
-                disabledReason: isPermanentlyDisabled ? '业务连续失败达到3次，已自动标记永久失效' : '业务请求失败，进入10分钟冷却隔离',
+                cooldownUntil: now + 10 * 60 * 1000, // 冷却 10 分钟
               }
             }
             return m
@@ -2100,36 +2034,22 @@ export async function recordBusinessLatency(
         }
       }
 
-      // 2. 从三个活跃池中坚决剔除
-      if (isInTier1) {
-        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-        const ref = { providerId, modelId, fullId, addedAt: now }
-        if (!storage.tier2.some((m) => m.fullId === fullId)) {
-          storage.tier2.push(ref)
-        }
-      }
-      if (isInOpenclaw) {
-        storage.tierOpenclaw = (storage.tierOpenclaw || []).filter((m) => m.fullId !== fullId)
-      }
-      if (isInDrawing) {
-        storage.tierDrawing = (storage.tierDrawing || []).filter((m) => m.fullId !== fullId)
+      // 移出第一梯队，回到第二梯队候选池
+      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+      const ref = { providerId, modelId, fullId, addedAt: now }
+      if (!storage.tier2.some((m) => m.fullId === fullId)) {
+        storage.tier2.push(ref)
       }
 
-      // 3. 自动触发补位海选（自动补位只会选健康的非冷却模型）
-      if (isInTier1) {
+      // 触发空位海选补位
+      storage = await backfillTier1FromTier2(env, storage)
+    } else {
+      const slotsConfig = getTierSlotsConfig(storage)
+      if (storage.tier1.length < slotsConfig.tier1Slots) {
         storage = await backfillTier1FromTier2(env, storage)
       }
-      if (isInOpenclaw) {
-        storage = await backfillOpenclawTier(env, storage)
-      }
-      if (isInDrawing) {
-        storage = await backfillDrawingTier(env, storage)
-      }
-
-      // 保存剔除和补位后的最新梯队数据，同时顺风车将内存中积累的所有延迟指标打包写入 KV
-      await saveTierStorage(env, storage)
+      // 成功且席位完备时，完全零 KV 操作，极大节约免费额度
     }
-    // 成功请求时无需落盘 KV，指标留在内存，顺风车写入时全量带走（真正做到日常平稳转发 0 KV 写入）
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
