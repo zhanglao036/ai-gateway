@@ -1,6 +1,9 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.2.7
+ * 更新说明: 根治三大梯队池（通用/智能体/绘图）坏模型反复横跳与秒级回补死循环：
+ * 1. 业务调用只要失败 1 次，强制移出当前池并打入 10 分钟冷却隔离区；
+ * 2. 彻底封死 ensureTierStorage 和 backfill 补位漏洞，严禁将处于冷却或永久失效的模型录入任何活跃池；
+ * 3. 连续失败 3 次直接标记永久失效，全面杜绝坏模型反复切换。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1600,12 +1603,26 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 3. 第一梯队若出现席位空缺，自动从第二梯队候选模型中补齐
+    // 3. 第一梯队若出现席位空缺，从第二梯队中严格挑选【未处于冷却期且未永久失效】的可用候选模型补齐
     if (existing.tier1.length < slotsConfig.tier1Slots && existing.tier2 && existing.tier2.length > 0) {
       const needed = slotsConfig.tier1Slots - existing.tier1.length
-      const toPromote = existing.tier2.splice(0, needed)
-      existing.tier1.push(...toPromote.map((item) => ({ ...item, addedAt: now })))
-      changed = true
+      // 严格检查健康状态：只允许补入在 availableSet（已排除冷却与失效）中的模型
+      const eligibleToPromote: typeof existing.tier2 = []
+      const remainingTier2: typeof existing.tier2 = []
+
+      for (const cand of existing.tier2) {
+        if (eligibleToPromote.length < needed && availableSet.has(cand.fullId)) {
+          eligibleToPromote.push(cand)
+        } else {
+          remainingTier2.push(cand)
+        }
+      }
+
+      if (eligibleToPromote.length > 0) {
+        existing.tier2 = remainingTier2
+        existing.tier1.push(...eligibleToPromote.map((item) => ({ ...item, addedAt: now })))
+        changed = true
+      }
     }
 
     // 4. OpenClaw 专属智能体池若出现席位空缺，自动从可用模型中挑选支持工具调用的模型补齐
@@ -1994,27 +2011,20 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 检查该模型是否在第一梯队中
+    // 检查该模型在哪个池子中，无论处于哪个池，只要失败一律立即踢出并冷却 10 分钟
     const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
-    if (!isInTier1) {
-      // 非第一梯队的正常调用，仅内存累加指标，避免频繁刷写 KV
+    const isInOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+    const isInDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
+
+    if (!isInTier1 && !isInOpenclaw && !isInDrawing) {
+      // 不在任何活跃池中，仅更新业务指标
       return
     }
 
-    let shouldEliminate = false
-    let eliminationReason = ''
-
     if (!success) {
-      // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
-      shouldEliminate = true
-      eliminationReason = `业务请求失败 1 次`
-    }
+      console.log(`[tiers] 业务请求失败，立即将模型 ${fullId} 从活跃池中剔除并启动 10 分钟冷却`)
 
-    if (shouldEliminate) {
-      console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
-
-      // 模型标黄，移出第一梯队，冷却 10 分钟
-      // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
+      // 1. 将该模型在提供商配置中增加失败计数，并设置 10 分钟冷却（或 3 次失败永久失效）
       const parts = fullId.split('/')
       const providerId = parts[0]
       const modelId = parts.slice(1).join('/')
@@ -2023,9 +2033,14 @@ export async function recordBusinessLatency(
         if (provider) {
           const updatedModels = provider.models.map((m: Model) => {
             if (m.id === modelId) {
+              const newFailCount = (m.failureCount || 0) + 1
+              const isPermanentlyDisabled = newFailCount >= 3
               return {
                 ...m,
-                cooldownUntil: now + 10 * 60 * 1000, // 冷却 10 分钟
+                failureCount: newFailCount,
+                cooldownUntil: isPermanentlyDisabled ? null : (now + 10 * 60 * 1000), // 冷却 10 分钟
+                permanentlyDisabled: isPermanentlyDisabled,
+                disabledReason: isPermanentlyDisabled ? '业务连续失败达到3次，已自动标记永久失效' : '业务请求失败，进入10分钟冷却隔离',
               }
             }
             return m
@@ -2034,21 +2049,40 @@ export async function recordBusinessLatency(
         }
       }
 
-      // 移出第一梯队，回到第二梯队候选池
-      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-      const ref = { providerId, modelId, fullId, addedAt: now }
-      if (!storage.tier2.some((m) => m.fullId === fullId)) {
-        storage.tier2.push(ref)
+      // 2. 从三个活跃池中坚决剔除
+      if (isInTier1) {
+        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+        const ref = { providerId, modelId, fullId, addedAt: now }
+        if (!storage.tier2.some((m) => m.fullId === fullId)) {
+          storage.tier2.push(ref)
+        }
+      }
+      if (isInOpenclaw) {
+        storage.tierOpenclaw = (storage.tierOpenclaw || []).filter((m) => m.fullId !== fullId)
+      }
+      if (isInDrawing) {
+        storage.tierDrawing = (storage.tierDrawing || []).filter((m) => m.fullId !== fullId)
       }
 
-      // 触发空位海选补位
-      storage = await backfillTier1FromTier2(env, storage)
+      // 3. 自动触发补位海选（自动补位只会选健康的非冷却模型）
+      if (isInTier1) {
+        storage = await backfillTier1FromTier2(env, storage)
+      }
+      if (isInOpenclaw) {
+        storage = await backfillOpenclawTier(env, storage)
+      }
+      if (isInDrawing) {
+        storage = await backfillDrawingTier(env, storage)
+      }
+
+      // 保存梯队数据
+      await saveTierStorage(env, storage)
     } else {
       const slotsConfig = getTierSlotsConfig(storage)
       if (storage.tier1.length < slotsConfig.tier1Slots) {
         storage = await backfillTier1FromTier2(env, storage)
+        await saveTierStorage(env, storage)
       }
-      // 成功且席位完备时，完全零 KV 操作，极大节约免费额度
     }
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))

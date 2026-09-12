@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.6
- * 更新说明: 优化顺风车模式与日志落盘机制：模型切换与关键异常即时落盘，日常普通请求内存打包定时批量写入；读取日志时跨节点智能排重合并，彻底杜绝日志丢失。
+ * 版本号: v1.2.7
+ * 更新说明: 根除三大梯队池坏模型秒回补死循环，严格执行 10 分钟冷却隔离与永久失效机制。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
