@@ -148,15 +148,21 @@ export function deduplicateAndClassifyModels(modelsInput: unknown): Model[] {
  * 6. 同步重置梯队监控数据，清空历史异常统计，使全系统梯队重新就绪
  */
 export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: number; providerCount: number }> {
+  // 1. 获取所有提供商配置
   const providers = await getProviders(env)
   let totalReset = 0
   let providerCount = 0
 
+  // 2. 遍历提供商及其模型进行安全重置
   const updatedProviders = providers.map((provider) => {
     let providerChanged = false
     const updatedModels = provider.models.map((model) => {
       totalReset++
       providerChanged = true
+
+      // 核心判断：如果模型已经通过测试打上了认证标签，或用户手动标记过认证，则予以完整保留
+      const hasVerifiedTag = !!model.openclawVerified || !!model.openclawCompatible || !!model.openclawCustomTagged
+
       return {
         ...model,
         enabled: true,
@@ -166,6 +172,10 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
         disabledReason: null,
         permTestFailCount: 0,
         lastPermTestAt: undefined,
+        // 已通过认证的标签保留，未通过或失败残留的报错描述彻底清空
+        openclawTested: hasVerifiedTag ? model.openclawTested : false,
+        openclawCompatible: hasVerifiedTag ? model.openclawCompatible : undefined,
+        openclawReason: hasVerifiedTag ? model.openclawReason : undefined,
       }
     })
 
@@ -180,9 +190,10 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
     return provider
   })
 
+  // 3. 一次性打包持久化写入 KV
   await setProviders(env, updatedProviders)
 
-  // 同步重置梯队监控数据到初始状态
+  // 4. 同步重置梯队监控数据到初始状态
   try {
     const now = Date.now()
     const today = new Date().toISOString().split('T')[0]
@@ -241,10 +252,20 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
     const tier1Set = new Set(initialTier1.map((m) => m.fullId))
     const initialTier2 = allAvailable.filter((m) => !tier1Set.has(m.fullId))
 
+    // 保留已认证的 probeStats 标签，清空失效模型的报错记录
+    const preservedProbeStats: Record<string, any> = {}
+    if (existingStorage?.probeStats) {
+      for (const [k, v] of Object.entries(existingStorage.probeStats)) {
+        if (v && (v.openclawVerified || v.openclawCompatible || v.openclawCustomTagged)) {
+          preservedProbeStats[k] = v
+        }
+      }
+    }
+
     const cleanTierStorage: TierStorage = {
       tier1: initialTier1,
       tier2: initialTier2,
-      probeStats: {},
+      probeStats: preservedProbeStats,
       businessStats: {},
       updatedAt: new Date().toISOString(),
       lastProbeDate: today,
@@ -280,6 +301,7 @@ export async function resetProviderModelsToInitial(
 
     if (isAbnormal) {
       totalReset++
+      const hasVerifiedTag = !!m.openclawVerified || !!m.openclawCompatible || !!m.openclawCustomTagged
       return {
         ...m,
         failureCount: 0,
@@ -289,6 +311,9 @@ export async function resetProviderModelsToInitial(
         permTestFailCount: 0,
         lastPermTestAt: undefined,
         enabled: true,
+        openclawTested: hasVerifiedTag ? m.openclawTested : false,
+        openclawCompatible: hasVerifiedTag ? m.openclawCompatible : undefined,
+        openclawReason: hasVerifiedTag ? m.openclawReason : undefined,
       }
     }
     return m
@@ -314,19 +339,25 @@ export async function resetProviderModelsToInitial(
         const businessStats = { ...(tierStorage.businessStats || {}) }
         for (const m of targetProvider.models || []) {
           const key = `${providerId}/${m.id}`
-          delete probeStats[key]
+          const stat = probeStats[key]
+          if (stat && (stat.openclawVerified || stat.openclawCompatible || stat.openclawCustomTagged)) {
+            // 保留已认证标记
+          } else {
+            delete probeStats[key]
+          }
           delete businessStats[key]
         }
         tierStorage.probeStats = probeStats
         tierStorage.businessStats = businessStats
+        tierStorage.updatedAt = new Date().toISOString()
         await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(tierStorage))
+        await flushPendingWrites(env)
       }
     }
-  } catch {
-    // 忽略梯队池解析异常
+  } catch (err) {
+    console.warn('[models] 重置提供商梯队异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
 
-  await flushPendingWrites(env)
   return { totalReset, provider: updatedProviders.find((p) => p.id === providerId) || null }
 }
 

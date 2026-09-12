@@ -1118,7 +1118,7 @@ export async function handleUpdateTierSlots(c: Context<{ Bindings: Env }>) {
   })
 }
 
-// ===== 手动批量交叉交替测试封禁模型 =====
+// ===== 手动批量交叉交替测试封禁模型 (带单次子请求安全熔断与接力支持) =====
 export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
   if (isProbeRunning) {
     return c.json<ApiResponse>({
@@ -1148,7 +1148,7 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
       return c.json<ApiResponse>({
         success: true,
         message: '当前没有任何处于永久封禁状态的模型',
-        data: { testedCount: 0, unblockedCount: 0, unblockedModelIds: [] },
+        data: { testedCount: 0, unblockedCount: 0, unblockedModelIds: [], remainingCount: 0, hasMore: false },
       })
     }
 
@@ -1165,21 +1165,26 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
     const pointers: Record<string, number> = {}
     for (const pid of providerIds) pointers[pid] = 0
 
-    // 交叉轮抽 Round-Robin
+    // 交叉轮抽 Round-Robin 排序
     const roundOrder: Array<{ provider: Provider; model: Model }> = []
-    let hasMore = true
-    while (hasMore) {
-      hasMore = false
+    let hasMoreBlocked = true
+    while (hasMoreBlocked) {
+      hasMoreBlocked = false
       for (const pid of providerIds) {
         const list = providerMap.get(pid)!
         const idx = pointers[pid]
         if (idx < list.length) {
-          hasMore = true
+          hasMoreBlocked = true
           roundOrder.push(list[idx])
           pointers[pid] = idx + 1
         }
       }
     }
+
+    // 关键安全策略：单次 Worker 调用严格限制测试上限为 20 个模型，坚决不超 Cloudflare 50 次子请求硬指标
+    const SAFE_BATCH_LIMIT = 20
+    const currentBatch = roundOrder.slice(0, SAFE_BATCH_LIMIT)
+    const remainingCount = Math.max(0, roundOrder.length - currentBatch.length)
 
     let testedCount = 0
     let unblockedCount = 0
@@ -1188,8 +1193,8 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
     const now = Date.now()
 
     const BATCH_SIZE = 5
-    for (let i = 0; i < roundOrder.length; i += BATCH_SIZE) {
-      const chunk = roundOrder.slice(i, i + BATCH_SIZE)
+    for (let i = 0; i < currentBatch.length; i += BATCH_SIZE) {
+      const chunk = currentBatch.slice(i, i + BATCH_SIZE)
       const chunkResults = await Promise.all(
         chunk.map(async ({ provider, model }) => {
           testedCount++
@@ -1224,6 +1229,12 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
           modelObj.permTestFailCount = 0
           modelObj.lastPermTestAt = now
           modelObj.disabledReason = undefined
+          // 成功解封时，如果之前未通过 OpenClaw，则清除旧的未通过错误信息
+          if (!modelObj.openclawVerified && !modelObj.openclawCustomTagged) {
+            modelObj.openclawTested = false
+            modelObj.openclawCompatible = undefined
+            modelObj.openclawReason = undefined
+          }
         } else {
           modelObj.lastPermTestAt = now
           modelObj.permTestFailCount = (modelObj.permTestFailCount || 0) + 1
@@ -1239,8 +1250,14 @@ export async function handleTestBlockedModels(c: Context<{ Bindings: Env }>) {
     const unblockedDetail = unblockedCount > 0 ? `解封模型：[${unblockedModelIds.join(', ')}]` : '暂无模型解封'
     return c.json<ApiResponse>({
       success: true,
-      message: `批量交叉测试完成！共测试 ${testedCount} 个封禁模型，成功解封 ${unblockedCount} 个模型。${unblockedDetail}`,
-      data: { testedCount, unblockedCount, unblockedModelIds },
+      message: `本批次测试完成！共测试 ${testedCount} 个封禁模型，成功解封 ${unblockedCount} 个模型。${unblockedDetail}`,
+      data: {
+        testedCount,
+        unblockedCount,
+        unblockedModelIds,
+        remainingCount,
+        hasMore: remainingCount > 0,
+      },
     })
   } finally {
     isProbeRunning = false

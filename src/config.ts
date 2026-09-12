@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.3
- * 更新说明: 增加海选频控保护锁（限制单提供商单次探测上限为3个，杜绝上游5分钟30模型报警），并优化一键重置逻辑，杜绝不可用模型盲目入选黄金池。
+ * 版本号: v1.2.4
+ * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.3'
+export const VERSION = 'v1.2.4'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

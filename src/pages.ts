@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.2.4
+ * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -3213,6 +3213,13 @@ async function resetAllModels() {
               m.disabledReason = null;
               m.permTestFailCount = 0;
               m.enabled = true;
+              // 关键逻辑：保留已认证的标签，仅清除未通过的历史报错
+              var hasVerifiedTag = !!m.openclawVerified || !!m.openclawCompatible || !!m.openclawCustomTagged;
+              if (!hasVerifiedTag) {
+                m.openclawTested = false;
+                m.openclawCompatible = undefined;
+                m.openclawReason = undefined;
+              }
             });
           }
         });
@@ -3236,21 +3243,53 @@ async function resetAllModels() {
 var resetCooldowns = resetAllModels;
 
 async function testAllBlockedModels() {
-  if (!(await cM('确定要对所有处于【永久封禁】状态的模型执行批量交叉复测？系统将按提供商交替轮抽并发探针测试，若测试响应连通，模型将自动解封恢复可用。'))) return;
-  toast('正在交叉轮抽并发复测所有封禁模型，请稍候...', 'info');
+  if (!(await cM('确定要对所有处于【永久封禁】状态的模型执行批量交叉复测？系统将按提供商交替轮抽自动分批并发探针测试（每批严格控制在安全上限内，支持自动接力），若测试响应连通，模型将自动解封恢复可用。'))) return;
+  var totalTested = 0;
+  var totalUnblocked = 0;
+  var allUnblockedIds = [];
+  var batchIndex = 1;
+
   try {
-    var res = await fetch('/admin/api/test-blocked-models', { method: 'POST' });
-    var data = await res.json();
-    if (data.success) {
-      aM(data.message || '批量交叉复测完成！', 'success');
-      var pRes = await fetch('/admin/api/providers');
-      var pData = await pRes.json();
-      if (pData.success && pData.data) {
-        draftProviders = pData.data;
+    while (true) {
+      toast('正在进行第 ' + batchIndex + ' 批交叉并发复测（已累计测 ' + totalTested + ' 个，解封 ' + totalUnblocked + ' 个）...', 'info');
+      var res = await fetch('/admin/api/test-blocked-models', { method: 'POST' });
+      var data = await res.json();
+      if (!data.success) {
+        aM('批量复测中断：' + (data.message || '未知错误'), 'error');
+        break;
       }
-      renderProviderList();
-    } else {
-      aM('批量复测失败：' + (data.message || '未知错误'), 'error');
+
+      var metric = data.data || {};
+      var countThisBatch = metric.testedCount || 0;
+      var unblockedThisBatch = metric.unblockedCount || 0;
+      totalTested += countThisBatch;
+      totalUnblocked += unblockedThisBatch;
+      if (Array.isArray(metric.unblockedModelIds)) {
+        metric.unblockedModelIds.forEach(function(id) {
+          if (allUnblockedIds.indexOf(id) === -1) allUnblockedIds.push(id);
+        });
+      }
+
+      if (countThisBatch === 0 || !metric.hasMore) {
+        break;
+      }
+
+      batchIndex++;
+      // 优雅间隔 150ms 继续接力下一批
+      await new Promise(function(resolve) { setTimeout(resolve, 150); });
+    }
+
+    var unblockedDetail = allUnblockedIds.length > 0 ? '解封模型：[' + allUnblockedIds.join(', ') + ']' : '暂无模型解封';
+    aM('批量交叉复测完成！共分批安全测试 ' + totalTested + ' 个封禁模型，成功解封 ' + totalUnblocked + ' 个模型。' + unblockedDetail, 'success');
+
+    var pRes = await fetch('/admin/api/providers');
+    var pData = await pRes.json();
+    if (pData.success && pData.data) {
+      draftProviders = pData.data;
+    }
+    renderProviderList();
+    if (typeof loadTierData === 'function') {
+      loadTierData();
     }
   } catch (err) {
     aM('请求网络异常：' + ((err && err.message) || String(err)), 'error');
@@ -3337,6 +3376,12 @@ async function unblockModel(providerId, modelId) {
       m.disabledReason = null;
       m.failureCount = 0;
       m.cooldownUntil = null;
+      var hasVerifiedTag = !!m.openclawVerified || !!m.openclawCompatible || !!m.openclawCustomTagged;
+      if (!hasVerifiedTag) {
+        m.openclawTested = false;
+        m.openclawCompatible = undefined;
+        m.openclawReason = undefined;
+      }
       markDirty(true);
       renderProviderList();
       toast('模型 [' + modelId + '] 已在内存中重置，请点击【统一保存】持久化', 'success');
@@ -3356,6 +3401,12 @@ async function resetAllModelsInProvider(providerId) {
     m.permTestFailCount = 0;
     m.lastPermTestAt = undefined;
     m.enabled = true;
+    var hasVerifiedTag = !!m.openclawVerified || !!m.openclawCompatible || !!m.openclawCustomTagged;
+    if (!hasVerifiedTag) {
+      m.openclawTested = false;
+      m.openclawCompatible = undefined;
+      m.openclawReason = undefined;
+    }
   });
 
   markDirty(true);
