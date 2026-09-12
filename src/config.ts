@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.9
- * 更新说明: 实行日常业务请求 0 KV 写入原则，业务延迟指标全内存高速维护，遇任何系统落盘行为时顺风车全量打包保全写入，彻底控制 Cloudflare 免费配额。
+ * 版本号: v1.3.1
+ * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.9'
+export const VERSION = 'v1.3.1'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

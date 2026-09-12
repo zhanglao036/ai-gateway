@@ -1778,8 +1778,59 @@ export function isLongContextModel(modelId: string): boolean {
 }
 
 /**
+ * 公益平台高阻尼模型优选算法（完全自适应高延迟环境）：
+ * 1. 优先检查当前已连接的活跃模型是否依然健康（未被禁用、未在冷却、未在当前尝试中失败）。
+ * 2. 相对动态倍率：无论平均延迟是 2 秒还是 30 秒，只要当前模型健康，除非候选模型比当前模型快 3 倍以上且绝对差距超过 8000ms，否则坚定锁定当前模型，坚决不发生无意义跳换。
+ * 3. 严格本池闭环，绝不跨池降级。
+ */
+function pickStableModelFromPool(
+  pool: TierModelRef[],
+  storage: TierStorage,
+  poolType: 'general' | 'openclaw' | 'drawing',
+  modelMap: Map<string, { provider: any; modelId: string; fullId: string }>
+): { providerId: string; modelId: string; fullId: string } | null {
+  // 如果池内无可用候选模型，直接返回空
+  if (pool.length === 0) return null
+
+  // 按照历史业务平均延迟及探针测试结果对候选模型进行排序
+  const sorted = [...pool].sort((a, b) => {
+    const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
+    const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
+    if (bLatA !== bLatB) return bLatA - bLatB
+    const pLatA = storage.probeStats[a.fullId]?.latency || 9999
+    const pLatB = storage.probeStats[b.fullId]?.latency || 9999
+    return pLatA - pLatB
+  })
+
+  // 获取排序最优的候选模型
+  const bestCandidate = sorted[0]
+  // 获取当前正在连接活跃的模型 ID
+  const currentActiveFullId = storage.activeConnections?.[poolType]
+
+  // 检查当前连接的模型是否依然在本次有效健康的候选池中
+  if (currentActiveFullId) {
+    const activeItem = pool.find((m) => m.fullId === currentActiveFullId)
+    if (activeItem) {
+      // 当前模型依然处于健康、未被冷却、未报错状态
+      const currentLat = storage.businessStats[currentActiveFullId]?.avgLatency ?? 3000
+      const bestLat = storage.businessStats[bestCandidate.fullId]?.avgLatency ?? 3000
+
+      // 自适应相对倍率防抖：自适应任何基准延迟（如 20000ms+ 高延迟），只有当最佳模型快 3 倍以上且绝对差距大于 8000ms 时才切换
+      const isMassiveImprovement = bestLat > 0 && currentLat > bestLat * 3 && (currentLat - bestLat) > 8000
+      if (!isMassiveImprovement) {
+        // 判定：当前模型完全健康且处于正常波动范围内，继续锁定使用当前模型！
+        return { providerId: activeItem.providerId, modelId: activeItem.modelId, fullId: activeItem.fullId }
+      }
+    }
+  }
+
+  // 若当前无活跃连接、或当前模型已故障报错被移出池子、或候选模型具备碾压级优势，则选用当前最佳模型
+  return { providerId: bestCandidate.providerId, modelId: bestCandidate.modelId, fullId: bestCandidate.fullId }
+}
+
+/**
  * 智能路由模型选取：
- * 支持通用第一梯队 ('general')、OpenClaw 专属梯队 ('openclaw')、绘图专属梯队 ('drawing')
+ * 严格本池闭环调度：通用第一梯队 ('general')、OpenClaw 专属梯队 ('openclaw')、绘图专属梯队 ('drawing')
  */
 export async function selectAutoModel(
   env: Env,
@@ -1794,7 +1845,7 @@ export async function selectAutoModel(
   const allModels = await getAllAvailableModels(env)
   const modelMap = new Map(allModels.map((item) => [item.fullId, item]))
 
-  // 1. OpenClaw 专属梯队池选择
+  // 1. OpenClaw 专属梯队池选择（严格闭环于 OpenClaw 池，绝不跨出本池）
   if (poolType === 'openclaw') {
     let pool = (storage.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     const slotsConfig = getTierSlotsConfig(storage)
@@ -1823,21 +1874,13 @@ export async function selectAutoModel(
       if (filtered.length > 0) pool = filtered
     }
     if (pool.length > 0) {
-      const sorted = [...pool].sort((a, b) => {
-        const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
-        const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
-        if (bLatA !== bLatB) return bLatA - bLatB
-        const pLatA = storage.probeStats[a.fullId]?.latency || 9999
-        const pLatB = storage.probeStats[b.fullId]?.latency || 9999
-        return pLatA - pLatB
-      })
-      const chosen = sorted[0]
-      return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
+      return pickStableModelFromPool(pool, storage, 'openclaw', modelMap)
     }
-    // 若 OpenClaw 专属池暂空，平滑降级至通用第一梯队
+    // 严格本池闭环：若 OpenClaw 专属池暂无可用，直接返回 null 触发优雅报错或等待补位，绝不跨池偷换
+    return null
   }
 
-  // 2. 绘图专属梯队池选择
+  // 2. 绘图专属梯队池选择（严格闭环于绘图池，绝不跨出本池）
   if (poolType === 'drawing') {
     let pool = (storage.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
     const slotsConfig = getTierSlotsConfig(storage)
@@ -1866,18 +1909,9 @@ export async function selectAutoModel(
       if (filtered.length > 0) pool = filtered
     }
     if (pool.length > 0) {
-      const sorted = [...pool].sort((a, b) => {
-        const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
-        const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
-        if (bLatA !== bLatB) return bLatA - bLatB
-        const pLatA = storage.probeStats[a.fullId]?.latency || 9999
-        const pLatB = storage.probeStats[b.fullId]?.latency || 9999
-        return pLatA - pLatB
-      })
-      const chosen = sorted[0]
-      return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
+      return pickStableModelFromPool(pool, storage, 'drawing', modelMap)
     }
-    // 若绘图池空，尝试从全部可用模型中找一个未尝试过的绘图模型
+    // 若绘图池空，仅从全部可用模型中挑选符合绘图分类的模型补位
     const fallbackDrawing = allModels.filter((m) => {
       if (excludedModelIds && excludedModelIds.has(m.fullId)) return false
       const mConfig = m.provider.models.find((x) => x.id === m.modelId)
@@ -1888,6 +1922,7 @@ export async function selectAutoModel(
       const chosen = fallbackDrawing[0]
       return { providerId: chosen.provider.id, modelId: chosen.modelId, fullId: chosen.fullId }
     }
+    return null
   }
 
   // 3. 通用第一梯队池 (Tier 1) 选择
@@ -1950,27 +1985,11 @@ export async function selectAutoModel(
   }
 
   if (candidates.length === 0) {
-    // Fallback: 如果过滤后无可用模型，使用原本的候选（确保服务可用性）
     candidates = activeTier1
   }
 
-  // 2.分组内优先选择适配长上下文标记的文本模型。
-  // 按照长上下文标记优先，其次按真实业务延迟 (businessStats) 排序选择最佳模型（完全不使用轻量探测延迟！）
-  const sorted = [...candidates].sort((a, b) => {
-    const isLongA = isLongContextModel(a.modelId) ? 1 : 0
-    const isLongB = isLongContextModel(b.modelId) ? 1 : 0
-    if (isLongA !== isLongB) {
-      return isLongB - isLongA // True (1) comes before False (0)
-    }
-
-    const bLatA = storage.businessStats[a.fullId]?.avgLatency ?? 999
-    const bLatB = storage.businessStats[b.fullId]?.avgLatency ?? 999
-    return bLatA - bLatB
-  })
-
-  const chosen = sorted[0]
-  if (!chosen) return null
-  return { providerId: chosen.providerId, modelId: chosen.modelId, fullId: chosen.fullId }
+  // 使用高阻尼稳定模型选取算法
+  return pickStableModelFromPool(candidates, storage, 'general', modelMap)
 }
 
 /**
