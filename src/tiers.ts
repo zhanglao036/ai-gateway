@@ -1,8 +1,6 @@
 /**
- * 版本号: v1.3.7
- * 更新说明: 优化梯队池模型筛选与顺风车状态持久化：
- * 1. 严格过滤非对话模型（向量嵌入、视频检测、绘图、音频等），杜绝 70s 超时与 500 报错混入通用对话池；
- * 2. 跨模型真实切换时顺风车持久化写入活跃连接记录，彻底消除边缘节点冷启动重复误报切换与反复发车。
+ * 版本号: v1.3.8
+ * 更新说明: 支持补位打包合并落盘，避免故障处理流程中重复多次保存 KV。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1003,7 +1001,8 @@ export async function validateAndRebuildHistoryTier1(
  */
 export async function backfillTier1FromTier2(
   env: Env,
-  storage: TierStorage
+  storage: TierStorage,
+  options?: { skipSave?: boolean }
 ): Promise<TierStorage> {
   const slotsConfig = getTierSlotsConfig(storage)
   const slotsNeeded = slotsConfig.tier1Slots - storage.tier1.length
@@ -1277,7 +1276,7 @@ export async function backfillTier1FromTier2(
     }
 
     // 仅在有实际晋升或变更时保存 KV
-    if (hasChanged) {
+    if (hasChanged && !options?.skipSave) {
       await saveTierStorage(env, storage)
     }
 
@@ -1347,7 +1346,11 @@ export function isNonChatModel(modelId: string, category?: string): boolean {
  * 6. 支持用户自定义修改标签 (已打标的模型在第二阶段即可快速复选)
  * 7. 严格控制 Cloudflare 免费配额：全程内存计算，整轮结束顺风车单次写入 KV！
  */
-export async function backfillOpenclawTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+export async function backfillOpenclawTier(
+  env: Env,
+  storage: TierStorage,
+  options?: { skipSave?: boolean }
+): Promise<TierStorage> {
   const slotsConfig = getTierSlotsConfig(storage)
   storage.tierOpenclaw = storage.tierOpenclaw || []
   const allModels = await getAllAvailableModels(env)
@@ -1529,7 +1532,9 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
   // 仅在有实际变更（例如补入新模型）时才保存 KV，避免无新模型通过时重复死循环落盘
   if (hasChanged) {
     storage.knownModelKeys = currentModelKeys
-    await saveTierStorage(env, storage)
+    if (!options?.skipSave) {
+      await saveTierStorage(env, storage)
+    }
   }
   return storage
 }
@@ -1539,7 +1544,11 @@ export async function backfillOpenclawTier(env: Env, storage: TierStorage): Prom
  * 筛选全系统中标记或识别为【绘图】的健康模型，
  * 补足到自定义席位 (默认 6 席)
  */
-export async function backfillDrawingTier(env: Env, storage: TierStorage): Promise<TierStorage> {
+export async function backfillDrawingTier(
+  env: Env,
+  storage: TierStorage,
+  options?: { skipSave?: boolean }
+): Promise<TierStorage> {
   const slotsConfig = getTierSlotsConfig(storage)
   storage.tierDrawing = storage.tierDrawing || []
   const allModels = await getAllAvailableModels(env)
@@ -1551,7 +1560,7 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
   let hasChanged = storage.tierDrawing.length !== prevCount
   const needed = slotsConfig.tierDrawingSlots - storage.tierDrawing.length
   if (needed <= 0) {
-    if (hasChanged) await saveTierStorage(env, storage)
+    if (hasChanged && !options?.skipSave) await saveTierStorage(env, storage)
     return storage
   }
 
@@ -1589,7 +1598,7 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
     }
   }
 
-  if (hasChanged) {
+  if (hasChanged && !options?.skipSave) {
     await saveTierStorage(env, storage)
   }
   return storage

@@ -1,8 +1,6 @@
 /**
- * 版本号: v1.3.7
- * 更新说明: 优化请求日志列表界面交互：
- * 1. 消除横向拖动条，失败原因就地直观呈现于模型下方，告别向右拉动查看的繁琐操作；
- * 2. 状态码栏精巧集成重试标记，消除多余列宽浪费。
+ * 版本号: v1.3.8
+ * 更新说明: 配合配额优化与日志展示：点击刷新日志时顺风车持久化，保证跨节点秒级同步。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'

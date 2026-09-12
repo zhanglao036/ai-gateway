@@ -1,8 +1,6 @@
 /**
- * 版本号: v1.3.7
- * 更新说明:
- * 1. 跨模型真实切换时，顺风车持久化最新连接记录，解决多节点重复误报切换与反复发车；
- * 2. 优化非流式请求超时时间为 35s，避免上游卡死导致用户端等待 70~90 秒。
+ * 版本号: v1.3.8
+ * 更新说明: 合并故障剔除与梯队补位为至多1次写入，取消故障单独写KV。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -126,14 +124,14 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
           avgLatency: 9999,
           failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
         }
-        // 核心修复：立即持久化保存更新后的梯队池状态到 KV，杜绝剔除状态丢失
+        // 尝试自动补位新模型填补空位（内存处理，跳过内部独立写 KV）
+        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage, { skipSave: true })
+        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage, { skipSave: true })
+        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage, { skipSave: true })
+
+        // 核心修复：全流程处理完毕后合并保存更新后的梯队池状态到 KV，至多触发 1 次写入
         storage.updatedAt = new Date().toISOString()
         await saveTierStorage(env, storage)
-
-        // 尝试自动补位新模型填补空位
-        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
-        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
-        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
       }
     }
   } catch (err) {

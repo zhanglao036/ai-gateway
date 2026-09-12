@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.7
- * 更新说明: 顺风车持久化连接状态：真实发生跨模型切换时顺风车一次性写入 KV，多节点平稳请求零 KV 写入。
+ * 版本号: v1.3.8
+ * 更新说明: 顺风车持久化与批量落盘：积压20条或后台刷新时一次性带走，彻底取消故障与模型切换单独写KV。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -415,8 +415,14 @@ export function getLogTimestamp(l: RequestLog): number {
 
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
+let isFlushingLogs = false
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
+  // 当用户在后台点击「刷新日志」或进入日志页面时，若当前节点有未落盘日志，顺带触发落盘，确保跨节点刷新能够完整呈现最新日志
+  if (unflushedLogCount > 0) {
+    await flushPendingLogs(env)
+  }
+
   // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并与状态同步
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
@@ -465,32 +471,21 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
     // 读取当前调试模式与配置
     const config = await getLogConfig(env)
 
-    // 核心发车事件判定：
-    // 1. 是否为模型切换事件（首发连接或调度变动，触发发车）
-    const isSwitchEvent = !!log.isModelSwitch
-    // 2. 是否属于超时、报错、上游失败或 HTTP 异常状态码 (status >= 400 或存在 error)
-    const isErrorOrTimeout = (typeof log.status === 'number' && log.status >= 400) || !!log.error
-    // 3. 调试模式开启：任何请求均视为直接发车
-    const isDriverEvent = config.debugMode || isSwitchEvent || isErrorOrTimeout
+    // 所有日志（无论正常、报错或模型切换）统一打标为 memory 存入内存队列
+    log.kvTag = 'memory'
+    inMemoryLogs.unshift(log)
+    if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+      inMemoryLogs.length = MAX_MEMORY_LOGS
+    }
+    unflushedLogCount++
 
-    if (isDriverEvent) {
-      // 🚗 发车事件：直接触发 1 笔 KV 写入，并将本条日志打标为 driver（车）
-      log.kvTag = 'driver'
-      inMemoryLogs.unshift(log)
-      if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
-        inMemoryLogs.length = MAX_MEMORY_LOGS
-      }
-      unflushedLogCount++
-      // 触发发车，顺带将内存中所有候车的乘客日志一并带走落盘
-      await flushPendingLogs(env, log.id)
-    } else {
-      // 🧳 顺风乘客：平稳 200 请求纯内存驻留 (0 KV 写入)，打标为 memory（候）等待下次发车顺路打包
-      log.kvTag = 'memory'
-      inMemoryLogs.unshift(log)
-      if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
-        inMemoryLogs.length = MAX_MEMORY_LOGS
-      }
-      unflushedLogCount++
+    // 发车条件门槛判定：
+    // 1. 调试模式开启：即刻发车
+    // 2. 积压未落盘日志达到 20 条门槛：批量打包发车（20次请求才写1次KV）
+    // 3. 距离上次落盘超过 60 秒且有未落盘数据：超时保底发车
+    const timeDiff = Date.now() - lastLogFlushTime
+    if (config.debugMode || unflushedLogCount >= 20 || (timeDiff > 60000 && unflushedLogCount > 0)) {
+      flushPendingLogs(env, log.id).catch(console.error)
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
@@ -498,8 +493,10 @@ export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
 }
 
 export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise<void> {
-  // 内存无日志则退出
-  if (inMemoryLogs.length === 0) return
+  // 内存无日志或正处于落盘中则安全退出，防止并发重复写 KV
+  if (inMemoryLogs.length === 0 || isFlushingLogs) return
+  isFlushingLogs = true
+
   try {
     // 发车打包：更新内存中所有排队日志的落盘打标
     for (const l of inMemoryLogs) {
@@ -532,6 +529,8 @@ export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise
     lastLogFlushTime = Date.now()
   } catch (err) {
     console.warn('[storage] 落盘/顺风车保存日志至 KV 异常:', err instanceof Error ? err.message : String(err))
+  } finally {
+    isFlushingLogs = false
   }
 }
 
