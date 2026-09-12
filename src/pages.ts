@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.8
- * 更新说明: 配合配额优化与日志展示：点击刷新日志时顺风车持久化，保证跨节点秒级同步。
+ * 版本号: v1.3.1
+ * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -1407,10 +1407,6 @@ async function saveAllConfig() {
       // 顺风车自动刷新梯队池展示与当前主力模型
       if (typeof loadTierData === 'function') {
         loadTierData();
-      }
-      // 顺风车自动刷新日志状态，确保候车日志即时变更为【客】
-      if (typeof fetchLogs === 'function') {
-        fetchLogs();
       }
     } else {
       var errMsg = (data && data.message) ? data.message : '未知系统错误';
@@ -3103,43 +3099,32 @@ function renderLogsTable(logs) {
     var isSuccess = item.status >= 200 && item.status < 300;
     var statusBadgeClass = isSuccess ? 'bd-on' : 'bd-off';
     var statusText = item.status || 500;
+    var errText = item.error ? escapeHtml(item.error) : '-';
     var timeStr = escapeHtml(item.time || '-');
     var modelStr = escapeHtml(item.model || 'unknown');
     var latency = item.latency || 0;
     var latencyColor = latency < 1500 ? 'var(--color-success)' : (latency < 4000 ? '#eab308' : 'var(--color-danger)');
     var latencyStr = '<span style="color:' + latencyColor + ';font-weight:600;">' + latency + ' ms</span>';
     var keyMaskStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '<span style="color:var(--color-muted);">-</span>';
-    var retryBadge = (item.attemptIndex && item.attemptIndex > 1) ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #fde68a;" title="经历 ' + item.attemptIndex + ' 次尝试/故障重试">重试×' + item.attemptIndex + '</span>' : '';
+    var attemptStr = item.attemptIndex ? ('第 ' + item.attemptIndex + ' 次') : '-';
     var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
     var ipBadge = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;color:var(--color-muted);"></i>' + escapeHtml(item.clientIp) + '</span>' : '<span style="color:var(--color-muted);font-size:11px;">-</span>';
-
-    // KV 写入状态打标（车 / 客 / 候）
-    var kvTagBadge = '';
-    if (item.kvTag === 'driver') {
-      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="🚗 发车写入：因模型故障/切换模型/配置保存等发车事件直接触发 1 笔 KV 写入">🚗 车</span>';
-    } else if (item.kvTag === 'passenger') {
-      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="🧳 顺风车写入：平稳业务请求搭乘发车事件一同打包写入 KV (0 额外开销)">🧳 客</span>';
-    } else {
-      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="⏳ 内存候车：纯内存驻留 (0 KV 写入)，等待下次发车顺风车打包落盘">⏳ 候</span>';
-    }
 
     // 关键逻辑：若该条日志为模型切换后的首条连接日志，渲染醒目的蓝色接管提醒标签
     var switchBadge = '';
     if (item.isModelSwitch && item.switchNotice) {
-      switchBadge = '<div style="margin-bottom:3px;"><span class="bd" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:2px 6px;font-size:10.5px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="' + escapeHtml(item.switchNotice) + '"><i class="fas fa-sync-alt" style="font-size:9.5px;"></i> ' + escapeHtml(item.switchNotice) + '</span></div>';
+      switchBadge = '<div style="margin-bottom:4px;"><span class="bd" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:2px 6px;font-size:10.5px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="' + escapeHtml(item.switchNotice) + '"><i class="fas fa-sync-alt" style="font-size:9.5px;"></i> ' + escapeHtml(item.switchNotice) + '</span></div>';
     }
-
-    // 就地直观错误呈现：将异常原因直接放置在模型下方，无需横向拖动滚动条
-    var inlineError = (!isSuccess && item.error) ? '<div style="margin-top:4px;padding:3px 7px;background:#fef2f2;border:1px solid #fee2e2;border-radius:4px;color:var(--color-danger);font-size:11px;line-height:1.4;word-break:break-all;"><i class="fas fa-exclamation-circle" style="margin-right:4px;"></i>' + escapeHtml(item.error) + '</div>' : '';
 
     return '<tr>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + ipBadge + '</td>' +
-      '<td style="padding:8px 10px;">' + switchBadge + '<code style="font-size:11.5px;font-weight:600;word-break:break-all;">' + modelStr + '</code>' + inlineError + '</td>' +
-      '<td style="padding:8px 10px;white-space:nowrap;text-align:center;">' + kvTagBadge + '</td>' +
+      '<td style="padding:8px 10px;">' + switchBadge + '<code style="font-size:11.5px;">' + modelStr + '</code></td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + keyMaskStr + '</td>' +
-      '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + (retryBadge ? ' ' + retryBadge : '') + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + attemptStr + '</td>' +
+      '<td style="padding:8px 10px;font-size:var(--text-xs);color:' + (isSuccess ? 'var(--color-muted)' : 'var(--color-danger)') + ';max-width:300px;word-break:break-all;">' + errText + '</td>' +
     '</tr>';
   }).join('');
 
@@ -3153,19 +3138,9 @@ function renderLogsTable(logs) {
     var latency = item.latency || 0;
     var latencyColor = latency < 1500 ? 'var(--color-success)' : (latency < 4000 ? '#ca8a04' : 'var(--color-danger)');
     var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
-    var retryBadge = (item.attemptIndex && item.attemptIndex > 1) ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#fef3c7;color:#b45309;border:1px solid #fde68a;">重试×' + item.attemptIndex + '</span>' : '';
     var ipStr = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;"></i>' + escapeHtml(item.clientIp) + '</span>' : '';
     var keyStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '';
-    var errBox = (!isSuccess && item.error) ? '<div style="margin-top:6px;padding:4px 8px;background:#fef2f2;border-radius:4px;color:var(--color-danger);font-size:11px;word-break:break-all;"><i class="fas fa-exclamation-circle" style="margin-right:4px;"></i>' + escapeHtml(item.error) + '</div>' : '';
-
-    var kvTagMobileBadge = '';
-    if (item.kvTag === 'driver') {
-      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;border-radius:3px;font-weight:600;">🚗 车</span>';
-    } else if (item.kvTag === 'passenger') {
-      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:3px;font-weight:600;">🧳 客</span>';
-    } else {
-      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;border-radius:3px;font-weight:600;">⏳ 候</span>';
-    }
+    var errBox = (!isSuccess && item.error) ? '<div style="margin-top:6px;padding:4px 8px;background:#fef2f2;border-radius:4px;color:var(--color-danger);font-size:11px;word-break:break-all;">' + escapeHtml(item.error) + '</div>' : '';
 
     var mobileSwitchBadge = '';
     if (item.isModelSwitch && item.switchNotice) {
@@ -3175,27 +3150,29 @@ function renderLogsTable(logs) {
     return '<div class="log-mobile-card ' + (isSuccess ? 'is-ok' : 'is-err') + '">' +
       '<div class="log-mobile-header">' +
         '<span style="color:var(--color-muted);font-family:var(--font-mono);font-size:11px;"><i class="far fa-clock"></i> ' + timeStr + '</span>' +
-        '<div style="display:inline-flex;align-items:center;gap:4px;"><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + ' ' + (retryBadge ? retryBadge + ' ' : '') + kvTagMobileBadge + '</div>' +
+        '<div><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + '</div>' +
       '</div>' +
       '<div class="log-mobile-route">' + mobileSwitchBadge + '<code>' + modelStr + '</code></div>' +
       '<div class="log-mobile-meta">' +
         ipStr +
         '<span style="color:' + latencyColor + ';font-weight:600;font-family:var(--font-mono);"><i class="fas fa-stopwatch"></i> ' + latency + ' ms</span>' +
+        (item.attemptIndex ? '<span>第 ' + item.attemptIndex + ' 次</span>' : '') +
         keyStr +
       '</div>' +
       errBox +
     '</div>';
   }).join('');
 
-  container.innerHTML = '<div class="logs-desktop-view table-wrap" style="border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);"><table class="data-table" style="width:100%;text-align:left;border-collapse:collapse;">' +
+  container.innerHTML = '<div class="logs-desktop-view table-wrap" style="overflow-x:auto;border:1px solid var(--color-rule);border-radius:var(--radius-panel);background:var(--color-paper);"><table class="data-table" style="width:100%;text-align:left;border-collapse:collapse;">' +
     '<thead><tr style="border-bottom:1px solid var(--color-rule);font-size:var(--text-xs);color:var(--color-muted);background:var(--color-paper-2);">' +
-      '<th style="padding:10px 10px;width:125px;">请求时间</th>' +
-      '<th style="padding:10px 10px;width:115px;">客户端 IP</th>' +
-      '<th style="padding:10px 10px;">调度链路与模型 / 异常提示</th>' +
-      '<th style="padding:10px 10px;width:75px;white-space:nowrap;text-align:center;">KV写入</th>' +
-      '<th style="padding:10px 10px;width:105px;">API Key</th>' +
-      '<th style="padding:10px 10px;width:130px;">状态码</th>' +
-      '<th style="padding:10px 10px;width:95px;">响应耗时</th>' +
+      '<th style="padding:10px 10px;">请求时间</th>' +
+      '<th style="padding:10px 10px;">客户端 IP</th>' +
+      '<th style="padding:10px 10px;">调度链路与模型</th>' +
+      '<th style="padding:10px 10px;">API Key</th>' +
+      '<th style="padding:10px 10px;">状态码</th>' +
+      '<th style="padding:10px 10px;">响应耗时</th>' +
+      '<th style="padding:10px 10px;">尝试轮次</th>' +
+      '<th style="padding:10px 10px;">失败原因</th>' +
     '</tr></thead>' +
     '<tbody style="divide-y:1px solid var(--color-rule);">' + rowsHtml + '</tbody>' +
   '</table></div>' +

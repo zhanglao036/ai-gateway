@@ -1,13 +1,10 @@
 /**
- * 版本号: v1.3.8
- * 更新说明:
- * 1. 内存日志顺风车打包：攒满20条或在后台刷新时才写入KV，实现平时0 KV写入、刷新即可见最新日志；
- * 2. 故障与补位合并写：模型故障剔除与3个梯队补位全过程合并为至多1次KV写入，解决连续写KV问题；
- * 3. 彻底取消报错与切换强行写KV，全面控制免费配额使用。
+ * 版本号: v1.3.1
+ * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.8'
+export const VERSION = 'v1.3.1'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

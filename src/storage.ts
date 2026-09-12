@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.8
- * 更新说明: 顺风车持久化与批量落盘：积压20条或后台刷新时一次性带走，彻底取消故障与模型切换单独写KV。
+ * 版本号: v1.2.6
+ * 更新说明: 优化顺风车模式与日志落盘机制：模型切换与关键异常即时落盘，日常普通请求内存打包定时批量写入；读取日志时跨节点智能排重合并，彻底杜绝日志丢失。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -175,8 +175,8 @@ function scheduleFlush(env: Env) {
 
 export async function flushPendingWrites(env: Env): Promise<void> {
   // 顺风车捎带：只要系统有任何必须写入 KV 的操作（保存配置、故障降级、梯队补位等），
-  // 顺路检查并打包内存中所有候车的请求日志，一次性写入 KV 并同步标记为【🧳 客】
-  if (inMemoryLogs.length > 0) {
+  // 检查内存中是否有未保存的请求日志，只要有（> 0 条），就顺路打包一次性写入 KV，0 额外写入成本！
+  if (unflushedLogCount > 0) {
     await flushPendingLogs(env)
   }
   if (pendingWrites.size === 0) return
@@ -396,56 +396,17 @@ export async function seedInitialData(env: Env): Promise<void> {
 
 // ===== 网关请求日志管理 (内存高速队列 + 定量/定时/顺风车落盘 KV) =====
 
-/**
- * 健壮的时间戳解析函数：
- * 优先读取数字型 timestamp 毫秒数；若历史日志仅含中文/格式化字符串（如 2026/09/12 20:55:26），
- * 智能容错解析，避免 new Date(str).getTime() 返回 NaN 导致日志列表排序错乱
- */
-export function getLogTimestamp(l: RequestLog): number {
-  if (typeof l.timestamp === 'number' && !isNaN(l.timestamp)) {
-    return l.timestamp
-  }
-  if (!l.time) return 0
-  const parsed = new Date(l.time).getTime()
-  if (!isNaN(parsed)) return parsed
-  const normalized = l.time.replace(/\//g, '-')
-  const p2 = new Date(normalized).getTime()
-  return isNaN(p2) ? 0 : p2
-}
-
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
-let isFlushingLogs = false
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
-  // 当用户在后台点击「刷新日志」或进入日志页面时，若当前节点有未落盘日志，顺带触发落盘，确保跨节点刷新能够完整呈现最新日志
-  if (unflushedLogCount > 0) {
-    await flushPendingLogs(env)
-  }
-
-  // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并与状态同步
+  // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
       if (Array.isArray(storedLogs) && storedLogs.length > 0) {
-        // 构建 KV 中已落盘日志的映射表
-        const kvLogMap = new Map<string, RequestLog>()
-        for (const log of storedLogs) {
-          if (log && log.id) {
-            kvLogMap.set(log.id, log)
-          }
-        }
-
-        // 关键逻辑：如果内存中的日志已经存在于 KV 中，用 KV 里的已落盘状态（如 passenger / driver）覆盖内存中的临时状态
-        for (const localLog of inMemoryLogs) {
-          const stored = kvLogMap.get(localLog.id)
-          if (stored && stored.kvTag) {
-            localLog.kvTag = stored.kvTag
-          }
-        }
-
-        // 构建已有 ID 的集合以快速排重未在内存中的历史记录
+        // 构建已有 ID 的集合以快速排重
         const existingIds = new Set(inMemoryLogs.map(l => l.id))
         for (const log of storedLogs) {
           if (!existingIds.has(log.id)) {
@@ -453,8 +414,8 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
             existingIds.add(log.id)
           }
         }
-        // 按时间倒序重新排列（最新的在前，使用安全时间解析算法）
-        inMemoryLogs.sort((a, b) => getLogTimestamp(b) - getLogTimestamp(a))
+        // 按时间倒序重新排列（最新的在前，time 字段为 ISO 字符串）
+        inMemoryLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
         if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
           inMemoryLogs.length = MAX_MEMORY_LOGS
         }
@@ -468,45 +429,47 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    // 读取当前调试模式与配置
-    const config = await getLogConfig(env)
-
-    // 所有日志（无论正常、报错或模型切换）统一打标为 memory 存入内存队列
-    log.kvTag = 'memory'
+    // 将最新请求日志放入内存队列首部
     inMemoryLogs.unshift(log)
     if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
       inMemoryLogs.length = MAX_MEMORY_LOGS
     }
+
     unflushedLogCount++
 
-    // 发车条件门槛判定：
-    // 1. 调试模式开启：即刻发车
-    // 2. 积压未落盘日志达到 20 条门槛：批量打包发车（20次请求才写1次KV）
-    // 3. 距离上次落盘超过 60 秒且有未落盘数据：超时保底发车
-    const timeDiff = Date.now() - lastLogFlushTime
-    if (config.debugMode || unflushedLogCount >= 20 || (timeDiff > 60000 && unflushedLogCount > 0)) {
-      flushPendingLogs(env, log.id).catch(console.error)
+    // 核心判定：
+    // 1. 是否为模型切换事件（首发连接或调度变动，对管理员最关键）
+    const isSwitchEvent = !!log.isModelSwitch
+    // 2. 是否属于超时、报错、上游失败或 HTTP 异常状态码 (status >= 400 或存在 error)
+    const isErrorOrTimeout = (typeof log.status === 'number' && log.status >= 400) || !!log.error
+
+    // 读取用户配置的定量阈值与调试模式
+    const config = await getLogConfig(env)
+    const bufferMax = config.bufferMaxCount || 20
+
+    // 智能落盘规则（严格保障 1000次/天 免费限制）：
+    // 1. 调试模式开启：任何报错或积攒达到阈值即刻落盘
+    // 2. 正式模式下：
+    //    - 模型发生切换（isSwitchEvent）：特事特办立即写入全局 KV，确保跨节点/刷新后台 100% 实时可见
+    //    - 出现异常报错（isErrorOrTimeout）：立即写入全局 KV 便于排查
+    //    - 日常平稳请求：内存积攒达到定量（如 20 条）或保存配置触发顺风车时批量打包写入 1 次，极度节省 KV 写入额度
+    if (
+      config.debugMode ||
+      isSwitchEvent ||
+      isErrorOrTimeout ||
+      unflushedLogCount >= bufferMax
+    ) {
+      await flushPendingLogs(env)
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
   }
 }
 
-export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise<void> {
-  // 内存无日志或正处于落盘中则安全退出，防止并发重复写 KV
-  if (inMemoryLogs.length === 0 || isFlushingLogs) return
-  isFlushingLogs = true
-
+export async function flushPendingLogs(env: Env): Promise<void> {
+  // 内存无日志则退出
+  if (inMemoryLogs.length === 0) return
   try {
-    // 发车打包：更新内存中所有排队日志的落盘打标
-    for (const l of inMemoryLogs) {
-      if (triggerLogId && l.id === triggerLogId) {
-        l.kvTag = 'driver' // 触发本次发车的主事件日志
-      } else if (l.kvTag === 'memory' || !l.kvTag) {
-        l.kvTag = 'passenger' // 搭乘顺风车成功落盘的乘客日志
-      }
-    }
-
     // 写入前尝试与 KV 中现存数据合并，防止并发实例写覆盖
     let mergedLogs = [...inMemoryLogs]
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
@@ -520,7 +483,7 @@ export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise
             idSet.add(s.id)
           }
         }
-        mergedLogs.sort((a, b) => getLogTimestamp(b) - getLogTimestamp(a))
+        mergedLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
       }
     }
     const logsToSave = mergedLogs.slice(0, 100)
@@ -529,8 +492,6 @@ export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise
     lastLogFlushTime = Date.now()
   } catch (err) {
     console.warn('[storage] 落盘/顺风车保存日志至 KV 异常:', err instanceof Error ? err.message : String(err))
-  } finally {
-    isFlushingLogs = false
   }
 }
 

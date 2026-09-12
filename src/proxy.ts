@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.8
- * 更新说明: 合并故障剔除与梯队补位为至多1次写入，取消故障单独写KV。
+ * 版本号: v1.2.1
+ * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -124,14 +124,14 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
           avgLatency: 9999,
           failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
         }
-        // 尝试自动补位新模型填补空位（内存处理，跳过内部独立写 KV）
-        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage, { skipSave: true })
-        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage, { skipSave: true })
-        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage, { skipSave: true })
-
-        // 核心修复：全流程处理完毕后合并保存更新后的梯队池状态到 KV，至多触发 1 次写入
+        // 核心修复：立即持久化保存更新后的梯队池状态到 KV，杜绝剔除状态丢失
         storage.updatedAt = new Date().toISOString()
         await saveTierStorage(env, storage)
+
+        // 尝试自动补位新模型填补空位
+        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
+        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
+        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
       }
     }
   } catch (err) {
@@ -198,32 +198,30 @@ const lastActiveModelByChannel = new Map<string, string>()
 
 /**
  * 检查模型是否发生真实切换：
- * 1. 优先比对内存中的上一次模型，若内存无记录则比对全局梯队中已连接模型（防跨节点冷启动误判）
- * 2. 只有在当前模型确实不同于已有记录（跨模型切换）时，才判定为切换事件并打上醒目标记（触发发车）
- * 3. 首次建立连接时打上连接标记，但只要模型一致，不作为高频发车源，使平稳请求留在内存候车
+ * 1. 优先比对内存中的上一次模型，若内存无记录则尝试比对全局梯队中已连接模型（防跨节点冷启动误判）
+ * 2. 只有在当前模型确实不同于已有记录时，才判定为切换事件并展示醒目蓝框
+ * 3. 若为同模型，坚决不打蓝框，让日志完全留在内存走顺风车打包落盘
  */
 function checkAndTrackModelSwitch(
   channelKey: string,
   currentFullModel: string,
   fallbackActiveModel?: string | null
-): { isSwitch: boolean; isFirstConnect: boolean; prevModel: string | null; notice: string | null } {
+): { isSwitch: boolean; prevModel: string | null; notice: string | null } {
   const prevModel = lastActiveModelByChannel.get(channelKey) || fallbackActiveModel || null
 
   if (prevModel && prevModel !== currentFullModel) {
-    // 发生了真实的跨模型切换（例如故障剔除换用备用模型）
+    // 发生了真实的模型切换
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
       isSwitch: true,
-      isFirstConnect: false,
       prevModel,
       notice: `当前接管模型已切换为: ${currentFullModel} (原: ${prevModel})`
     }
   } else if (!prevModel) {
-    // 全系统冷启动首次记录连接模型
+    // 全系统首次记录连接的初始模型
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
-      isSwitch: false,
-      isFirstConnect: true,
+      isSwitch: true,
       prevModel: null,
       notice: `当前已连接模型: ${currentFullModel}`
     }
@@ -231,7 +229,7 @@ function checkAndTrackModelSwitch(
 
   // 模型未改变（同模型平稳请求）：更新本地内存记录，不打蓝框，走顺风车
   lastActiveModelByChannel.set(channelKey, currentFullModel)
-  return { isSwitch: false, isFirstConnect: false, prevModel, notice: null }
+  return { isSwitch: false, prevModel, notice: null }
 }
 
 async function recordLog(
@@ -251,12 +249,10 @@ async function recordLog(
   }
 ) {
   try {
-    const now = Date.now()
-    const latency = now - startTime
+    const latency = Date.now() - startTime
     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
     await addRequestLog(env, {
       id: crypto.randomUUID(),
-      timestamp: now,
       time,
       model,
       latency,
@@ -677,8 +673,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
 
       // 关键逻辑：纯内存比对当前接管模型是否发生切换，切换后的第一条连接日志将被打上醒目标记
-      // 统一通道标识：如果是自动池（通用/智能体/绘图），按池类型识别；如果是指定直连模型，统一以实际接管的 currentModel 为通道
-      const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${currentModel}`
+      const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${clientRequested}`
       let fallbackActiveModel: string | null = null
       if (isAutoRequest) {
         try {
@@ -689,9 +684,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         } catch {
           // ignore
         }
-      } else {
-        // 直连模型：固定当前模型为基准，绝不误判跨模型切换
-        fallbackActiveModel = currentModel
       }
       const switchInfo = checkAndTrackModelSwitch(channelKey, currentModel, fallbackActiveModel)
 
@@ -903,7 +895,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           isModelSwitch: switchInfo.isSwitch,
           switchNotice: switchInfo.notice,
         })
-        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType, switchInfo.isSwitch)
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
         await recordModelSuccess(c.env, providerId, modelId)
         const opHeaders = new Headers(response.headers)
         if (isStreamReq) {
@@ -1009,7 +1001,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(isStreamReq ? 60000 : 35000),
+          signal: AbortSignal.timeout(60000),
         })
 
         if (response.ok) {
@@ -1077,7 +1069,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             isModelSwitch: switchInfo.isSwitch,
             switchNotice: switchInfo.notice,
           })
-          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType, switchInfo.isSwitch)
+          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
           await recordModelSuccess(c.env, providerId, modelId)
           return new Response(resText !== null ? resText : response.body, {
             status: response.status,
