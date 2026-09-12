@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
+ * 版本号: v1.3.2
+ * 更新说明: 优化 KV 顺风车打包写入体系与日志打标：实现平稳请求 0 KV 写入与发车顺风车打包，直观区分直接写入(🚗车)、搭车写入(🧳客)与内存候车(⏳候)。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.1'
+export const VERSION = 'v1.3.2'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

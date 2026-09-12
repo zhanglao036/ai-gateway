@@ -100,6 +100,8 @@ export interface RequestLog {
   // 模型切换提醒字段：无论请求成功还是失败，切换后的第一条日志携带该标记
   isModelSwitch?: boolean
   switchNotice?: string | null
+  // KV 写入状态打标：🚗 发车直接写入(driver) | 🧳 搭顺风车打包写入(passenger) | ⏳ 内存等待上车(memory)
+  kvTag?: 'driver' | 'passenger' | 'memory'
 }
 
 export interface LogConfig {

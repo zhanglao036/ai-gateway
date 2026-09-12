@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 优化高延迟公益环境自适应动态倍率算法，支持 20000ms+ 高耗时模型稳定锁定，杜绝因大模型耗时波动引起的反复跳换。
+ * 版本号: v1.3.2
+ * 更新说明: 优化请求日志展示面板：直观渲染 KV 写入状态标签（🚗车 发车直接写入 / 🧳客 顺风车打包写入 / ⏳候 内存候车中），方便实时观察与核验写入情况。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -3110,6 +3110,16 @@ function renderLogsTable(logs) {
     var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
     var ipBadge = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;color:var(--color-muted);"></i>' + escapeHtml(item.clientIp) + '</span>' : '<span style="color:var(--color-muted);font-size:11px;">-</span>';
 
+    // KV 写入状态打标（车 / 客 / 候）
+    var kvTagBadge = '';
+    if (item.kvTag === 'driver') {
+      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="🚗 发车写入：因模型故障/切换模型/配置保存等发车事件直接触发 1 笔 KV 写入">🚗 车</span>';
+    } else if (item.kvTag === 'passenger') {
+      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="🧳 顺风车写入：平稳业务请求搭乘发车事件一同打包写入 KV (0 额外开销)">🧳 客</span>';
+    } else {
+      kvTagBadge = '<span class="bd" style="padding:2px 6px;font-size:11px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="⏳ 内存候车：纯内存驻留 (0 KV 写入)，等待下次发车顺风车打包落盘">⏳ 候</span>';
+    }
+
     // 关键逻辑：若该条日志为模型切换后的首条连接日志，渲染醒目的蓝色接管提醒标签
     var switchBadge = '';
     if (item.isModelSwitch && item.switchNotice) {
@@ -3120,6 +3130,7 @@ function renderLogsTable(logs) {
       '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + ipBadge + '</td>' +
       '<td style="padding:8px 10px;">' + switchBadge + '<code style="font-size:11.5px;">' + modelStr + '</code></td>' +
+      '<td style="padding:8px 10px;white-space:nowrap;">' + kvTagBadge + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + keyMaskStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
@@ -3142,6 +3153,15 @@ function renderLogsTable(logs) {
     var keyStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '';
     var errBox = (!isSuccess && item.error) ? '<div style="margin-top:6px;padding:4px 8px;background:#fef2f2;border-radius:4px;color:var(--color-danger);font-size:11px;word-break:break-all;">' + escapeHtml(item.error) + '</div>' : '';
 
+    var kvTagMobileBadge = '';
+    if (item.kvTag === 'driver') {
+      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#fef3c7;color:#92400e;border:1px solid #fde68a;border-radius:3px;font-weight:600;">🚗 车</span>';
+    } else if (item.kvTag === 'passenger') {
+      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#ecfdf5;color:#065f46;border:1px solid #a7f3d0;border-radius:3px;font-weight:600;">🧳 客</span>';
+    } else {
+      kvTagMobileBadge = '<span class="bd" style="padding:1px 5px;font-size:10px;background:#f8fafc;color:#64748b;border:1px solid #e2e8f0;border-radius:3px;font-weight:600;">⏳ 候</span>';
+    }
+
     var mobileSwitchBadge = '';
     if (item.isModelSwitch && item.switchNotice) {
       mobileSwitchBadge = '<div style="margin-bottom:4px;"><span class="bd" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:2px 6px;font-size:10px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;"><i class="fas fa-sync-alt" style="font-size:9px;"></i> ' + escapeHtml(item.switchNotice) + '</span></div>';
@@ -3150,7 +3170,7 @@ function renderLogsTable(logs) {
     return '<div class="log-mobile-card ' + (isSuccess ? 'is-ok' : 'is-err') + '">' +
       '<div class="log-mobile-header">' +
         '<span style="color:var(--color-muted);font-family:var(--font-mono);font-size:11px;"><i class="far fa-clock"></i> ' + timeStr + '</span>' +
-        '<div><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + '</div>' +
+        '<div style="display:inline-flex;align-items:center;gap:4px;"><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + ' ' + kvTagMobileBadge + '</div>' +
       '</div>' +
       '<div class="log-mobile-route">' + mobileSwitchBadge + '<code>' + modelStr + '</code></div>' +
       '<div class="log-mobile-meta">' +
@@ -3168,6 +3188,7 @@ function renderLogsTable(logs) {
       '<th style="padding:10px 10px;">请求时间</th>' +
       '<th style="padding:10px 10px;">客户端 IP</th>' +
       '<th style="padding:10px 10px;">调度链路与模型</th>' +
+      '<th style="padding:10px 10px;white-space:nowrap;">KV写入</th>' +
       '<th style="padding:10px 10px;">API Key</th>' +
       '<th style="padding:10px 10px;">状态码</th>' +
       '<th style="padding:10px 10px;">响应耗时</th>' +

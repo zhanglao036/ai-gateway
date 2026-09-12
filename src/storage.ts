@@ -1,6 +1,9 @@
 /**
- * 版本号: v1.2.6
- * 更新说明: 优化顺风车模式与日志落盘机制：模型切换与关键异常即时落盘，日常普通请求内存打包定时批量写入；读取日志时跨节点智能排重合并，彻底杜绝日志丢失。
+ * 版本号: v1.3.2
+ * 更新说明: 实现发车与顺风车 KV 极简写入模型及日志打标体系：
+ * 1. 严格区分发车事件（报错拉黑、模型切换、手动保存）与顺风乘客（平稳业务请求日志与延迟）；
+ * 2. 平稳业务请求纯内存驻留 (0 KV 写入)，发车时一并打包写入；
+ * 3. 每条日志精确标记写入类型：🚗 直接发车写入(driver)、🧳 搭顺风车写入(passenger)、⏳ 内存候车中(memory)。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -429,47 +432,54 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
 
 export async function addRequestLog(env: Env, log: RequestLog): Promise<void> {
   try {
-    // 将最新请求日志放入内存队列首部
-    inMemoryLogs.unshift(log)
-    if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
-      inMemoryLogs.length = MAX_MEMORY_LOGS
-    }
+    // 读取当前调试模式与配置
+    const config = await getLogConfig(env)
 
-    unflushedLogCount++
-
-    // 核心判定：
-    // 1. 是否为模型切换事件（首发连接或调度变动，对管理员最关键）
+    // 核心发车事件判定：
+    // 1. 是否为模型切换事件（首发连接或调度变动，触发发车）
     const isSwitchEvent = !!log.isModelSwitch
     // 2. 是否属于超时、报错、上游失败或 HTTP 异常状态码 (status >= 400 或存在 error)
     const isErrorOrTimeout = (typeof log.status === 'number' && log.status >= 400) || !!log.error
+    // 3. 调试模式开启：任何请求均视为直接发车
+    const isDriverEvent = config.debugMode || isSwitchEvent || isErrorOrTimeout
 
-    // 读取用户配置的定量阈值与调试模式
-    const config = await getLogConfig(env)
-    const bufferMax = config.bufferMaxCount || 20
-
-    // 智能落盘规则（严格保障 1000次/天 免费限制）：
-    // 1. 调试模式开启：任何报错或积攒达到阈值即刻落盘
-    // 2. 正式模式下：
-    //    - 模型发生切换（isSwitchEvent）：特事特办立即写入全局 KV，确保跨节点/刷新后台 100% 实时可见
-    //    - 出现异常报错（isErrorOrTimeout）：立即写入全局 KV 便于排查
-    //    - 日常平稳请求：内存积攒达到定量（如 20 条）或保存配置触发顺风车时批量打包写入 1 次，极度节省 KV 写入额度
-    if (
-      config.debugMode ||
-      isSwitchEvent ||
-      isErrorOrTimeout ||
-      unflushedLogCount >= bufferMax
-    ) {
-      await flushPendingLogs(env)
+    if (isDriverEvent) {
+      // 🚗 发车事件：直接触发 1 笔 KV 写入，并将本条日志打标为 driver（车）
+      log.kvTag = 'driver'
+      inMemoryLogs.unshift(log)
+      if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+        inMemoryLogs.length = MAX_MEMORY_LOGS
+      }
+      unflushedLogCount++
+      // 触发发车，顺带将内存中所有候车的乘客日志一并带走落盘
+      await flushPendingLogs(env, log.id)
+    } else {
+      // 🧳 顺风乘客：平稳 200 请求纯内存驻留 (0 KV 写入)，打标为 memory（候）等待下次发车顺路打包
+      log.kvTag = 'memory'
+      inMemoryLogs.unshift(log)
+      if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
+        inMemoryLogs.length = MAX_MEMORY_LOGS
+      }
+      unflushedLogCount++
     }
   } catch (err) {
     console.warn('[storage] addRequestLog 异常:', err instanceof Error ? err.message : String(err))
   }
 }
 
-export async function flushPendingLogs(env: Env): Promise<void> {
+export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise<void> {
   // 内存无日志则退出
   if (inMemoryLogs.length === 0) return
   try {
+    // 发车打包：更新内存中所有排队日志的落盘打标
+    for (const l of inMemoryLogs) {
+      if (triggerLogId && l.id === triggerLogId) {
+        l.kvTag = 'driver' // 触发本次发车的主事件日志
+      } else if (l.kvTag === 'memory' || !l.kvTag) {
+        l.kvTag = 'passenger' // 搭乘顺风车成功落盘的乘客日志
+      }
+    }
+
     // 写入前尝试与 KV 中现存数据合并，防止并发实例写覆盖
     let mergedLogs = [...inMemoryLogs]
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)

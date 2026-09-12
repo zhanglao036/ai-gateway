@@ -1,9 +1,6 @@
 /**
- * 版本号: v1.2.7
- * 更新说明: 根治三大梯队池（通用/智能体/绘图）坏模型反复横跳与秒级回补死循环：
- * 1. 业务调用只要失败 1 次，强制移出当前池并打入 10 分钟冷却隔离区；
- * 2. 彻底封死 ensureTierStorage 和 backfill 补位漏洞，严禁将处于冷却或永久失效的模型录入任何活跃池；
- * 3. 连续失败 3 次直接标记永久失效，全面杜绝坏模型反复切换。
+ * 版本号: v1.3.2
+ * 更新说明: 优化梯队池数据与延迟顺风车机制：平稳请求纯内存记录业务延迟，模型故障/补位/海选发车时顺风车全量打包写入 KV。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'

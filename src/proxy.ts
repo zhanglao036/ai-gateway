@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.3.2
+ * 更新说明: 配合发车与顺风车架构：模型切换与调用报错即时触发发车写入，平稳请求纯内存记录延迟与日志，大幅缩减 KV 消耗。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
