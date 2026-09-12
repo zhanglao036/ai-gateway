@@ -197,13 +197,20 @@ function maskKey(key: string): string {
 const lastActiveModelByChannel = new Map<string, string>()
 
 /**
- * 检查模型是否发生切换：
- * 只要当前连接的模型与该通道上次模型不同，即判定为切换事件，并只在切换后的第一条日志展示提醒
+ * 检查模型是否发生真实切换：
+ * 1. 优先比对内存中的上一次模型，若内存无记录则尝试比对全局梯队中已连接模型（防跨节点冷启动误判）
+ * 2. 只有在当前模型确实不同于已有记录时，才判定为切换事件并展示醒目蓝框
+ * 3. 若为同模型，坚决不打蓝框，让日志完全留在内存走顺风车打包落盘
  */
-function checkAndTrackModelSwitch(channelKey: string, currentFullModel: string): { isSwitch: boolean; prevModel: string | null; notice: string | null } {
-  const prevModel = lastActiveModelByChannel.get(channelKey) || null
+function checkAndTrackModelSwitch(
+  channelKey: string,
+  currentFullModel: string,
+  fallbackActiveModel?: string | null
+): { isSwitch: boolean; prevModel: string | null; notice: string | null } {
+  const prevModel = lastActiveModelByChannel.get(channelKey) || fallbackActiveModel || null
+
   if (prevModel && prevModel !== currentFullModel) {
-    // 发生了模型切换
+    // 发生了真实的模型切换
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
       isSwitch: true,
@@ -211,7 +218,7 @@ function checkAndTrackModelSwitch(channelKey: string, currentFullModel: string):
       notice: `当前接管模型已切换为: ${currentFullModel} (原: ${prevModel})`
     }
   } else if (!prevModel) {
-    // 首次记录连接的模型，也明确告知当前连接的初始模型
+    // 全系统首次记录连接的初始模型
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
       isSwitch: true,
@@ -219,7 +226,9 @@ function checkAndTrackModelSwitch(channelKey: string, currentFullModel: string):
       notice: `当前已连接模型: ${currentFullModel}`
     }
   }
-  // 模型未改变，不重复提醒
+
+  // 模型未改变（同模型平稳请求）：更新本地内存记录，不打蓝框，走顺风车
+  lastActiveModelByChannel.set(channelKey, currentFullModel)
   return { isSwitch: false, prevModel, notice: null }
 }
 
@@ -665,7 +674,18 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
 
       // 关键逻辑：纯内存比对当前接管模型是否发生切换，切换后的第一条连接日志将被打上醒目标记
       const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${clientRequested}`
-      const switchInfo = checkAndTrackModelSwitch(channelKey, currentModel)
+      let fallbackActiveModel: string | null = null
+      if (isAutoRequest) {
+        try {
+          const tStore = await getTierStorage(c.env)
+          if (tStore && tStore.activeConnections) {
+            fallbackActiveModel = tStore.activeConnections[poolType] || null
+          }
+        } catch {
+          // ignore
+        }
+      }
+      const switchInfo = checkAndTrackModelSwitch(channelKey, currentModel, fallbackActiveModel)
 
       const parsed = parseModelId(currentModel)
       if (!parsed) {

@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.7
- * 更新说明: 根除三大梯队池坏模型秒回补死循环，严格执行 10 分钟冷却隔离与永久失效机制。
+ * 版本号: v1.2.8
+ * 更新说明: 优化模型切换感知算法，跨节点智能同步当前活跃模型，平稳日常请求100%走顺风车积攒批量写入，极致节省 KV 写入额度。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
