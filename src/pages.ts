@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.4
- * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
+ * 版本号: v1.2.5
+ * 更新说明: 新增模型切换首条日志提醒功能（无论成功失败均首发提醒当前接管模型，纯内存 0 KV 开销）。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -3110,10 +3110,16 @@ function renderLogsTable(logs) {
     var streamBadge = item.isStream ? '<span class="bd" style="padding:1px 4px;font-size:10px;background:#e0f2fe;color:#0369a1;border:1px solid #bae6fd;">流式</span>' : '<span class="bd" style="padding:1px 4px;font-size:10px;background:#f1f5f9;color:#64748b;border:1px solid #e2e8f0;">非流</span>';
     var ipBadge = item.clientIp ? '<span class="log-ip-badge"><i class="fas fa-network-wired" style="font-size:9px;color:var(--color-muted);"></i>' + escapeHtml(item.clientIp) + '</span>' : '<span style="color:var(--color-muted);font-size:11px;">-</span>';
 
+    // 关键逻辑：若该条日志为模型切换后的首条连接日志，渲染醒目的蓝色接管提醒标签
+    var switchBadge = '';
+    if (item.isModelSwitch && item.switchNotice) {
+      switchBadge = '<div style="margin-bottom:4px;"><span class="bd" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:2px 6px;font-size:10.5px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;" title="' + escapeHtml(item.switchNotice) + '"><i class="fas fa-sync-alt" style="font-size:9.5px;"></i> ' + escapeHtml(item.switchNotice) + '</span></div>';
+    }
+
     return '<tr>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-size:var(--text-xs);color:var(--color-muted);">' + timeStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + ipBadge + '</td>' +
-      '<td style="padding:8px 10px;"><code style="font-size:11.5px;">' + modelStr + '</code></td>' +
+      '<td style="padding:8px 10px;">' + switchBadge + '<code style="font-size:11.5px;">' + modelStr + '</code></td>' +
       '<td style="padding:8px 10px;white-space:nowrap;">' + keyMaskStr + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;"><span class="bd ' + statusBadgeClass + '">' + statusText + '</span> ' + streamBadge + '</td>' +
       '<td style="padding:8px 10px;white-space:nowrap;font-family:var(--font-mono);font-size:var(--text-xs);">' + latencyStr + '</td>' +
@@ -3136,12 +3142,17 @@ function renderLogsTable(logs) {
     var keyStr = item.keyMask ? '<code>' + escapeHtml(item.keyMask) + '</code>' : '';
     var errBox = (!isSuccess && item.error) ? '<div style="margin-top:6px;padding:4px 8px;background:#fef2f2;border-radius:4px;color:var(--color-danger);font-size:11px;word-break:break-all;">' + escapeHtml(item.error) + '</div>' : '';
 
+    var mobileSwitchBadge = '';
+    if (item.isModelSwitch && item.switchNotice) {
+      mobileSwitchBadge = '<div style="margin-bottom:4px;"><span class="bd" style="background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;padding:2px 6px;font-size:10px;border-radius:4px;font-weight:600;display:inline-flex;align-items:center;gap:3px;"><i class="fas fa-sync-alt" style="font-size:9px;"></i> ' + escapeHtml(item.switchNotice) + '</span></div>';
+    }
+
     return '<div class="log-mobile-card ' + (isSuccess ? 'is-ok' : 'is-err') + '">' +
       '<div class="log-mobile-header">' +
         '<span style="color:var(--color-muted);font-family:var(--font-mono);font-size:11px;"><i class="far fa-clock"></i> ' + timeStr + '</span>' +
         '<div><span class="bd ' + statusBadgeClass + '" style="font-size:10.5px;">' + statusText + '</span> ' + streamBadge + '</div>' +
       '</div>' +
-      '<div class="log-mobile-route"><code>' + modelStr + '</code></div>' +
+      '<div class="log-mobile-route">' + mobileSwitchBadge + '<code>' + modelStr + '</code></div>' +
       '<div class="log-mobile-meta">' +
         ipStr +
         '<span style="color:' + latencyColor + ';font-weight:600;font-family:var(--font-mono);"><i class="fas fa-stopwatch"></i> ' + latency + ' ms</span>' +

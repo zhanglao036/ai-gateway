@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.4
- * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
+ * 版本号: v1.2.5
+ * 更新说明: 新增模型切换首条日志提醒功能（无论成功失败均首发提醒当前接管模型，纯内存 0 KV 开销）。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.4'
+export const VERSION = 'v1.2.5'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

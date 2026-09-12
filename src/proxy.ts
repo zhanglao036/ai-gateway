@@ -193,6 +193,36 @@ function maskKey(key: string): string {
   return `${trimmed.substring(0, 4)}***${trimmed.substring(trimmed.length - 4)}`
 }
 
+// 内存记录各调度通道/路由最近一次连接的实际模型ID (纯内存状态，0 KV 消耗)
+const lastActiveModelByChannel = new Map<string, string>()
+
+/**
+ * 检查模型是否发生切换：
+ * 只要当前连接的模型与该通道上次模型不同，即判定为切换事件，并只在切换后的第一条日志展示提醒
+ */
+function checkAndTrackModelSwitch(channelKey: string, currentFullModel: string): { isSwitch: boolean; prevModel: string | null; notice: string | null } {
+  const prevModel = lastActiveModelByChannel.get(channelKey) || null
+  if (prevModel && prevModel !== currentFullModel) {
+    // 发生了模型切换
+    lastActiveModelByChannel.set(channelKey, currentFullModel)
+    return {
+      isSwitch: true,
+      prevModel,
+      notice: `当前接管模型已切换为: ${currentFullModel} (原: ${prevModel})`
+    }
+  } else if (!prevModel) {
+    // 首次记录连接的模型，也明确告知当前连接的初始模型
+    lastActiveModelByChannel.set(channelKey, currentFullModel)
+    return {
+      isSwitch: true,
+      prevModel: null,
+      notice: `当前已连接模型: ${currentFullModel}`
+    }
+  }
+  // 模型未改变，不重复提醒
+  return { isSwitch: false, prevModel, notice: null }
+}
+
 async function recordLog(
   env: Env,
   startTime: number,
@@ -205,6 +235,8 @@ async function recordLog(
     routePath?: string | null
     isStream?: boolean
     clientIp?: string | null
+    isModelSwitch?: boolean
+    switchNotice?: string | null
   }
 ) {
   try {
@@ -222,6 +254,8 @@ async function recordLog(
       routePath: extra?.routePath || null,
       isStream: extra?.isStream || false,
       clientIp: extra?.clientIp || null,
+      isModelSwitch: extra?.isModelSwitch || false,
+      switchNotice: extra?.switchNotice || null,
     })
   } catch (err) {
     console.warn('[proxy] 记录请求日志异常 (已安全降级):', err instanceof Error ? err.message : String(err))
@@ -629,12 +663,18 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         requestedModel = `${clientRequested} ⚡➔ ${currentModel}`
       }
 
+      // 关键逻辑：纯内存比对当前接管模型是否发生切换，切换后的第一条连接日志将被打上醒目标记
+      const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${clientRequested}`
+      const switchInfo = checkAndTrackModelSwitch(channelKey, currentModel)
+
       const parsed = parseModelId(currentModel)
       if (!parsed) {
         await recordLog(c.env, startTime, requestedModel, 400, `模型格式错误 "${currentModel}"`, {
           routePath,
           isStream: isStreamReq,
           clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
         })
         return c.json({
           error: {
@@ -654,7 +694,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         if (isAutoRequest && attempts < maxAttempts) {
           continue
         }
-        await recordLog(c.env, startTime, requestedModel, 404, `提供商 "${providerId}" 不存在`)
+        await recordLog(c.env, startTime, requestedModel, 404, `提供商 "${providerId}" 不存在`, {
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
+        })
         return c.json({
           error: { message: `提供商 "${providerId}" 不存在`, type: 'invalid_request_error' },
         }, 404)
@@ -664,7 +710,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         if (isAutoRequest && attempts < maxAttempts) {
           continue
         }
-        await recordLog(c.env, startTime, requestedModel, 403, `提供商 "${provider.name}" 已禁用`)
+        await recordLog(c.env, startTime, requestedModel, 403, `提供商 "${provider.name}" 已禁用`, {
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
+        })
         return c.json({
           error: { message: `提供商 "${provider.name}" 已禁用`, type: 'provider_disabled' },
         }, 403)
@@ -680,6 +732,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           routePath,
           isStream: isStreamReq,
           clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
         })
         return c.json({
           error: { message: `模型 "${modelId}" 已被禁用，拒绝连接`, type: 'model_disabled' },
@@ -691,7 +745,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       if (isAutoRequest) {
         if (!modelConfig) {
           if (attempts < maxAttempts) continue
-          await recordLog(c.env, startTime, requestedModel, 404, `模型 "${modelId}" 未配置`)
+          await recordLog(c.env, startTime, requestedModel, 404, `模型 "${modelId}" 未配置`, {
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+            isModelSwitch: switchInfo.isSwitch,
+            switchNotice: switchInfo.notice,
+          })
           return c.json({
             error: { message: `模型 "${modelId}" 未在提供商 "${provider.name}" 中配置`, type: 'invalid_request_error' },
           }, 404)
@@ -699,7 +759,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         if (modelConfig.permanentlyDisabled) {
           if (attempts < maxAttempts) continue
           const reason = modelConfig.disabledReason || '受上游故障影响已标记永久失效'
-          await recordLog(c.env, startTime, requestedModel, 403, `模型已标记永久失效 (${reason})`)
+          await recordLog(c.env, startTime, requestedModel, 403, `模型已标记永久失效 (${reason})`, {
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+            isModelSwitch: switchInfo.isSwitch,
+            switchNotice: switchInfo.notice,
+          })
           return c.json({
             error: { message: `模型 "${modelId}" 已标记永久失效: ${reason}。需管理员手动解封重置。`, type: 'model_permanently_disabled' },
           }, 403)
@@ -707,7 +773,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         if (modelConfig.cooldownUntil && Date.now() < modelConfig.cooldownUntil) {
           if (attempts < maxAttempts) continue
           const remainingSec = Math.ceil((modelConfig.cooldownUntil - Date.now()) / 1000)
-          await recordLog(c.env, startTime, requestedModel, 530, `模型处于冷却期 (${remainingSec}s)`)
+          await recordLog(c.env, startTime, requestedModel, 530, `模型处于冷却期 (${remainingSec}s)`, {
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+            isModelSwitch: switchInfo.isSwitch,
+            switchNotice: switchInfo.notice,
+          })
           return c.json({
             error: { message: `模型 "${modelId}" 暂处于冷却期（剩余 ${remainingSec} 秒），已脱离所有梯队`, type: 'model_cooling_down' },
           }, 530 as any)
@@ -778,7 +850,14 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           const errReason = isContentEmpty ? '上游返回空内容 (choices[0].message.content 为空)' : `HTTP ${response.status}: ${response.statusText || '请求失败'}`
           const errStatus = isContentEmpty ? 502 : response.status
           await recordModelFailure(c.env, providerId, modelId, errStatus, errReason)
-          await recordLog(c.env, startTime, requestedModel, errStatus, errReason)
+          await recordLog(c.env, startTime, requestedModel, errStatus, errReason, {
+            attemptIndex: attempts,
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+            isModelSwitch: switchInfo.isSwitch,
+            switchNotice: switchInfo.notice,
+          })
           await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
           if (isAutoRequest && attempts < maxAttempts) {
             continue
@@ -788,7 +867,14 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           }, errStatus as Parameters<typeof c.json>[1])
         }
 
-        await recordLog(c.env, startTime, requestedModel, response.status, null)
+        await recordLog(c.env, startTime, requestedModel, response.status, null, {
+          attemptIndex: attempts,
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
+        })
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
         await recordModelSuccess(c.env, providerId, modelId)
         const opHeaders = new Headers(response.headers)
@@ -809,7 +895,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           await recordModelFailure(c.env, providerId, modelId, 500, '提供商无可用的 API Key')
           continue
         }
-        await recordLog(c.env, startTime, requestedModel, 500, `提供商 "${provider.name}" 未配置可用的 API Key`)
+        await recordLog(c.env, startTime, requestedModel, 500, `提供商 "${provider.name}" 未配置可用的 API Key`, {
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
+        })
         return c.json({
           error: { message: `提供商 "${provider.name}" 未配置可用的 API Key`, type: 'configuration_error' },
         }, 500)
@@ -954,6 +1046,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             routePath,
             isStream: isStreamReq,
             clientIp,
+            isModelSwitch: switchInfo.isSwitch,
+            switchNotice: switchInfo.notice,
           })
           await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
           await recordModelSuccess(c.env, providerId, modelId)
@@ -993,6 +1087,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           routePath,
           isStream: isStreamReq,
           clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
         })
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
         alreadyRecordedFailure = true
@@ -1034,6 +1130,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           routePath,
           isStream: isStreamReq,
           clientIp,
+          isModelSwitch: switchInfo.isSwitch,
+          switchNotice: switchInfo.notice,
         })
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
       }
@@ -1059,6 +1157,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       routePath,
       isStream: isStreamReq,
       clientIp,
+      isModelSwitch: switchInfo.isSwitch,
+      switchNotice: switchInfo.notice,
     })
     return c.json({
       error: { message: '没有可用的 API Key', type: 'configuration_error' },

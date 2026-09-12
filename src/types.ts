@@ -97,6 +97,9 @@ export interface RequestLog {
   routePath?: string | null
   isStream?: boolean
   clientIp?: string | null
+  // 模型切换提醒字段：无论请求成功还是失败，切换后的第一条日志携带该标记
+  isModelSwitch?: boolean
+  switchNotice?: string | null
 }
 
 export interface LogConfig {
