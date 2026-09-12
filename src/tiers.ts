@@ -1,6 +1,8 @@
 /**
- * 版本号: v1.3.6
- * 更新说明: 优化梯队池数据与延迟顺风车机制：平稳请求纯内存记录业务延迟，模型故障/补位/海选发车时顺风车全量打包写入 KV。
+ * 版本号: v1.3.7
+ * 更新说明: 优化梯队池模型筛选与顺风车状态持久化：
+ * 1. 严格过滤非对话模型（向量嵌入、视频检测、绘图、音频等），杜绝 70s 超时与 500 报错混入通用对话池；
+ * 2. 跨模型真实切换时顺风车持久化写入活跃连接记录，彻底消除边缘节点冷启动重复误报切换与反复发车。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1047,6 +1049,10 @@ export async function backfillTier1FromTier2(
       if (liveModel) {
         const modelConfig = liveModel.provider.models.find((m) => m.id === liveModel.modelId)
         const category = modelConfig?.category || ''
+        // 彻底排除非对话模型（向量嵌入、视频检测、绘图、音频等），严禁其混入第一梯队对话池
+        if (isNonChatModel(cand.modelId, category)) {
+          continue
+        }
         if (category === '文本') {
           textCandidates.push(cand)
         } else {
@@ -1298,6 +1304,32 @@ export function isDrawingModel(modelId: string, category?: string): boolean {
     lower.includes('image') ||
     lower.includes('cogview') ||
     lower.includes('recraft')
+  )
+}
+
+/**
+ * 辅助检测是否为非聊天对话模型（如向量嵌入、视频检测、重排、音频TTS、绘图等）
+ * 这类模型严禁混入通用对话第一梯队 (Tier 1) 或 OpenClaw 智能体池，杜绝报错或 70s+ 超时
+ */
+export function isNonChatModel(modelId: string, category?: string): boolean {
+  if (category === '绘图' || category === '嵌入' || category === '音频' || category === '向量') return true
+  if (isDrawingModel(modelId, category)) return true
+  const lower = modelId.toLowerCase()
+  return (
+    lower.includes('embedding') ||
+    lower.includes('embed') ||
+    lower.includes('bge-') ||
+    lower.includes('bge_') ||
+    lower.includes('bge') ||
+    lower.includes('rerank') ||
+    lower.includes('detector') ||
+    lower.includes('synthetic-video') ||
+    lower.includes('whisper') ||
+    lower.includes('tts') ||
+    lower.includes('moderation') ||
+    lower.includes('voice') ||
+    lower.includes('speech') ||
+    lower.includes('audio-')
   )
 }
 
@@ -1855,7 +1887,7 @@ export async function selectAutoModel(
     if (excludedModelIds && excludedModelIds.size > 0) {
       pool = pool.filter((m) => !excludedModelIds.has(m.fullId))
     }
-    // 排除处于冷却中或已被永久禁用的模型
+    // 排除处于冷却中、已被永久禁用或非对话模型
     const now = Date.now()
     pool = pool.filter((m) => {
       const item = modelMap.get(m.fullId)
@@ -1863,6 +1895,7 @@ export async function selectAutoModel(
       const mConfig = item.provider.models.find((x) => x.id === item.modelId)
       if (mConfig?.permanentlyDisabled) return false
       if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+      if (isNonChatModel(item.modelId, mConfig?.category)) return false
       return true
     })
     // 优先选择不同厂商
@@ -1930,7 +1963,7 @@ export async function selectAutoModel(
     activeTier1 = activeTier1.filter((m) => !excludedModelIds.has(m.fullId))
   }
 
-  // 排除处于冷却中或已被永久禁用的模型
+  // 排除处于冷却中、已被永久禁用或非对话模型
   const now = Date.now()
   activeTier1 = activeTier1.filter((m) => {
     const item = modelMap.get(m.fullId)
@@ -1938,6 +1971,7 @@ export async function selectAutoModel(
     const mConfig = item.provider.models.find((x) => x.id === item.modelId)
     if (mConfig?.permanentlyDisabled) return false
     if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+    if (isNonChatModel(item.modelId, mConfig?.category)) return false
     return true
   })
 
@@ -1954,6 +1988,7 @@ export async function selectAutoModel(
       const mConfig = item.provider.models.find((x) => x.id === item.modelId)
       if (mConfig?.permanentlyDisabled) return false
       if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+      if (isNonChatModel(item.modelId, mConfig?.category)) return false
       return true
     })
     activeTier1 = refreshed
@@ -1999,7 +2034,8 @@ export async function recordBusinessLatency(
   latency: number,
   success: boolean,
   isAutoRequest: boolean = false,
-  poolType: 'general' | 'openclaw' | 'drawing' = 'general'
+  poolType: 'general' | 'openclaw' | 'drawing' = 'general',
+  isModelSwitch: boolean = false
 ): Promise<void> {
   try {
     // 仅针对 auto/auto 业务流量生效
@@ -2125,8 +2161,11 @@ export async function recordBusinessLatency(
 
       // 保存剔除和补位后的最新梯队数据，同时顺风车将内存中积累的所有延迟指标打包写入 KV
       await saveTierStorage(env, storage)
+    } else if (isModelSwitch) {
+      // 真实发生跨模型切换且成功：顺风车一次性持久化最新活跃连接记录，防止边缘多节点冷启动重复误判与多发车
+      await saveTierStorage(env, storage)
     }
-    // 成功请求时无需落盘 KV，指标留在内存，顺风车写入时全量带走（真正做到日常平稳转发 0 KV 写入）
+    // 其余日常平稳成功请求无需落盘 KV，指标留在内存，顺风车写入时全量带走（真正做到日常平稳转发 0 KV 写入）
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }

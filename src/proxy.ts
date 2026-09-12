@@ -1,8 +1,8 @@
 /**
- * 版本号: v1.3.6
- * 更新说明: 修复模型历史连接记忆与日志排序逻辑：
- * 1. 统一池子通道标识与冷启动首发模型兜底，彻底杜绝同模型平稳请求误判跨模型切换导致反复发车；
- * 2. 梯队池请求与指定规则路由平稳访问均保持内存候车（【⏳ 候】且 0 KV 写入）。
+ * 版本号: v1.3.7
+ * 更新说明:
+ * 1. 跨模型真实切换时，顺风车持久化最新连接记录，解决多节点重复误报切换与反复发车；
+ * 2. 优化非流式请求超时时间为 35s，避免上游卡死导致用户端等待 70~90 秒。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -905,7 +905,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           isModelSwitch: switchInfo.isSwitch,
           switchNotice: switchInfo.notice,
         })
-        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType, switchInfo.isSwitch)
         await recordModelSuccess(c.env, providerId, modelId)
         const opHeaders = new Headers(response.headers)
         if (isStreamReq) {
@@ -1011,7 +1011,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           method: c.req.method,
           headers: forwardHeaders,
           body: JSON.stringify(forwardBody),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(isStreamReq ? 60000 : 35000),
         })
 
         if (response.ok) {
@@ -1079,7 +1079,7 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             isModelSwitch: switchInfo.isSwitch,
             switchNotice: switchInfo.notice,
           })
-          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType)
+          await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, true, isAutoRequest, poolType, switchInfo.isSwitch)
           await recordModelSuccess(c.env, providerId, modelId)
           return new Response(resText !== null ? resText : response.body, {
             status: response.status,

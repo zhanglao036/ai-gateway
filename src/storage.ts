@@ -1,9 +1,6 @@
 /**
- * 版本号: v1.3.6
- * 更新说明: 精准收敛发车写入与顺风车落盘：
- * 1. 严格锁定发车事件（真实故障报错、真实跨模型切换、后台保存配置），日常平稳请求零 KV 写入；
- * 2. 内存候车乘客在发车事件或手动保存时全量打包落盘并打标为【客】；
- * 3. 增强日志安全时间排序解析，彻底解决中文日期字符串解析为 NaN 导致的乱序缺陷。
+ * 版本号: v1.3.7
+ * 更新说明: 顺风车持久化连接状态：真实发生跨模型切换时顺风车一次性写入 KV，多节点平稳请求零 KV 写入。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
