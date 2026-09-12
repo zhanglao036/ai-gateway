@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.3.2
- * 更新说明: 优化 KV 顺风车打包写入体系与日志打标：实现平稳请求 0 KV 写入与发车顺风车打包，直观区分直接写入(🚗车)、搭车写入(🧳客)与内存候车(⏳候)。
+ * 版本号: v1.3.3
+ * 更新说明: 修复手动保存配置后日志状态未同步为【客】的刷新问题：全量打通发车顺风车状态同步，统一保存时即时同步刷新内存日志打标。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.2'
+export const VERSION = 'v1.3.3'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

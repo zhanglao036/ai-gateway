@@ -1,9 +1,8 @@
 /**
- * 版本号: v1.3.2
- * 更新说明: 实现发车与顺风车 KV 极简写入模型及日志打标体系：
- * 1. 严格区分发车事件（报错拉黑、模型切换、手动保存）与顺风乘客（平稳业务请求日志与延迟）；
- * 2. 平稳业务请求纯内存驻留 (0 KV 写入)，发车时一并打包写入；
- * 3. 每条日志精确标记写入类型：🚗 直接发车写入(driver)、🧳 搭顺风车写入(passenger)、⏳ 内存候车中(memory)。
+ * 版本号: v1.3.3
+ * 更新说明: 彻底解决手动保存后日志未同步显示为【客】的问题：
+ * 1. 当从 KV 获取已存盘日志时，强制同步刷新内存中对应记录的 kvTag 状态（由 memory 转为 passenger/driver）；
+ * 2. 统一保存与顺风车落盘时确保内存中全部候车日志被批量打标并落盘。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -178,8 +177,8 @@ function scheduleFlush(env: Env) {
 
 export async function flushPendingWrites(env: Env): Promise<void> {
   // 顺风车捎带：只要系统有任何必须写入 KV 的操作（保存配置、故障降级、梯队补位等），
-  // 检查内存中是否有未保存的请求日志，只要有（> 0 条），就顺路打包一次性写入 KV，0 额外写入成本！
-  if (unflushedLogCount > 0) {
+  // 顺路检查并打包内存中所有候车的请求日志，一次性写入 KV 并同步标记为【🧳 客】
+  if (inMemoryLogs.length > 0) {
     await flushPendingLogs(env)
   }
   if (pendingWrites.size === 0) return
@@ -403,13 +402,29 @@ const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
 export async function getLogs(env: Env): Promise<RequestLog[]> {
-  // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并
+  // 1. 从 KV 读取已落盘的全局日志，与本地内存日志进行智能排重合并与状态同步
   try {
     const kvData = await getKV(env).get(KV_KEYS.REQUEST_LOGS)
     if (kvData) {
       const storedLogs: RequestLog[] = JSON.parse(kvData)
       if (Array.isArray(storedLogs) && storedLogs.length > 0) {
-        // 构建已有 ID 的集合以快速排重
+        // 构建 KV 中已落盘日志的映射表
+        const kvLogMap = new Map<string, RequestLog>()
+        for (const log of storedLogs) {
+          if (log && log.id) {
+            kvLogMap.set(log.id, log)
+          }
+        }
+
+        // 关键逻辑：如果内存中的日志已经存在于 KV 中，用 KV 里的已落盘状态（如 passenger / driver）覆盖内存中的临时状态
+        for (const localLog of inMemoryLogs) {
+          const stored = kvLogMap.get(localLog.id)
+          if (stored && stored.kvTag) {
+            localLog.kvTag = stored.kvTag
+          }
+        }
+
+        // 构建已有 ID 的集合以快速排重未在内存中的历史记录
         const existingIds = new Set(inMemoryLogs.map(l => l.id))
         for (const log of storedLogs) {
           if (!existingIds.has(log.id)) {

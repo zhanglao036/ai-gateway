@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.2
- * 更新说明: 优化请求日志展示面板：直观渲染 KV 写入状态标签（🚗车 发车直接写入 / 🧳客 顺风车打包写入 / ⏳候 内存候车中），方便实时观察与核验写入情况。
+ * 版本号: v1.3.3
+ * 更新说明: 修复手动保存配置后日志未同步显示为【客】的问题：在统一保存成功后自动触发请求日志静默刷新，确保切换日志面板时秒级呈现【🧳 客】已入库状态。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -1407,6 +1407,10 @@ async function saveAllConfig() {
       // 顺风车自动刷新梯队池展示与当前主力模型
       if (typeof loadTierData === 'function') {
         loadTierData();
+      }
+      // 顺风车自动刷新日志状态，确保候车日志即时变更为【客】
+      if (typeof fetchLogs === 'function') {
+        fetchLogs();
       }
     } else {
       var errMsg = (data && data.message) ? data.message : '未知系统错误';
