@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.1.9
- * 更新说明: 剔除池子标题多余的主力显示，并在每个梯队池的第1席位卡片上高亮显示“当前连接”字样与动态绿色呼吸灯，极致防冗余设计。
+ * 版本号: v1.2.5
+ * 更新说明: 优化 KV 写入性能，移除非必要的强制刷盘，使 1s 内存合并防抖队列完全生效，大幅节省 Cloudflare KV 写入请求。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -102,7 +102,6 @@ export async function saveLogConfig(
 
   try {
     await getKV(env).put(KV_KEYS.LOG_CONFIG, JSON.stringify(configObj))
-    await getKV(env).put(KV_KEYS.DEBUG_MODE, newDebug ? 'true' : 'false')
   } catch (err) {
     console.warn('[storage] 保存日志配置异常 (已静默降级):', err instanceof Error ? err.message : String(err))
   }
@@ -207,7 +206,7 @@ export async function getProvider(env: Env, id: string): Promise<Provider | null
   return providers.find((p) => p.id === id) ?? null
 }
 
-export async function setProviders(env: Env, providers: Provider[]): Promise<void> {
+export async function setProviders(env: Env, providers: Provider[], immediate = false): Promise<void> {
   const cleaned = providers.map((p) => {
     const seenKeys = new Set<string>()
     const uniqueKeys = (p.apiKeys || [])
@@ -236,29 +235,31 @@ export async function setProviders(env: Env, providers: Provider[]): Promise<voi
   })
 
   await kvPut(env, KV_KEYS.PROVIDERS, JSON.stringify(cleaned))
-  await flushPendingWrites(env)
+  if (immediate) {
+    await flushPendingWrites(env)
+  }
 }
 
-export async function addProvider(env: Env, provider: Provider): Promise<void> {
+export async function addProvider(env: Env, provider: Provider, immediate = true): Promise<void> {
   const providers = await getProviders(env)
   providers.push(provider)
-  await setProviders(env, providers)
+  await setProviders(env, providers, immediate)
 }
 
-export async function updateProvider(env: Env, id: string, updates: Partial<Provider>): Promise<Provider | null> {
+export async function updateProvider(env: Env, id: string, updates: Partial<Provider>, immediate = false): Promise<Provider | null> {
   const providers = await getProviders(env)
   const index = providers.findIndex((p) => p.id === id)
   if (index === -1) return null
   providers[index] = { ...providers[index], ...updates, updatedAt: new Date().toISOString() }
-  await setProviders(env, providers)
+  await setProviders(env, providers, immediate)
   return providers[index]
 }
 
-export async function deleteProvider(env: Env, id: string): Promise<boolean> {
+export async function deleteProvider(env: Env, id: string, immediate = true): Promise<boolean> {
   const providers = await getProviders(env)
   const filtered = providers.filter((p) => p.id !== id)
   if (filtered.length === providers.length) return false
-  await setProviders(env, filtered)
+  await setProviders(env, filtered, immediate)
   return true
 }
 
@@ -300,31 +301,33 @@ export async function getProxyKeys(env: Env): Promise<ProxyKey[]> {
   return data ? JSON.parse(data) : []
 }
 
-export async function setProxyKeys(env: Env, keys: ProxyKey[]): Promise<void> {
+export async function setProxyKeys(env: Env, keys: ProxyKey[], immediate = false): Promise<void> {
   await kvPut(env, KV_KEYS.PROXY_KEYS, JSON.stringify(keys))
-  await flushPendingWrites(env)
+  if (immediate) {
+    await flushPendingWrites(env)
+  }
 }
 
-export async function addProxyKey(env: Env, key: ProxyKey): Promise<void> {
+export async function addProxyKey(env: Env, key: ProxyKey, immediate = true): Promise<void> {
   const keys = await getProxyKeys(env)
   keys.push(key)
-  await setProxyKeys(env, keys)
+  await setProxyKeys(env, keys, immediate)
 }
 
-export async function deleteProxyKey(env: Env, id: string): Promise<boolean> {
+export async function deleteProxyKey(env: Env, id: string, immediate = true): Promise<boolean> {
   const keys = await getProxyKeys(env)
   const filtered = keys.filter((k) => k.id !== id)
   if (filtered.length === keys.length) return false
-  await setProxyKeys(env, filtered)
+  await setProxyKeys(env, filtered, immediate)
   return true
 }
 
-export async function updateProxyKey(env: Env, id: string, updates: Partial<ProxyKey>): Promise<ProxyKey | null> {
+export async function updateProxyKey(env: Env, id: string, updates: Partial<ProxyKey>, immediate = true): Promise<ProxyKey | null> {
   const keys = await getProxyKeys(env)
   const idx = keys.findIndex(k => k.id === id)
   if (idx === -1) return null
   keys[idx] = { ...keys[idx], ...updates }
-  await setProxyKeys(env, keys)
+  await setProxyKeys(env, keys, immediate)
   return keys[idx]
 }
 
@@ -481,11 +484,14 @@ export async function getCustomModelRoutes(env: Env): Promise<CustomModelRoute[]
   }
 }
 
-export async function saveCustomModelRoutes(env: Env, routes: CustomModelRoute[]): Promise<void> {
+export async function saveCustomModelRoutes(env: Env, routes: CustomModelRoute[], immediate = false): Promise<void> {
   if (unflushedLogCount > 0) {
     await flushPendingLogs(env)
   }
   await kvPut(env, KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(routes))
+  if (immediate) {
+    await flushPendingWrites(env)
+  }
 }
 
 /**
@@ -532,18 +538,15 @@ export async function saveAllUnifiedConfig(
         models: uniqueModels,
       }
     })
-    memoryCache.set(KV_KEYS.PROVIDERS, { value: JSON.stringify(cleaned) })
-    await getKV(env).put(KV_KEYS.PROVIDERS, JSON.stringify(cleaned))
+    await kvPut(env, KV_KEYS.PROVIDERS, JSON.stringify(cleaned))
   }
 
   if (Array.isArray(data.proxyKeys)) {
-    memoryCache.set(KV_KEYS.PROXY_KEYS, { value: JSON.stringify(data.proxyKeys) })
-    await getKV(env).put(KV_KEYS.PROXY_KEYS, JSON.stringify(data.proxyKeys))
+    await kvPut(env, KV_KEYS.PROXY_KEYS, JSON.stringify(data.proxyKeys))
   }
 
   if (Array.isArray(data.customRoutes)) {
-    memoryCache.set(KV_KEYS.CUSTOM_MODEL_ROUTES, { value: JSON.stringify(data.customRoutes) })
-    await getKV(env).put(KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(data.customRoutes))
+    await kvPut(env, KV_KEYS.CUSTOM_MODEL_ROUTES, JSON.stringify(data.customRoutes))
   }
 
   // 终点再次核对：确保全链路所有待写入项全部顺风车打包完成

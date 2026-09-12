@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.4
- * 更新说明: 优化重置逻辑保留已测试认证标签并清空历史报错；增加批量测试安全分批与前端自动接力轮询，彻底杜绝 Cloudflare 50 次子请求超标。
+ * 版本号: v1.2.5
+ * 更新说明: 优化 KV 写入性能，移除非必要的强制刷盘，使 1s 内存合并防抖队列完全生效，大幅节省 Cloudflare KV 写入请求。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.4'
+export const VERSION = 'v1.2.5'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
