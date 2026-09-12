@@ -1,6 +1,8 @@
 /**
- * 版本号: v1.3.4
- * 更新说明: 修复手动保存配置后日志未同步显示为【客】的问题：在统一保存成功后自动触发请求日志静默刷新，确保切换日志面板时秒级呈现【🧳 客】已入库状态。
+ * 版本号: v1.3.6
+ * 更新说明: 修复日志排序显示与平稳请求发车判定：
+ * 1. 日志列表采用数字毫秒时间戳排序，彻底解决中文日期解析 NaN 导致的乱序；
+ * 2. 完善日志状态展示，平稳请求稳定呈现【⏳ 候】(0 KV 写入)。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'

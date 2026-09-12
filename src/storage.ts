@@ -1,8 +1,9 @@
 /**
- * 版本号: v1.3.4
+ * 版本号: v1.3.6
  * 更新说明: 精准收敛发车写入与顺风车落盘：
  * 1. 严格锁定发车事件（真实故障报错、真实跨模型切换、后台保存配置），日常平稳请求零 KV 写入；
- * 2. 内存候车乘客在发车事件或手动保存时全量打包落盘并打标为【客】。
+ * 2. 内存候车乘客在发车事件或手动保存时全量打包落盘并打标为【客】；
+ * 3. 增强日志安全时间排序解析，彻底解决中文日期字符串解析为 NaN 导致的乱序缺陷。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -398,6 +399,23 @@ export async function seedInitialData(env: Env): Promise<void> {
 
 // ===== 网关请求日志管理 (内存高速队列 + 定量/定时/顺风车落盘 KV) =====
 
+/**
+ * 健壮的时间戳解析函数：
+ * 优先读取数字型 timestamp 毫秒数；若历史日志仅含中文/格式化字符串（如 2026/09/12 20:55:26），
+ * 智能容错解析，避免 new Date(str).getTime() 返回 NaN 导致日志列表排序错乱
+ */
+export function getLogTimestamp(l: RequestLog): number {
+  if (typeof l.timestamp === 'number' && !isNaN(l.timestamp)) {
+    return l.timestamp
+  }
+  if (!l.time) return 0
+  const parsed = new Date(l.time).getTime()
+  if (!isNaN(parsed)) return parsed
+  const normalized = l.time.replace(/\//g, '-')
+  const p2 = new Date(normalized).getTime()
+  return isNaN(p2) ? 0 : p2
+}
+
 const MAX_MEMORY_LOGS = 150
 const inMemoryLogs: RequestLog[] = []
 
@@ -432,8 +450,8 @@ export async function getLogs(env: Env): Promise<RequestLog[]> {
             existingIds.add(log.id)
           }
         }
-        // 按时间倒序重新排列（最新的在前，time 字段为 ISO 字符串）
-        inMemoryLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+        // 按时间倒序重新排列（最新的在前，使用安全时间解析算法）
+        inMemoryLogs.sort((a, b) => getLogTimestamp(b) - getLogTimestamp(a))
         if (inMemoryLogs.length > MAX_MEMORY_LOGS) {
           inMemoryLogs.length = MAX_MEMORY_LOGS
         }
@@ -508,7 +526,7 @@ export async function flushPendingLogs(env: Env, triggerLogId?: string): Promise
             idSet.add(s.id)
           }
         }
-        mergedLogs.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+        mergedLogs.sort((a, b) => getLogTimestamp(b) - getLogTimestamp(a))
       }
     }
     const logsToSave = mergedLogs.slice(0, 100)

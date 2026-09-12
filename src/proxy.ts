@@ -1,6 +1,8 @@
 /**
- * 版本号: v1.3.4
- * 更新说明: 配合发车与顺风车架构：仅跨模型切换、故障拉黑时即时触发发车写入，平稳请求纯内存记录延迟与日志，大幅缩减 KV 消耗。
+ * 版本号: v1.3.6
+ * 更新说明: 修复模型历史连接记忆与日志排序逻辑：
+ * 1. 统一池子通道标识与冷启动首发模型兜底，彻底杜绝同模型平稳请求误判跨模型切换导致反复发车；
+ * 2. 梯队池请求与指定规则路由平稳访问均保持内存候车（【⏳ 候】且 0 KV 写入）。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -251,10 +253,12 @@ async function recordLog(
   }
 ) {
   try {
-    const latency = Date.now() - startTime
+    const now = Date.now()
+    const latency = now - startTime
     const time = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
     await addRequestLog(env, {
       id: crypto.randomUUID(),
+      timestamp: now,
       time,
       model,
       latency,
@@ -675,7 +679,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
 
       // 关键逻辑：纯内存比对当前接管模型是否发生切换，切换后的第一条连接日志将被打上醒目标记
-      const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${clientRequested}`
+      // 统一通道标识：如果是自动池（通用/智能体/绘图），按池类型识别；如果是指定直连模型，统一以实际接管的 currentModel 为通道
+      const channelKey = isAutoRequest ? `pool_${poolType}` : `direct_${currentModel}`
       let fallbackActiveModel: string | null = null
       if (isAutoRequest) {
         try {
@@ -686,6 +691,9 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         } catch {
           // ignore
         }
+      } else {
+        // 直连模型：固定当前模型为基准，绝不误判跨模型切换
+        fallbackActiveModel = currentModel
       }
       const switchInfo = checkAndTrackModelSwitch(channelKey, currentModel, fallbackActiveModel)
 

@@ -86,6 +86,7 @@ export interface CreateProxyKeyRequest {
 
 export interface RequestLog {
   id: string
+  timestamp?: number
   time: string
   model: string
   latency: number
