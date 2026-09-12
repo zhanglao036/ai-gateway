@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.3.3
- * 更新说明: 修复手动保存配置后日志状态未同步为【客】的刷新问题：全量打通发车顺风车状态同步，统一保存时即时同步刷新内存日志打标。
+ * 版本号: v1.3.4
+ * 更新说明: 精确收敛发车写入条件：锁定平稳请求 0 KV 写入，仅在模型发生真实跨模型切换、故障拉黑、后台手动保存时触发发车，同模型平稳请求严格作为乘客在内存候车。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.3'
+export const VERSION = 'v1.3.4'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

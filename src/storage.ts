@@ -1,8 +1,8 @@
 /**
- * 版本号: v1.3.3
- * 更新说明: 彻底解决手动保存后日志未同步显示为【客】的问题：
- * 1. 当从 KV 获取已存盘日志时，强制同步刷新内存中对应记录的 kvTag 状态（由 memory 转为 passenger/driver）；
- * 2. 统一保存与顺风车落盘时确保内存中全部候车日志被批量打标并落盘。
+ * 版本号: v1.3.4
+ * 更新说明: 精准收敛发车写入与顺风车落盘：
+ * 1. 严格锁定发车事件（真实故障报错、真实跨模型切换、后台保存配置），日常平稳请求零 KV 写入；
+ * 2. 内存候车乘客在发车事件或手动保存时全量打包落盘并打标为【客】。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'

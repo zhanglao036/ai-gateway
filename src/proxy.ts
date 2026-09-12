@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.3
- * 更新说明: 配合发车与顺风车架构：模型切换与调用报错即时触发发车写入，平稳请求纯内存记录延迟与日志，大幅缩减 KV 消耗。
+ * 版本号: v1.3.4
+ * 更新说明: 配合发车与顺风车架构：仅跨模型切换、故障拉黑时即时触发发车写入，平稳请求纯内存记录延迟与日志，大幅缩减 KV 消耗。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -198,30 +198,32 @@ const lastActiveModelByChannel = new Map<string, string>()
 
 /**
  * 检查模型是否发生真实切换：
- * 1. 优先比对内存中的上一次模型，若内存无记录则尝试比对全局梯队中已连接模型（防跨节点冷启动误判）
- * 2. 只有在当前模型确实不同于已有记录时，才判定为切换事件并展示醒目蓝框
- * 3. 若为同模型，坚决不打蓝框，让日志完全留在内存走顺风车打包落盘
+ * 1. 优先比对内存中的上一次模型，若内存无记录则比对全局梯队中已连接模型（防跨节点冷启动误判）
+ * 2. 只有在当前模型确实不同于已有记录（跨模型切换）时，才判定为切换事件并打上醒目标记（触发发车）
+ * 3. 首次建立连接时打上连接标记，但只要模型一致，不作为高频发车源，使平稳请求留在内存候车
  */
 function checkAndTrackModelSwitch(
   channelKey: string,
   currentFullModel: string,
   fallbackActiveModel?: string | null
-): { isSwitch: boolean; prevModel: string | null; notice: string | null } {
+): { isSwitch: boolean; isFirstConnect: boolean; prevModel: string | null; notice: string | null } {
   const prevModel = lastActiveModelByChannel.get(channelKey) || fallbackActiveModel || null
 
   if (prevModel && prevModel !== currentFullModel) {
-    // 发生了真实的模型切换
+    // 发生了真实的跨模型切换（例如故障剔除换用备用模型）
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
       isSwitch: true,
+      isFirstConnect: false,
       prevModel,
       notice: `当前接管模型已切换为: ${currentFullModel} (原: ${prevModel})`
     }
   } else if (!prevModel) {
-    // 全系统首次记录连接的初始模型
+    // 全系统冷启动首次记录连接模型
     lastActiveModelByChannel.set(channelKey, currentFullModel)
     return {
-      isSwitch: true,
+      isSwitch: false,
+      isFirstConnect: true,
       prevModel: null,
       notice: `当前已连接模型: ${currentFullModel}`
     }
@@ -229,7 +231,7 @@ function checkAndTrackModelSwitch(
 
   // 模型未改变（同模型平稳请求）：更新本地内存记录，不打蓝框，走顺风车
   lastActiveModelByChannel.set(channelKey, currentFullModel)
-  return { isSwitch: false, prevModel, notice: null }
+  return { isSwitch: false, isFirstConnect: false, prevModel, notice: null }
 }
 
 async function recordLog(

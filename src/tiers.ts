@@ -1,5 +1,5 @@
 /**
- * 版本号: v1.3.3
+ * 版本号: v1.3.4
  * 更新说明: 优化梯队池数据与延迟顺风车机制：平稳请求纯内存记录业务延迟，模型故障/补位/海选发车时顺风车全量打包写入 KV。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
