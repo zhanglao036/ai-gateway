@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.8
- * 更新说明: 优化模型切换感知算法，跨节点智能同步当前活跃模型，平稳日常请求100%走顺风车积攒批量写入，极致节省 KV 写入额度。
+ * 版本号: v1.2.9
+ * 更新说明: 实行日常业务请求 0 KV 写入原则，业务延迟指标全内存高速维护，遇任何系统落盘行为时顺风车全量打包保全写入，彻底控制 Cloudflare 免费配额。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.8'
+export const VERSION = 'v1.2.9'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

@@ -25,14 +25,29 @@ export function getTierSlotsConfig(storage?: TierStorage | null): Required<TierS
   }
 }
 
+// 内存中维护的实时业务延迟与连接状态（平稳日常请求0 KV写入，顺风车触发时一并打包落盘）
+const inMemoryBusinessStats: Record<string, BusinessMetric> = {}
+const inMemoryActiveConnections: Record<string, string> = {}
+
 /**
- * 获取 KV 中的梯队存储数据
+ * 获取 KV 中的梯队存储数据，并自动与本地内存的实时业务指标合并
  */
 export async function getTierStorage(env: Env): Promise<TierStorage | null> {
   const raw = await kvGet(env, KV_KEYS.TIER_DATA)
   if (!raw) return null
   try {
-    return JSON.parse(raw) as TierStorage
+    const storage = JSON.parse(raw) as TierStorage
+    if (storage) {
+      storage.businessStats = {
+        ...(storage.businessStats || {}),
+        ...inMemoryBusinessStats,
+      }
+      storage.activeConnections = {
+        ...(storage.activeConnections || {}),
+        ...inMemoryActiveConnections,
+      }
+    }
+    return storage
   } catch {
     return null
   }
@@ -40,11 +55,20 @@ export async function getTierStorage(env: Env): Promise<TierStorage | null> {
 
 /**
  * 批量写入/保存梯队数据到 KV
- * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)，并顺风车一次性带走内存中的请求日志
+ * 遵循块 1 调试模式 / 正式模式落盘规则 (kvPut)，并顺风车一次性带走内存中的全部业务指标与请求日志
  */
 export async function saveTierStorage(env: Env, data: TierStorage): Promise<void> {
   try {
     data.updatedAt = new Date().toISOString()
+    // 顺风车全量保全：写入前将内存中的最新业务延迟指标与连接状态深度合并打包，一并带走落盘
+    data.businessStats = {
+      ...(data.businessStats || {}),
+      ...inMemoryBusinessStats,
+    }
+    data.activeConnections = {
+      ...(data.activeConnections || {}),
+      ...inMemoryActiveConnections,
+    }
     await kvPut(env, KV_KEYS.TIER_DATA, JSON.stringify(data))
     // 顺风车捎带：只要写入梯队池（含探针实测、延迟、梯队席位），顺便把内存中排队的请求日志一并打包写入 KV，0 额外开销
     await flushPendingWrites(env)
@@ -1998,6 +2022,14 @@ export async function recordBusinessLatency(
       }
     }
 
+    // 内存直接更新最新业务指标与活跃连接（0 KV 开销）
+    inMemoryBusinessStats[fullId] = bStat
+    if (success) {
+      inMemoryActiveConnections[poolType] = fullId
+    } else {
+      delete inMemoryActiveConnections[poolType]
+    }
+
     storage.businessStats[fullId] = bStat
 
     const debugMode = await getDebugMode(env)
@@ -2017,7 +2049,7 @@ export async function recordBusinessLatency(
     const isInDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
 
     if (!isInTier1 && !isInOpenclaw && !isInDrawing) {
-      // 不在任何活跃池中，仅更新业务指标
+      // 不在任何活跃池中，内存已记录指标，直接平稳返回（0 KV 写入）
       return
     }
 
@@ -2075,15 +2107,10 @@ export async function recordBusinessLatency(
         storage = await backfillDrawingTier(env, storage)
       }
 
-      // 保存梯队数据
+      // 保存剔除和补位后的最新梯队数据，同时顺风车将内存中积累的所有延迟指标打包写入 KV
       await saveTierStorage(env, storage)
-    } else {
-      const slotsConfig = getTierSlotsConfig(storage)
-      if (storage.tier1.length < slotsConfig.tier1Slots) {
-        storage = await backfillTier1FromTier2(env, storage)
-        await saveTierStorage(env, storage)
-      }
     }
+    // 成功请求时无需落盘 KV，指标留在内存，顺风车写入时全量带走（真正做到日常平稳转发 0 KV 写入）
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
