@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.2.7
+ * 更新说明: 严防死守海选门槛，杜绝未测/故障模型混入梯队池；打通第一梯队、OpenClaw智能体池、绘图专属池全梯队实时故障淘汰与自动补位机制；彻底清除“故障避让”僵尸占坑模型。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1544,53 +1544,95 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
  * 平时纯读取与元数据校验，绝不进行耗时的外部网络 HTTP 探测，保障毫秒级瞬时响应。
  */
 /**
+ * 校验模型是否具备入驻各活跃梯队池（第一梯队/OpenClaw/绘图池）的健康资格
+ * 1. 处于冷却期中的模型绝对禁止入驻
+ * 2. 标记为永久失效的模型绝对禁止入驻
+ * 3. 探针测试明确失败的模型绝对禁止入驻
+ * 4. 处于业务故障惩罚（故障避让）的模型绝对禁止入驻
+ */
+export function isEligibleForActiveTier(storage: TierStorage, fullId: string, now: number): boolean {
+  if (storage.cooldowns && storage.cooldowns[fullId] && storage.cooldowns[fullId] > now) {
+    return false
+  }
+  if (storage.permanentlyDisabled && storage.permanentlyDisabled[fullId]) {
+    return false
+  }
+  if (storage.probeStats && storage.probeStats[fullId] && storage.probeStats[fullId].success === false) {
+    return false
+  }
+  const bStat = storage.businessStats?.[fullId]
+  if (bStat && ((bStat.avgLatency ?? 0) >= 9000 || (bStat.failureCount || 0) > 0)) {
+    return false
+  }
+  return true
+}
+
+/**
  * 确保梯队数据就绪与自愈校验（纯内存高速比对，顺风车单次写入 KV）
- * 1. 自动剔除已删除/已禁用的模型
- * 2. 自动检查第一梯队、OpenClaw 专属池、绘图池的空缺席位，并从待命模型中智能补齐
+ * 1. 严防死守：自动剔除已删除、已禁用、冷却中、探针失败或处于故障避让状态的模型
+ * 2. 只有海选实测成功的健康模型才允许入驻活跃梯队池，杜绝“免试保送”
  * 3. 严格控制 KV 写入：仅在数据有变化时一次性写入 1 次 KV，零额外消耗
  */
 export async function ensureTierStorage(env: Env): Promise<TierStorage> {
-  let existing = await getTierStorage(env)
+  const existing = await getTierStorage(env)
   if (existing && Array.isArray(existing.tier1)) {
+    let storage: TierStorage = existing
     // 获取当前系统中所有真实启用且健康的可用模型
     const allModels = await getAllAvailableModels(env)
     const availableSet = new Set(allModels.map((item) => item.fullId))
-    const slotsConfig = getTierSlotsConfig(existing)
+    const slotsConfig = getTierSlotsConfig(storage)
 
     let changed = false
     const now = Date.now()
 
-    // 1. 清除已不在可用列表中的模型（比如被用户禁用、删除或封禁的模型）
-    const prevTier1Length = existing.tier1.length
-    existing.tier1 = existing.tier1.filter((m) => availableSet.has(m.fullId))
-    if (existing.tier1.length !== prevTier1Length) {
+    // 1. 清除已不在可用列表、冷却中、探针失败或处于故障避让惩罚的模型
+    const prevTier1Length = storage.tier1.length
+    const evictedFromTier1: TierModelRef[] = []
+    storage.tier1 = storage.tier1.filter((m) => {
+      if (!availableSet.has(m.fullId) || !isEligibleForActiveTier(storage, m.fullId, now)) {
+        evictedFromTier1.push(m)
+        return false
+      }
+      return true
+    })
+    if (storage.tier1.length !== prevTier1Length) {
+      changed = true
+      // 被淘汰出第一梯队的模型退回到第二梯队待命
+      for (const m of evictedFromTier1) {
+        if (availableSet.has(m.fullId) && !(storage.tier2 || []).some((x) => x.fullId === m.fullId)) {
+          storage.tier2.push(m)
+        }
+      }
+    }
+
+    const prevTier2Length = (storage.tier2 || []).length
+    storage.tier2 = (storage.tier2 || []).filter((m) => availableSet.has(m.fullId))
+    if (storage.tier2.length !== prevTier2Length) {
       changed = true
     }
 
-    const prevTier2Length = (existing.tier2 || []).length
-    existing.tier2 = (existing.tier2 || []).filter((m) => availableSet.has(m.fullId))
-    if (existing.tier2.length !== prevTier2Length) {
+    const prevOpenclawLength = (storage.tierOpenclaw || []).length
+    storage.tierOpenclaw = (storage.tierOpenclaw || []).filter((m) => {
+      return availableSet.has(m.fullId) && isEligibleForActiveTier(storage, m.fullId, now)
+    })
+    if (storage.tierOpenclaw.length !== prevOpenclawLength) {
       changed = true
     }
 
-    const prevOpenclawLength = (existing.tierOpenclaw || []).length
-    existing.tierOpenclaw = (existing.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId))
-    if (existing.tierOpenclaw.length !== prevOpenclawLength) {
-      changed = true
-    }
-
-    const prevDrawingLength = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId)).length
-    existing.tierDrawing = (existing.tierDrawing || []).filter((m) => availableSet.has(m.fullId))
-    if (existing.tierDrawing.length !== prevDrawingLength) {
+    const prevDrawingLength = (storage.tierDrawing || []).length
+    storage.tierDrawing = (storage.tierDrawing || []).filter((m) => {
+      return availableSet.has(m.fullId) && isEligibleForActiveTier(storage, m.fullId, now)
+    })
+    if (storage.tierDrawing.length !== prevDrawingLength) {
       changed = true
     }
 
     // 2. 将新增的可用模型实时同步加入第二梯队待命队列
     for (const item of allModels) {
-      const isInTier1 = existing.tier1.some((x) => x.fullId === item.fullId)
-      const isInTier2 = (existing.tier2 || []).some((x) => x.fullId === item.fullId)
+      const isInTier1 = storage.tier1.some((x) => x.fullId === item.fullId)
+      const isInTier2 = (storage.tier2 || []).some((x) => x.fullId === item.fullId)
       if (!isInTier1 && !isInTier2) {
-        existing.tier2.push({
+        storage.tier2.push({
           providerId: item.provider.id,
           modelId: item.modelId,
           fullId: item.fullId,
@@ -1600,114 +1642,128 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 3. 第一梯队若出现席位空缺，自动从第二梯队候选模型中补齐
-    if (existing.tier1.length < slotsConfig.tier1Slots && existing.tier2 && existing.tier2.length > 0) {
-      const needed = slotsConfig.tier1Slots - existing.tier1.length
-      const toPromote = existing.tier2.splice(0, needed)
-      existing.tier1.push(...toPromote.map((item) => ({ ...item, addedAt: now })))
-      changed = true
+    // 3. 第一梯队若出现席位空缺，优先挑选已实测通过且完全健康的候选模型补齐，若不足则调用海选探针测试入池
+    if (storage.tier1.length < slotsConfig.tier1Slots) {
+      const needed = slotsConfig.tier1Slots - storage.tier1.length
+      const healthyCandidates = (storage.tier2 || []).filter((item) => {
+        return isEligibleForActiveTier(storage, item.fullId, now) && storage.probeStats?.[item.fullId]?.success === true
+      })
+
+      if (healthyCandidates.length > 0) {
+        const toPromote = healthyCandidates.slice(0, needed)
+        const promoteKeys = new Set(toPromote.map((x) => x.fullId))
+        storage.tier2 = (storage.tier2 || []).filter((x) => !promoteKeys.has(x.fullId))
+        storage.tier1.push(...toPromote.map((item) => ({ ...item, addedAt: now })))
+        changed = true
+      }
+
+      if (storage.tier1.length < slotsConfig.tier1Slots) {
+        storage = await backfillTier1FromTier2(env, storage)
+        changed = true
+      }
     }
 
-    // 4. OpenClaw 专属智能体池若出现席位空缺，自动从可用模型中挑选支持工具调用的模型补齐
-    if (existing.tierOpenclaw.length < slotsConfig.tierOpenclawSlots) {
-      const openclawSet = new Set(existing.tierOpenclaw.map((x) => x.fullId))
-      const openclawCandidates = allModels.filter((item) => {
+    // 4. OpenClaw 专属智能体池若出现席位空缺，挑选已实测通过且具备认证标签的健康模型，或启动专属海选
+    if ((storage.tierOpenclaw || []).length < slotsConfig.tierOpenclawSlots) {
+      storage.tierOpenclaw = storage.tierOpenclaw || []
+      const openclawSet = new Set(storage.tierOpenclaw.map((x) => x.fullId))
+      const healthyOpenclaw = allModels.filter((item) => {
         if (openclawSet.has(item.fullId)) return false
+        if (!isEligibleForActiveTier(storage, item.fullId, now)) return false
         const m = item.provider.models.find((x) => x.id === item.modelId)
-        // 优先选取已通过工具调用实测或符合主流智能体命名特征的模型
-        return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder|kimi|intern|glm/i.test(item.modelId)
+        const isVerified = m?.openclawVerified || storage.probeStats?.[item.fullId]?.openclawVerified
+        return isVerified && storage.probeStats?.[item.fullId]?.success === true
       })
 
-      const openclawNeeded = slotsConfig.tierOpenclawSlots - existing.tierOpenclaw.length
-      const toFill = openclawCandidates.slice(0, openclawNeeded)
-      for (const item of toFill) {
-        existing.tierOpenclaw.push({
-          providerId: item.provider.id,
-          modelId: item.modelId,
-          fullId: item.fullId,
-          addedAt: now,
-        })
+      if (healthyOpenclaw.length > 0) {
+        const openclawNeeded = slotsConfig.tierOpenclawSlots - storage.tierOpenclaw.length
+        const toFill = healthyOpenclaw.slice(0, openclawNeeded)
+        for (const item of toFill) {
+          storage.tierOpenclaw.push({
+            providerId: item.provider.id,
+            modelId: item.modelId,
+            fullId: item.fullId,
+            addedAt: now,
+          })
+          changed = true
+        }
+      }
+
+      if (storage.tierOpenclaw.length < slotsConfig.tierOpenclawSlots) {
+        storage = await backfillOpenclawTier(env, storage)
         changed = true
       }
     }
 
-    // 5. 绘图专属池若出现席位空缺，自动从可用模型中挑选绘图模型补齐
-    if (existing.tierDrawing.length < slotsConfig.tierDrawingSlots) {
-      const drawingSet = new Set(existing.tierDrawing.map((x) => x.fullId))
-      const drawingCandidates = allModels.filter((item) => {
+    // 5. 绘图专属池若出现席位空缺，挑选已实测通过的健康绘图模型，或启动专属海选
+    if ((storage.tierDrawing || []).length < slotsConfig.tierDrawingSlots) {
+      storage.tierDrawing = storage.tierDrawing || []
+      const drawingSet = new Set(storage.tierDrawing.map((x) => x.fullId))
+      const healthyDrawing = allModels.filter((item) => {
         if (drawingSet.has(item.fullId)) return false
+        if (!isEligibleForActiveTier(storage, item.fullId, now)) return false
         const m = item.provider.models.find((x) => x.id === item.modelId)
-        return isDrawingModel(item.modelId, m?.category)
+        return isDrawingModel(item.modelId, m?.category) && storage.probeStats?.[item.fullId]?.success === true
       })
 
-      const drawingNeeded = slotsConfig.tierDrawingSlots - existing.tierDrawing.length
-      const toFillDrawing = drawingCandidates.slice(0, drawingNeeded)
-      for (const item of toFillDrawing) {
-        existing.tierDrawing.push({
-          providerId: item.provider.id,
-          modelId: item.modelId,
-          fullId: item.fullId,
-          addedAt: now,
-        })
+      if (healthyDrawing.length > 0) {
+        const drawingNeeded = slotsConfig.tierDrawingSlots - storage.tierDrawing.length
+        const toFillDrawing = healthyDrawing.slice(0, drawingNeeded)
+        for (const item of toFillDrawing) {
+          storage.tierDrawing.push({
+            providerId: item.provider.id,
+            modelId: item.modelId,
+            fullId: item.fullId,
+            addedAt: now,
+          })
+          changed = true
+        }
+      }
+
+      if (storage.tierDrawing.length < slotsConfig.tierDrawingSlots) {
+        storage = await backfillDrawingTier(env, storage)
         changed = true
       }
     }
 
     // 若检测到任何梯队调整或补位，顺风车单次写入 KV
     if (changed) {
-      existing.updatedAt = new Date().toISOString()
-      await saveTierStorage(env, existing)
+      storage.updatedAt = new Date().toISOString()
+      await saveTierStorage(env, storage)
     }
-    return existing
+    return storage
   }
 
-  // 没有任何历史梯队数据：采用轻量静态分配，不发任何外部HTTP测试
+  // 没有任何历史梯队数据：所有可用模型初始放入第二梯队候选池，再通过严密海选补位健康模型
   const slotsConfig = getTierSlotsConfig(null)
   const allModels = await getAllAvailableModels(env)
   const now = Date.now()
-  const initialTier1 = allModels.slice(0, slotsConfig.tier1Slots).map((item) => ({
-    providerId: item.provider.id,
-    modelId: item.modelId,
-    fullId: item.fullId,
-    addedAt: now,
-  }))
-  const initialTier2 = allModels.slice(slotsConfig.tier1Slots).map((item) => ({
-    providerId: item.provider.id,
-    modelId: item.modelId,
-    fullId: item.fullId,
-    addedAt: now,
-  }))
-  const initialOpenclaw = allModels.filter((item) => {
-    const m = item.provider.models.find((x) => x.id === item.modelId)
-    return m?.openclawTested ? m.openclawCompatible : /claude|gpt|gemini|deepseek|qwen|coder/i.test(item.modelId)
-  }).slice(0, slotsConfig.tierOpenclawSlots).map((item) => ({
-    providerId: item.provider.id,
-    modelId: item.modelId,
-    fullId: item.fullId,
-    addedAt: now,
-  }))
-  const initialDrawing = allModels.filter((item) => {
-    const m = item.provider.models.find((x) => x.id === item.modelId)
-    return m?.category === '绘图'
-  }).slice(0, slotsConfig.tierDrawingSlots).map((item) => ({
+  const initialTier2 = allModels.map((item) => ({
     providerId: item.provider.id,
     modelId: item.modelId,
     fullId: item.fullId,
     addedAt: now,
   }))
 
-  const fresh: TierStorage = {
-    tier1: initialTier1,
+  let fresh: TierStorage = {
+    tier1: [],
     tier2: initialTier2,
-    tierOpenclaw: initialOpenclaw,
-    tierDrawing: initialDrawing,
+    tierOpenclaw: [],
+    tierDrawing: [],
     slotsConfig,
     lastProbeDate: new Date().toISOString().split('T')[0],
     probeStats: {},
     businessStats: {},
+    cooldowns: {},
     updatedAt: new Date().toISOString(),
     modelCursors: {},
   }
+
+  // 通过正式的海选探针填充各梯队，确保进池模型必须健康通过测试
+  fresh = await backfillTier1FromTier2(env, fresh)
+  fresh = await backfillOpenclawTier(env, fresh)
+  fresh = await backfillDrawingTier(env, fresh)
+
   await saveTierStorage(env, fresh)
   return fresh
 }
@@ -1994,30 +2050,22 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 检查该模型是否在第一梯队中
-    const isInTier1 = storage.tier1.some((m) => m.fullId === fullId)
-    if (!isInTier1) {
-      // 非第一梯队的正常调用，仅内存累加指标，避免频繁刷写 KV
-      return
-    }
-
-    let shouldEliminate = false
-    let eliminationReason = ''
+    // 检查该模型在各梯队池中的位置
+    const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
+    const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+    const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
 
     if (!success) {
-      // 业务请求失败 1 次：模型标黄，移出第一梯队，冷却 10 分钟
-      shouldEliminate = true
-      eliminationReason = `业务请求失败 1 次`
-    }
+      console.log(`[tiers] 淘汰故障模型 ${fullId}: 业务请求失败 1 次，启动全梯队故障避让与自动补位`)
 
-    if (shouldEliminate) {
-      console.log(`[tiers] 淘汰第一梯队模型 ${fullId}: ${eliminationReason}`)
-
-      // 模型标黄，移出第一梯队，冷却 10 分钟
-      // 复用块4已经实现逻辑：冷却不重置失败计数器，冷却完回到第二梯队
       const parts = fullId.split('/')
       const providerId = parts[0]
       const modelId = parts.slice(1).join('/')
+
+      // 1. 设置模型冷却 10 分钟 (通过 tierData 动态状态，零主库写入)
+      if (!storage.cooldowns) storage.cooldowns = {}
+      storage.cooldowns[fullId] = now + 10 * 60 * 1000
+
       if (providerId && modelId) {
         const provider = await getProvider(env, providerId)
         if (provider) {
@@ -2034,19 +2082,51 @@ export async function recordBusinessLatency(
         }
       }
 
-      // 移出第一梯队，回到第二梯队候选池
-      storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-      const ref = { providerId, modelId, fullId, addedAt: now }
-      if (!storage.tier2.some((m) => m.fullId === fullId)) {
-        storage.tier2.push(ref)
+      let anyChanged = false
+
+      // 2. 移出第一梯队，回到第二梯队候选池，触发空位海选补位
+      if (inTier1) {
+        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+        const ref = { providerId, modelId, fullId, addedAt: now }
+        if (!storage.tier2.some((m) => m.fullId === fullId)) {
+          storage.tier2.push(ref)
+        }
+        storage = await backfillTier1FromTier2(env, storage)
+        anyChanged = true
       }
 
-      // 触发空位海选补位
-      storage = await backfillTier1FromTier2(env, storage)
+      // 3. 移出 OpenClaw 专属池，触发空位海选补位
+      if (inOpenclaw && storage.tierOpenclaw) {
+        storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+        storage = await backfillOpenclawTier(env, storage)
+        anyChanged = true
+      }
+
+      // 4. 移出绘图专属池，触发空位海选补位
+      if (inDrawing && storage.tierDrawing) {
+        storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
+        storage = await backfillDrawingTier(env, storage)
+        anyChanged = true
+      }
+
+      if (anyChanged) {
+        storage.updatedAt = new Date().toISOString()
+        await saveTierStorage(env, storage)
+      }
     } else {
+      // 成功请求：若之前存在临时冷却记录，自动消除
+      if (storage.cooldowns && storage.cooldowns[fullId]) {
+        delete storage.cooldowns[fullId]
+      }
       const slotsConfig = getTierSlotsConfig(storage)
       if (storage.tier1.length < slotsConfig.tier1Slots) {
         storage = await backfillTier1FromTier2(env, storage)
+      }
+      if ((storage.tierOpenclaw || []).length < slotsConfig.tierOpenclawSlots) {
+        storage = await backfillOpenclawTier(env, storage)
+      }
+      if ((storage.tierDrawing || []).length < slotsConfig.tierDrawingSlots) {
+        storage = await backfillDrawingTier(env, storage)
       }
       // 成功且席位完备时，完全零 KV 操作，极大节约免费额度
     }

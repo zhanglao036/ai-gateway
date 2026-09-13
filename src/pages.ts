@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.5
- * 更新说明: 优化 KV 写入性能，移除非必要的强制刷盘，使 1s 内存合并防抖队列完全生效，大幅节省 Cloudflare KV 写入请求。
+ * 版本号: v1.2.7
+ * 更新说明: 严防死守海选门槛，杜绝未测/故障模型混入梯队池；打通第一梯队、OpenClaw智能体池、绘图专属池全梯队实时故障淘汰与自动补位机制；彻底清除“故障避让”僵尸占坑模型。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'

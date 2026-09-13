@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.6
- * 更新说明: 整合一次写入架构，消除多节点冷启动竞态写入；使用数字签名Cookie实现0-KV会话管理；将模型冷却、失败计数与禁用状态等动态状态移至 `tier_data`，大数据库 `providers` 完美实现 100% 只读。
+ * 版本号: v1.2.7
+ * 更新说明: 严防死守海选门槛，杜绝未测/故障模型混入梯队池；打通第一梯队、OpenClaw智能体池、绘图专属池全梯队实时故障淘汰与自动补位机制；彻底清除“故障避让”僵尸占坑模型。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.6'
+export const VERSION = 'v1.2.7'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

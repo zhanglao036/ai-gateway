@@ -265,8 +265,12 @@ export async function resetAllModelsToInitial(env: Env): Promise<{ totalReset: n
     const cleanTierStorage: TierStorage = {
       tier1: initialTier1,
       tier2: initialTier2,
+      tierOpenclaw: (existingStorage?.tierOpenclaw || []).filter((m) => availableSet.has(m.fullId)),
+      tierDrawing: (existingStorage?.tierDrawing || []).filter((m) => availableSet.has(m.fullId)),
+      slotsConfig: existingStorage?.slotsConfig,
       probeStats: preservedProbeStats,
       businessStats: {},
+      cooldowns: {},
       updatedAt: new Date().toISOString(),
       lastProbeDate: today,
     }
