@@ -177,6 +177,11 @@ export interface TierStorage {
     openclaw?: string
     drawing?: string
   }
+  // 临时动态模型状态，彻底避免日常对大配置库 (providers) 的写入
+  cooldowns?: Record<string, number> // model fullId -> cooldownUntil timestamp
+  failureCounts?: Record<string, number> // model fullId -> failure count
+  permanentlyDisabled?: Record<string, boolean> // model fullId -> permanently disabled flag
+  disabledReasons?: Record<string, string> // model fullId -> disabled reason
 }
 
 export interface ApiResponse<T = unknown> {
