@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.0
- * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：日常 AI 成功与失败请求指标全面转为内存缓存维护（0 KV 写入），提供 setMemoryCacheOnly 接口，仅在刚性事件发生时顺路打包带走所有内存日志与暂存数据。
+ * 版本号: v1.3.1
+ * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'

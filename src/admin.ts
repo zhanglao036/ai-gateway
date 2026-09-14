@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.0
- * 更新说明: 实施“报错立踢、专属补位探测”机制：通用、OpenClaw、绘图 3 个专属池严格独立隔离，遇到报错立即从当前池剔除并触发补位；报错日志优先存入内存并在保存梯队时顺风车打包实时写入 KV，附带防死循环熔断保护。
+ * 版本号: v1.3.1
+ * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
  */
 import { Context } from 'hono'
 import {
@@ -788,6 +788,10 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
     // 4. 释放互斥锁并平滑补齐第一梯队（按各家均匀配额补足）
     isProbeRunning = false
     const finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
+
+    // 5. 本轮跨厂家抽测完全结束后，发起唯一 1 次打包落盘 KV 写入（固化游标断点、延迟指标与最新梯队）
+    await saveTierStorage(c.env, finalTierData)
+    await flushPendingWrites(c.env)
 
     return c.json<ApiResponse>({
       success: true,

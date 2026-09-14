@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.0
- * 更新说明: 贯彻“报错立踢、专属补位探测”机制：通用池、OpenClaw专属池、绘图专属池 3 个池子严格独立互不干扰；为补位探测强化互斥锁与最大探测防线，确保绝不死循环、严格受控于 Cloudflare 免费配额。
+ * 版本号: v1.3.1
+ * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, setMemoryCacheOnly, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -264,10 +264,17 @@ export async function applyModelProbeResult(
   })
 
   if (updated) {
-    await updateProvider(env, providerId, { models: updatedModels })
+    // 探测与测试过程全面采用纯内存缓存更新，绝对不单步发起 KV 写入！
+    // 待整轮探测全部结束后通过 saveTierStorage 一次性打包落盘 KV（极度省流）
+    const providers = await getProviders(env)
+    const index = providers.findIndex((p) => p.id === providerId)
+    if (index !== -1) {
+      providers[index] = { ...providers[index], models: updatedModels }
+      setMemoryCacheOnly(KV_KEYS.PROVIDERS, JSON.stringify(providers))
+    }
   }
 
-  // 如果没有探测锁冲突，且模型状态改变（比如变为永久失效，或者调试模式下第一梯队出错），同步更新梯队
+  // 如果没有探测锁冲突，且模型状态改变（比如变为永久失效，或者调试模式下第一梯队出错），同步更新梯队内存状态
   if (!getIsProbeRunning()) {
     const modelNowConfig = updatedModels.find((m) => m.id === modelId)
     if (!modelNowConfig) return
@@ -288,7 +295,7 @@ export async function applyModelProbeResult(
         changed = true
         console.log(`[applyModelProbeResult] 永久失效模型 ${fullId} 已从第一、第二梯队踢出，原因: ${actualDisabledReason}`)
       } else if (!success && inTier1) {
-        console.log(`[applyModelProbeResult] 第一梯队模型 ${fullId} 探测异常(${statusCode})，立即踢出至第二梯队并启动自动补位`)
+        console.log(`[applyModelProbeResult] 第一梯队模型 ${fullId} 探测异常(${statusCode})，控制剔除至第二梯队`)
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         const ref = { providerId, modelId, fullId, addedAt: Date.now() }
         if (!storage.tier2.some((m) => m.fullId === fullId)) {
@@ -304,7 +311,7 @@ export async function applyModelProbeResult(
           lastTestedAt: Date.now(),
           error: success ? undefined : `HTTP ${statusCode}: ${errorMsg}`,
         }
-        await backfillTier1FromTier2(env, storage)
+        setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(storage))
       }
     }
   }
