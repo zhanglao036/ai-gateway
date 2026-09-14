@@ -1,9 +1,9 @@
 /**
- * 版本号: v1.2.1
- * 更新说明: 修复当前连接状态固定在第一位的假象：引入动态活跃连接感知算法，各池实时识别真实接管模型并动态点亮绿灯。
+ * 版本号: v1.2.9
+ * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：偶发模型故障与成功调用一律纯内存更新与避让（0 KV 写入）；仅在模型永久失效（如连续 3 次失败或余额不足）等刚性事件触发时，才发起单次打包写入并顺风车带走所有请求日志。
  */
 import { Context } from 'hono'
-import { getProvider, getProviders, updateProvider, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
+import { getProvider, getProviders, updateProvider, setMemoryCacheOnly, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
 import { KV_KEYS, KEY_HEALTH_COOLDOWN_MS, KEY_HEALTH_MAX_FAILURES } from './config'
 import type { Env, ProxyRequestBody } from './types'
 import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from './opencode'
@@ -63,75 +63,59 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       }
     })
 
-    if (updated) {
-      await updateProvider(env, providerId, { models: updatedModels })
-    }
-
     const modelNowConfig = updatedModels.find((m) => m.id === modelId)
     const isPermDisabled = modelNowConfig?.permanentlyDisabled === true
     const actualDisabledReason = modelNowConfig?.disabledReason || ''
+
+    // 只有在模型判定为永久失效（如连续 3 次失败或余额不足等）刚性事件发生时，才执行真实持久化写入
+    // 偶发性单次失败（1-2次）：纯内存维护冷却与延迟指标，绝对不发起 KV 写入！
+    if (updated) {
+      if (isPermDisabled) {
+        await updateProvider(env, providerId, { models: updatedModels })
+      } else {
+        // 纯内存维护 provider 中的 models 临时状态，等待后续顺风车
+        const providers = await getProviders(env)
+        const pIdx = providers.findIndex((p) => p.id === providerId)
+        if (pIdx !== -1) {
+          providers[pIdx] = { ...providers[pIdx], models: updatedModels }
+          setMemoryCacheOnly(KV_KEYS.PROVIDERS, JSON.stringify(providers))
+        }
+      }
+    }
 
     const fullId = `${providerId}/${modelId}`
     let storage = await getTierStorage(env)
 
     if (storage) {
-      let changed = false
-      const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
-      const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
-      const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
+      const now = Date.now()
+      if (!storage.cooldowns) storage.cooldowns = {}
+      if (!storage.businessStats) storage.businessStats = {}
 
       if (isPermDisabled) {
-        // 永久失效 (例如 402/余额不足、连续 3 次失败)：第一时间踢出第一梯队、第二梯队与各专属梯队
+        // 刚性事件：永久失效模型从各活跃梯队彻底剔除并补位
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-        storage.tier2 = storage.tier2.filter((m) => m.fullId !== fullId)
+        storage.tier2 = (storage.tier2 || []).filter((m) => m.fullId !== fullId)
         if (storage.tierOpenclaw) storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
         if (storage.tierDrawing) storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
-        changed = true
         console.log(`[proxy] 永久失效模型 ${fullId} 已从所有梯队踢出，原因: ${actualDisabledReason}`)
-      } else {
-        if (inTier1) {
-          // 第一梯队模型调用出现明确故障：立即移出第一梯队，转入第二梯队等待冷却恢复，并触发自动补位
-          console.log(`[proxy] 第一梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除至第二梯队并启动自动补位`)
-          storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-          const ref = { providerId, modelId, fullId, addedAt: Date.now() }
-          if (!storage.tier2.some((m) => m.fullId === fullId)) {
-            storage.tier2.push(ref)
-          }
-          changed = true
-        }
-        if (inOpenclaw && storage.tierOpenclaw) {
-          console.log(`[proxy] OpenClaw 专属梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除并补位`)
-          storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
-          changed = true
-        }
-        if (inDrawing && storage.tierDrawing) {
-          console.log(`[proxy] 绘图专属梯队模型 ${fullId} 发生异常(HTTP ${status})，立即剔除并补位`)
-          storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
-          changed = true
-        }
-      }
 
-      if (changed) {
-        storage.probeStats[fullId] = {
-          success: false,
-          latency: 0,
-          lastTestedAt: Date.now(),
-          error: `HTTP ${status}: ${errorMsg}`,
-        }
-        // 惩罚故障模型的业务平均延迟，确保其排序沉底
+        // 仅在真实淘汰时进行精准补位
+        storage = await backfillTier1FromTier2(env, storage)
+        if (storage.tierOpenclaw) storage = await backfillOpenclawTier(env, storage)
+        if (storage.tierDrawing) storage = await backfillDrawingTier(env, storage)
+
+        storage.updatedAt = new Date().toISOString()
+        // 顺风车发车：一次性写入梯队并捎带内存中所有的日志！
+        await saveTierStorage(env, storage)
+      } else {
+        // 偶发失败（1-2次）：纯内存避让与冷却，绝不主动触发写 KV！
+        storage.cooldowns[fullId] = now + 5 * 60 * 1000
         storage.businessStats[fullId] = {
-          ...(storage.businessStats[fullId] || { totalRequests: 0, successCount: 0, lastUsedAt: Date.now() }),
+          ...(storage.businessStats[fullId] || { totalRequests: 0, successCount: 0, lastUsedAt: now }),
           avgLatency: 9999,
           failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
         }
-        // 核心修复：立即持久化保存更新后的梯队池状态到 KV，杜绝剔除状态丢失
-        storage.updatedAt = new Date().toISOString()
-        await saveTierStorage(env, storage)
-
-        // 尝试自动补位新模型填补空位（严格按发生故障的池子进行精准补位，池间隔离，绝不跨池触发）
-        if (inTier1) await backfillTier1FromTier2(env, storage)
-        if (inOpenclaw) await backfillOpenclawTier(env, storage)
-        if (inDrawing) await backfillDrawingTier(env, storage)
+        setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(storage))
       }
     }
   } catch (err) {
@@ -165,7 +149,14 @@ async function recordModelSuccess(env: Env, providerId: string, modelId: string)
     })
 
     if (needUpdate) {
-      await updateProvider(env, providerId, { models: updatedModels })
+      // 成功调用纯内存重置模型健康状态，绝对不主动调用 updateProvider 写 KV！
+      // 若后续有刚性写入事件发生，顺风车自然会打包带走
+      const providers = await getProviders(env)
+      const pIdx = providers.findIndex((p) => p.id === providerId)
+      if (pIdx !== -1) {
+        providers[pIdx] = { ...providers[pIdx], models: updatedModels }
+        setMemoryCacheOnly(KV_KEYS.PROVIDERS, JSON.stringify(providers))
+      }
     }
   } catch (err) {
     console.warn('[proxy] 记录模型成功状态异常:', err instanceof Error ? err.message : String(err))

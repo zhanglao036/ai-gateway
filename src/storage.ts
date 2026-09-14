@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.5
- * 更新说明: 优化 KV 写入性能，移除非必要的强制刷盘，使 1s 内存合并防抖队列完全生效，大幅节省 Cloudflare KV 写入请求。
+ * 版本号: v1.2.9
+ * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：日常 AI 成功与失败请求指标全面转为内存缓存维护（0 KV 写入），提供 setMemoryCacheOnly 接口，仅在刚性事件发生时顺路打包带走所有内存日志与暂存数据。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'
 import type { Env, Provider, ProxyKey, RequestLog, Session, CustomModelRoute } from './types'
@@ -133,6 +133,15 @@ export async function kvGet(env: Env, key: string): Promise<string | null> {
     memoryCache.set(key, { value: val })
   }
   return val
+}
+
+/**
+ * 纯内存写入缓存（顺风车乘客模式）：
+ * 仅更新 Worker 运行时内存缓存，绝对不主动发起 KV 写入或启动定时器。
+ * 等待后续任何刚性写入事件发生时，再作为顺风车乘客一次性打包持久化到 KV。
+ */
+export function setMemoryCacheOnly(key: string, value: string): void {
+  memoryCache.set(key, { value })
 }
 
 export async function kvPut(env: Env, key: string, value: string, options?: { expirationTtl?: number }): Promise<void> {

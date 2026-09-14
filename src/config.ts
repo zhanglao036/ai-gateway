@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.8
- * 更新说明: 贯彻“故障果断剔除，宁缺毋滥”策略，支持动态席位自定义；增加真实数据指纹对比，彻底消除席位未满时的无效补位与死循环 KV 写入，确保日常定时请求纯内存 0 写入。
+ * 版本号: v1.2.9
+ * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：日常 AI 成功与失败请求全面转为内存处理（0 KV 写入），仅在模型永久失效或名单变更等刚性事件触发时，由顺风车打包一次性带走所有内存日志与状态。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.8'
+export const VERSION = 'v1.2.9'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

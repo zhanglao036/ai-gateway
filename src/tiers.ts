@@ -1,9 +1,9 @@
 /**
- * 版本号: v1.2.7
- * 更新说明: 严防死守海选门槛，杜绝未测/故障模型混入梯队池；打通第一梯队、OpenClaw智能体池、绘图专属池全梯队实时故障淘汰与自动补位机制；彻底清除“故障避让”僵尸占坑模型。
+ * 版本号: v1.2.9
+ * 更新说明: 贯彻“顺风车”写入机制：日常请求业务延迟、成功/失败指标全部转为纯内存高速维护（零主动写 KV）；移除成功与偶发失败分支中多余的自动补位及级联写库逻辑；仅在刚性事件发生时顺路打包带走内存暂存状态。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
-import { kvGet, kvPut, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
+import { kvGet, kvPut, setMemoryCacheOnly, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
 import { testModelConnection } from './proxy'
 import { isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
 import { detectPermanentFailure } from './models'
@@ -1576,7 +1576,17 @@ export function isEligibleForActiveTier(storage: TierStorage, fullId: string, no
 export async function ensureTierStorage(env: Env): Promise<TierStorage> {
   const existing = await getTierStorage(env)
   if (existing && Array.isArray(existing.tier1)) {
-    let storage: TierStorage = existing
+    // 指纹对比比对函数：比较梯队模型 ID 列表是否发生任何实际变化
+    const getFingerprint = (s: TierStorage) => {
+      const t1 = (s.tier1 || []).map((x) => x.fullId).sort().join(',')
+      const t2 = (s.tier2 || []).map((x) => x.fullId).sort().join(',')
+      const to = (s.tierOpenclaw || []).map((x) => x.fullId).sort().join(',')
+      const td = (s.tierDrawing || []).map((x) => x.fullId).sort().join(',')
+      return `${t1}|${t2}|${to}|${td}`
+    }
+    // 在任何内存修改前，先计算已有梯队数据的原始指纹
+    const originalFingerprint = getFingerprint(existing)
+    let storage: TierStorage = JSON.parse(JSON.stringify(existing))
     // 获取当前系统中所有真实启用且健康的可用模型
     const allModels = await getAllAvailableModels(env)
     const availableSet = new Set(allModels.map((item) => item.fullId))
@@ -1726,18 +1736,8 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 指纹对比比对函数：比较梯队模型 ID 列表是否发生任何实际变化
-    const getFingerprint = (s: TierStorage) => {
-      const t1 = (s.tier1 || []).map((x) => x.fullId).sort().join(',')
-      const t2 = (s.tier2 || []).map((x) => x.fullId).sort().join(',')
-      const to = (s.tierOpenclaw || []).map((x) => x.fullId).sort().join(',')
-      const td = (s.tierDrawing || []).map((x) => x.fullId).sort().join(',')
-      return `${t1}|${t2}|${to}|${td}`
-    }
-
     // 若检测到任何梯队调整或补位，且真实数据指纹发生改变，顺风车单次写入 KV；未改变则绝对 0 写入
     const currentFingerprint = getFingerprint(storage)
-    const originalFingerprint = getFingerprint(existing)
     if (changed || currentFingerprint !== originalFingerprint) {
       if (currentFingerprint !== originalFingerprint) {
         storage.updatedAt = new Date().toISOString()
@@ -1817,7 +1817,8 @@ export async function selectAutoModel(
   poolType: 'general' | 'openclaw' | 'drawing' = 'general',
   excludedModelIds?: Set<string>
 ): Promise<{ providerId: string; modelId: string; fullId: string } | null> {
-  const storage = await ensureTierStorage(env)
+  // 优先直接读取内存/KV已就绪的梯队缓存，只有初次无数据时才触发自愈初始化，确保日常调用零开销
+  const storage = (await getTierStorage(env)) || (await ensureTierStorage(env))
 
   const allModels = await getAllAvailableModels(env)
   const modelMap = new Map(allModels.map((item) => [item.fullId, item]))
@@ -2061,86 +2062,21 @@ export async function recordBusinessLatency(
       }
     }
 
-    // 检查该模型在各梯队池中的位置
-    const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
-    const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
-    const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
-
     if (!success) {
-      console.log(`[tiers] 淘汰故障模型 ${fullId}: 业务请求失败 1 次，启动全梯队故障避让与自动补位`)
-
-      const parts = fullId.split('/')
-      const providerId = parts[0]
-      const modelId = parts.slice(1).join('/')
-
-      // 1. 设置模型冷却 10 分钟 (通过 tierData 动态状态，零主库写入)
+      console.log(`[tiers] 业务请求失败 ${fullId}: 仅在纯内存记录指标与临时避让，等待顺风车落盘`)
+      // 临时冷却 5 分钟 (纯内存动态状态，零 KV 写入)
       if (!storage.cooldowns) storage.cooldowns = {}
-      storage.cooldowns[fullId] = now + 10 * 60 * 1000
-
-      if (providerId && modelId) {
-        const provider = await getProvider(env, providerId)
-        if (provider) {
-          const updatedModels = provider.models.map((m: Model) => {
-            if (m.id === modelId) {
-              return {
-                ...m,
-                cooldownUntil: now + 10 * 60 * 1000, // 冷却 10 分钟
-              }
-            }
-            return m
-          })
-          await updateProvider(env, providerId, { models: updatedModels })
-        }
-      }
-
-      let anyChanged = false
-
-      // 2. 移出第一梯队，回到第二梯队候选池，触发空位海选补位
-      if (inTier1) {
-        storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
-        const ref = { providerId, modelId, fullId, addedAt: now }
-        if (!storage.tier2.some((m) => m.fullId === fullId)) {
-          storage.tier2.push(ref)
-        }
-        storage = await backfillTier1FromTier2(env, storage)
-        anyChanged = true
-      }
-
-      // 3. 移出 OpenClaw 专属池，触发空位海选补位
-      if (inOpenclaw && storage.tierOpenclaw) {
-        storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
-        storage = await backfillOpenclawTier(env, storage)
-        anyChanged = true
-      }
-
-      // 4. 移出绘图专属池，触发空位海选补位
-      if (inDrawing && storage.tierDrawing) {
-        storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
-        storage = await backfillDrawingTier(env, storage)
-        anyChanged = true
-      }
-
-      if (anyChanged) {
-        storage.updatedAt = new Date().toISOString()
-        await saveTierStorage(env, storage)
-      }
+      storage.cooldowns[fullId] = now + 5 * 60 * 1000
     } else {
-      // 成功请求：若之前存在临时冷却记录，自动消除
+      // 成功请求：若之前存在临时冷却记录，纯内存自动消除
       if (storage.cooldowns && storage.cooldowns[fullId]) {
         delete storage.cooldowns[fullId]
       }
-      const slotsConfig = getTierSlotsConfig(storage)
-      if (storage.tier1.length < slotsConfig.tier1Slots) {
-        storage = await backfillTier1FromTier2(env, storage)
-      }
-      if ((storage.tierOpenclaw || []).length < slotsConfig.tierOpenclawSlots) {
-        storage = await backfillOpenclawTier(env, storage)
-      }
-      if ((storage.tierDrawing || []).length < slotsConfig.tierDrawingSlots) {
-        storage = await backfillDrawingTier(env, storage)
-      }
-      // 成功且席位完备时，完全零 KV 操作，极大节约免费额度
     }
+
+    // 关键顺风车机制：将最新业务指标与临时冷却仅更新至运行时内存缓存，完全零主动 KV 写入！
+    // 后续当遇到模型永久失效、管理员保存配置等刚性写入事件时，顺风车自然打包带走
+    setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(storage))
   } catch (err) {
     console.warn('[tiers] 记录业务延迟指标异常 (已安全降级):', err instanceof Error ? err.message : String(err))
   }
