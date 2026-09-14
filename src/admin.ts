@@ -25,10 +25,11 @@ import {
   saveCustomModelRoutes,
   saveAllUnifiedConfig,
   flushPendingWrites,
+  setMemoryCacheOnly,
 } from './storage'
 import { testModelConnection } from './proxy'
 import { fetchOpenCodeModels, isOpenCodeProvider, resolveOpenCodeUrls, testOpenCodeModel } from './opencode'
-import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL } from './config'
+import { PROXY_KEY_PREFIX, EXPIRY_OPTIONS, OPENCODE_DEFAULT_URL, KV_KEYS } from './config'
 import {
   deduplicateAndClassifyModels,
   resetAllCooldowns,
@@ -785,9 +786,10 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
     tierStorage.modelCursors = cursors
     tierStorage.lastProbeDate = new Date().toISOString().split('T')[0]
 
-    // 4. 释放互斥锁并平滑补齐第一梯队（按各家均匀配额补足）
+    // 4. 释放互斥锁，对三大独立池（通用池、OpenClaw池、绘图池）执行自愈清理与平滑补齐（严防死循环与跨池干扰）
     isProbeRunning = false
-    const finalTierData = await backfillTier1FromTier2(c.env, tierStorage)
+    setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(tierStorage))
+    const finalTierData = await ensureTierStorage(c.env)
 
     // 5. 本轮跨厂家抽测完全结束后，发起唯一 1 次打包落盘 KV 写入（固化游标断点、延迟指标与最新梯队）
     await saveTierStorage(c.env, finalTierData)

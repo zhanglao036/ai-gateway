@@ -311,6 +311,18 @@ export async function applyModelProbeResult(
           lastTestedAt: Date.now(),
           error: success ? undefined : `HTTP ${statusCode}: ${errorMsg}`,
         }
+        if (success) {
+          if (storage.businessStats?.[fullId]) {
+            storage.businessStats[fullId] = {
+              ...storage.businessStats[fullId],
+              avgLatency: 100,
+              failureCount: 0,
+            }
+          }
+          if (storage.cooldowns?.[fullId]) {
+            delete storage.cooldowns[fullId]
+          }
+        }
         setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(storage))
       }
     }
