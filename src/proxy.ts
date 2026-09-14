@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.9
- * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：偶发模型故障与成功调用一律纯内存更新与避让（0 KV 写入）；仅在模型永久失效（如连续 3 次失败或余额不足）等刚性事件触发时，才发起单次打包写入并顺风车带走所有请求日志。
+ * 版本号: v1.3.0
+ * 更新说明: 实施“报错立踢、专属补位探测”机制：通用、OpenClaw、绘图 3 个专属池严格独立隔离，遇到报错立即从当前池剔除并触发补位；报错日志优先存入内存并在保存梯队时顺风车打包实时写入 KV，附带防死循环熔断保护。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, setMemoryCacheOnly, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -10,7 +10,14 @@ import { isOpenCodeProvider, proxyOpenCodeRequest, resolveOpenCodeUrls } from '.
 import { detectPermanentFailure } from './models'
 import { selectAutoModel, recordBusinessLatency, getTierStorage, saveTierStorage, backfillTier1FromTier2, backfillOpenclawTier, backfillDrawingTier } from './tiers'
 
-async function recordModelFailure(env: Env, providerId: string, modelId: string, status: number, errorMsg: string) {
+async function recordModelFailure(
+  env: Env,
+  providerId: string,
+  modelId: string,
+  status: number,
+  errorMsg: string,
+  poolType: 'general' | 'openclaw' | 'drawing' = 'general'
+) {
   try {
     const provider = await getProvider(env, providerId)
     if (!provider) return
@@ -23,6 +30,11 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       lowerMsg.includes('invalid') ||
       lowerMsg.includes('unsupported')
     )
+
+    if (isBadRequestParam) {
+      // 客户端传参问题不增加失败次数也不触发冷却与剔除
+      return
+    }
 
     const permReason = detectPermanentFailure(status, errorMsg)
     let updated = false
@@ -40,11 +52,6 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
         }
       }
 
-      if (isBadRequestParam) {
-        // 客户端传参问题不增加失败次数也不触发冷却，不触发写入
-        return m
-      }
-
       updated = true
       const newFailures = (m.failureCount || 0) + 1
       if (newFailures >= 3) {
@@ -59,7 +66,7 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       return {
         ...m,
         failureCount: newFailures,
-        cooldownUntil: Date.now() + 5 * 60 * 1000,
+        cooldownUntil: Date.now() + 10 * 60 * 1000, // 冷却 10 分钟
       }
     })
 
@@ -67,8 +74,6 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
     const isPermDisabled = modelNowConfig?.permanentlyDisabled === true
     const actualDisabledReason = modelNowConfig?.disabledReason || ''
 
-    // 只有在模型判定为永久失效（如连续 3 次失败或余额不足等）刚性事件发生时，才执行真实持久化写入
-    // 偶发性单次失败（1-2次）：纯内存维护冷却与延迟指标，绝对不发起 KV 写入！
     if (updated) {
       if (isPermDisabled) {
         await updateProvider(env, providerId, { models: updatedModels })
@@ -90,31 +95,79 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
       const now = Date.now()
       if (!storage.cooldowns) storage.cooldowns = {}
       if (!storage.businessStats) storage.businessStats = {}
+      if (!storage.probeStats) storage.probeStats = {}
+
+      storage.cooldowns[fullId] = now + 10 * 60 * 1000
+      storage.businessStats[fullId] = {
+        ...(storage.businessStats[fullId] || { totalRequests: 0, successCount: 0, lastUsedAt: now }),
+        avgLatency: 9999,
+        failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
+      }
+      storage.probeStats[fullId] = {
+        success: false,
+        latency: 0,
+        lastTestedAt: now,
+        error: `HTTP ${status}: ${errorMsg}`,
+      }
+
+      let changed = false
 
       if (isPermDisabled) {
-        // 刚性事件：永久失效模型从各活跃梯队彻底剔除并补位
+        // 致命永久失效：从所有池中彻底剔除并永久标记
         storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
         storage.tier2 = (storage.tier2 || []).filter((m) => m.fullId !== fullId)
         if (storage.tierOpenclaw) storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
         if (storage.tierDrawing) storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
         console.log(`[proxy] 永久失效模型 ${fullId} 已从所有梯队踢出，原因: ${actualDisabledReason}`)
+        changed = true
 
-        // 仅在真实淘汰时进行精准补位
-        storage = await backfillTier1FromTier2(env, storage)
-        if (storage.tierOpenclaw) storage = await backfillOpenclawTier(env, storage)
-        if (storage.tierDrawing) storage = await backfillDrawingTier(env, storage)
+        // 仅在当前请求发生的池子中触发精准补位探测，杜绝跨池风暴与死循环
+        if (poolType === 'openclaw') {
+          storage = await backfillOpenclawTier(env, storage)
+        } else if (poolType === 'drawing') {
+          storage = await backfillDrawingTier(env, storage)
+        } else {
+          storage = await backfillTier1FromTier2(env, storage)
+        }
+      } else {
+        // 报错故障立即踢出：根据 poolType 严格区分 3 个池子，独立剔除与独立补位！
+        if (poolType === 'openclaw') {
+          const inOpenclaw = (storage.tierOpenclaw || []).some((m) => m.fullId === fullId)
+          if (inOpenclaw && storage.tierOpenclaw) {
+            console.log(`[proxy] OpenClaw 专属池模型 ${fullId} 发生报错(HTTP ${status})，立即剔除并启动专属补位探测`)
+            storage.tierOpenclaw = storage.tierOpenclaw.filter((m) => m.fullId !== fullId)
+            changed = true
+            storage = await backfillOpenclawTier(env, storage)
+          }
+        } else if (poolType === 'drawing') {
+          const inDrawing = (storage.tierDrawing || []).some((m) => m.fullId === fullId)
+          if (inDrawing && storage.tierDrawing) {
+            console.log(`[proxy] 绘图专属池模型 ${fullId} 发生报错(HTTP ${status})，立即剔除并启动绘图补位探测`)
+            storage.tierDrawing = storage.tierDrawing.filter((m) => m.fullId !== fullId)
+            changed = true
+            storage = await backfillDrawingTier(env, storage)
+          }
+        } else {
+          // 通用第一梯队
+          const inTier1 = storage.tier1.some((m) => m.fullId === fullId)
+          if (inTier1) {
+            console.log(`[proxy] 通用池(第一梯队)模型 ${fullId} 发生报错(HTTP ${status})，立即剔除至第二梯队并启动自动补位探测`)
+            storage.tier1 = storage.tier1.filter((m) => m.fullId !== fullId)
+            const ref = { providerId, modelId, fullId, addedAt: now }
+            if (!storage.tier2.some((m) => m.fullId === fullId)) {
+              storage.tier2.push(ref)
+            }
+            changed = true
+            storage = await backfillTier1FromTier2(env, storage)
+          }
+        }
+      }
 
+      if (changed) {
         storage.updatedAt = new Date().toISOString()
-        // 顺风车发车：一次性写入梯队并捎带内存中所有的日志！
+        // 顺风车发车：一次性保存梯队名单，并顺路把内存中刚产生的所有未落盘报错日志一次性打包写入 KV！
         await saveTierStorage(env, storage)
       } else {
-        // 偶发失败（1-2次）：纯内存避让与冷却，绝不主动触发写 KV！
-        storage.cooldowns[fullId] = now + 5 * 60 * 1000
-        storage.businessStats[fullId] = {
-          ...(storage.businessStats[fullId] || { totalRequests: 0, successCount: 0, lastUsedAt: now }),
-          avgLatency: 9999,
-          failureCount: ((storage.businessStats[fullId]?.failureCount) || 0) + 1,
-        }
         setMemoryCacheOnly(KV_KEYS.TIER_DATA, JSON.stringify(storage))
       }
     }
@@ -768,8 +821,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         if (isContentEmpty || !response.ok) {
           const errReason = isContentEmpty ? '上游返回空内容 (choices[0].message.content 为空)' : `HTTP ${response.status}: ${response.statusText || '请求失败'}`
           const errStatus = isContentEmpty ? 502 : response.status
-          await recordModelFailure(c.env, providerId, modelId, errStatus, errReason)
-          await recordLog(c.env, startTime, requestedModel, errStatus, errReason)
+          await recordLog(c.env, startTime, requestedModel, errStatus, errReason, {
+            attemptIndex: attempts,
+            routePath,
+            isStream: isStreamReq,
+            clientIp,
+          })
+          await recordModelFailure(c.env, providerId, modelId, errStatus, errReason, poolType)
           await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
           if (isAutoRequest && attempts < maxAttempts) {
             continue
@@ -796,11 +854,16 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       }
 
       if (enabledKeys.length === 0) {
+        await recordLog(c.env, startTime, requestedModel, 500, `提供商 "${provider.name}" 未配置可用的 API Key`, {
+          attemptIndex: attempts,
+          routePath,
+          isStream: isStreamReq,
+          clientIp,
+        })
+        await recordModelFailure(c.env, providerId, modelId, 500, '提供商无可用的 API Key', poolType)
         if (isAutoRequest && attempts < maxAttempts) {
-          await recordModelFailure(c.env, providerId, modelId, 500, '提供商无可用的 API Key')
           continue
         }
-        await recordLog(c.env, startTime, requestedModel, 500, `提供商 "${provider.name}" 未配置可用的 API Key`)
         return c.json({
           error: { message: `提供商 "${provider.name}" 未配置可用的 API Key`, type: 'configuration_error' },
         }, 500)
@@ -917,7 +980,15 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
             }
             healthData[apiKey] = h
             healthUpdated = true
-            await recordModelFailure(c.env, providerId, modelId, 502, '上游返回空内容 (choices[0].message.content 为空)')
+            await recordLog(c.env, startTime, requestedModel, 502, '上游返回空内容 (choices[0].message.content 为空)', {
+              keyMask: masked,
+              attemptIndex: attempts,
+              routePath,
+              isStream: isStreamReq,
+              clientIp,
+            })
+            await recordModelFailure(c.env, providerId, modelId, 502, '上游返回空内容 (choices[0].message.content 为空)', poolType)
+            alreadyRecordedFailure = true
             lastError = new Response(JSON.stringify({
               error: { message: '上游返回空内容 (choices[0].message.content 为空)', type: 'empty_response' },
             }), { status: 502 })
@@ -977,7 +1048,6 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         // 其他错误（400/404 等）记录模型故障并返回
         const errorData = await response.json().catch(async () => ({ error: { message: await response.text() } }))
         const errMsg = (errorData as { error?: { message?: string } })?.error?.message || `HTTP ${response.status}`
-        await recordModelFailure(c.env, providerId, modelId, response.status, errMsg)
         await recordLog(c.env, startTime, requestedModel, response.status, errMsg, {
           keyMask: masked,
           attemptIndex: attempts,
@@ -985,7 +1055,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
           isStream: isStreamReq,
           clientIp,
         })
-        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest)
+        await recordModelFailure(c.env, providerId, modelId, response.status, errMsg, poolType)
+        await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
         alreadyRecordedFailure = true
         if (isAutoRequest && attempts < maxAttempts) {
           lastError = response
@@ -1003,9 +1074,8 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
         }
         healthData[apiKey] = h
         healthUpdated = true
-        await recordModelFailure(c.env, providerId, modelId, 502, error.message || '网络连接故障')
         lastError = new Response(JSON.stringify({
-          error: { message: error.message || '请求失败', type: 'proxy_error' },
+          error: { message: error.message || '网络连接故障', type: 'proxy_error' },
         }), { status: 502 })
         continue
       }
@@ -1019,14 +1089,15 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
       const errorBody = await lastError.text().catch(() => '所有 API Key 均失败')
       const errMsg = `所有 API Key 已用完，最后一次错误: HTTP ${lastError.status}`
       if (!alreadyRecordedFailure) {
-        await recordModelFailure(c.env, providerId, modelId, lastError.status || 502, errorBody)
         await recordLog(c.env, startTime, requestedModel, lastError.status || 502, errMsg, {
           attemptIndex: attempts,
           routePath,
           isStream: isStreamReq,
           clientIp,
         })
+        await recordModelFailure(c.env, providerId, modelId, lastError.status || 502, errorBody, poolType)
         await recordBusinessLatency(c.env, `${providerId}/${modelId}`, Date.now() - startTime, false, isAutoRequest, poolType)
+        alreadyRecordedFailure = true
       }
       if (isAutoRequest && attempts < maxAttempts) {
         continue // outer while-loop continue to next provider in Tier 1
@@ -1041,7 +1112,13 @@ export async function handleProxy(c: Context<{ Bindings: Env }>) {
     }
 
     if (isAutoRequest && attempts < maxAttempts) {
-      await recordModelFailure(c.env, providerId, modelId, 500, '提供商无可用的 API Key')
+      await recordLog(c.env, startTime, requestedModel, 500, '提供商无可用的 API Key', {
+        attemptIndex: attempts,
+        routePath,
+        isStream: isStreamReq,
+        clientIp,
+      })
+      await recordModelFailure(c.env, providerId, modelId, 500, '提供商无可用的 API Key', poolType)
       continue // outer while-loop continue to next provider
     }
 

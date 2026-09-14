@@ -1,5 +1,5 @@
 /**
- * 版本号: v1.2.9
+ * 版本号: v1.3.0
  * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：日常 AI 成功与失败请求指标全面转为内存缓存维护（0 KV 写入），提供 setMemoryCacheOnly 接口，仅在刚性事件发生时顺路打包带走所有内存日志与暂存数据。
  */
 import { KV_KEYS, LOG_BATCH_SIZE, LOG_FLUSH_INTERVAL_MS } from './config'

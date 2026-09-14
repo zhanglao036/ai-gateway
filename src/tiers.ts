@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.9
- * 更新说明: 贯彻“顺风车”写入机制：日常请求业务延迟、成功/失败指标全部转为纯内存高速维护（零主动写 KV）；移除成功与偶发失败分支中多余的自动补位及级联写库逻辑；仅在刚性事件发生时顺路打包带走内存暂存状态。
+ * 版本号: v1.3.0
+ * 更新说明: 贯彻“报错立踢、专属补位探测”机制：通用池、OpenClaw专属池、绘图专属池 3 个池子严格独立互不干扰；为补位探测强化互斥锁与最大探测防线，确保绝不死循环、严格受控于 Cloudflare 免费配额。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, setMemoryCacheOnly, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -1501,10 +1501,14 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
 
   const existingFullIds = new Set(storage.tierDrawing.map((m) => m.fullId))
 
-  // 2. 挑选候选绘图模型
+  // 2. 挑选候选绘图模型 (排除冷却中与永久禁用的模型)
+  const now = Date.now()
   const candidates = allModels.filter((m) => {
     if (existingFullIds.has(m.fullId)) return false
     const mConfig = m.provider.models.find((x) => x.id === m.modelId)
+    if (mConfig?.permanentlyDisabled) return false
+    if (mConfig?.cooldownUntil && mConfig.cooldownUntil > now) return false
+    if (storage.cooldowns?.[m.fullId] && storage.cooldowns[m.fullId] > now) return false
     return isDrawingModel(m.modelId, mConfig?.category)
   })
 
@@ -1515,9 +1519,12 @@ export async function backfillDrawingTier(env: Env, storage: TierStorage): Promi
     return latA - latB
   })
 
-  // 探测并择优补位
+  // 探测并择优补位（硬限制单次补位最多探测 6 个候选，防止耗尽 Cloudflare 外部请求配额与死循环）
+  let probesCount = 0
   for (const item of candidates) {
     if (storage.tierDrawing.length >= slotsConfig.tierDrawingSlots) break
+    if (probesCount >= 6) break
+    probesCount++
 
     const metric = await runSingleModelProbe(env, item.provider, item.modelId)
     storage.probeStats[item.fullId] = metric

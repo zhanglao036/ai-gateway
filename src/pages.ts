@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.2.9
- * 更新说明: 深度贯彻“顺风车”极简 KV 写入哲学：日常 AI 成功与失败请求指标全面转为内存缓存维护（0 KV 写入），仅在模型永久失效或名单变更等刚性事件触发时，由顺风车打包一次性带走所有内存日志与状态。
+ * 版本号: v1.3.0
+ * 更新说明: 实施“报错立踢、专属补位探测”机制：通用、OpenClaw、绘图 3 个专属池严格独立隔离，遇到报错立即从当前池剔除并触发补位；报错日志优先存入内存并在保存梯队时顺风车打包实时写入 KV，附带防死循环熔断保护。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
