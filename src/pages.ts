@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
+ * 版本号: v1.3.2
+ * 更新说明: 精简与合并重合按键与冗余入口：合并控制台概览区与梯队池的重复探测按钮、移除卡片底部重复的获取模型按钮、优化模型列表行操作排版、统一暂存与写入逻辑，所有业务路由与指定模式路由 100% 完整保留。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -958,13 +958,11 @@ ${H('管理')}
           <div class="admin-heading__title">
             <p class="eyebrow"><span aria-hidden="true"></span>GATEWAY STATUS</p>
             <h1 id="admin-title">管理控制台</h1>
-            <p>配置提供商、模型与客户端访问凭据。变更将写入 Cloudflare KV。</p>
+            <p>配置提供商、模型与客户端访问凭据。所有修改均可在内存中调试，点击左侧【统一保存】批量写入 KV。</p>
           </div>
           <div class="admin-heading__actions">
-            <button id="btn-probe" class="btn btn-p btn-s" onclick="triggerProbe()"><i class="fas fa-radar" aria-hidden="true"></i>触发探测任务</button>
-            <button class="btn btn-s" onclick="testAllBlockedModels()"><i class="fas fa-unlock-alt" aria-hidden="true"></i>批量复测封禁</button>
-            <button class="btn btn-s" onclick="resetAllModels()"><i class="fas fa-sync-alt" aria-hidden="true"></i>一键重置所有模型</button>
-            <a href="/" class="btn btn-gh btn-s"><i class="fas fa-external-link-alt" aria-hidden="true"></i>查看模型列表</a>
+            <button class="btn btn-s" onclick="resetAllModels()"><i class="fas fa-sync-alt" aria-hidden="true"></i>一键重置所有异常</button>
+            <a href="/" class="btn btn-gh btn-s"><i class="fas fa-external-link-alt" aria-hidden="true"></i>查看公开模型列表</a>
           </div>
         </div>
         <div class="admin-metrics" aria-label="配置统计">
@@ -1150,8 +1148,7 @@ ${H('管理')}
                         openclawBadge +
                         `<span id="lat-${escapePageHtml(p.id)}-${mi}" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>` +
                         unblockBtn +
-                        openclawTestBtn +
-                        `<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-idx="${mi}" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>` +
+                        `<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="${escapePageHtml(p.id)}" data-mid="${escapePageHtml(m.id)}" data-idx="${mi}" title="测试此模型延迟与可用性" aria-label="测试模型"><i class="fas fa-plug" aria-hidden="true"></i></button>` +
                       `</div>` +
                     `</div>`;
                   }).join('')}
@@ -1161,9 +1158,8 @@ ${H('管理')}
               <div class="detail-actions">
                 <div id="tr-${escapePageHtml(p.id)}" aria-live="polite"></div>
                 <div>
-                  ${p.id === 'opencode' ? `<button class="btn btn-s" onclick="fetchEditModelsBtn(this)" data-pid="${escapePageHtml(p.id)}"><i class="fas fa-download" aria-hidden="true"></i>获取模型</button>` : ''}
-                  <button class="btn btn-d" onclick="delBtn(this)" data-pid="${escapePageHtml(p.id)}"><i class="fas fa-trash" aria-hidden="true"></i>删除</button>
-                  <button class="btn btn-p" onclick="saveBtn(this)" data-pid="${escapePageHtml(p.id)}"><i class="fas fa-save" aria-hidden="true"></i>暂存更改</button>
+                  <button class="btn btn-d" onclick="delBtn(this)" data-pid="${escapePageHtml(p.id)}"><i class="fas fa-trash" aria-hidden="true"></i>删除提供商</button>
+                  <button class="btn btn-p" onclick="saveBtn(this)" data-pid="${escapePageHtml(p.id)}" title="收起此卡片并将修改暂存至内存"><i class="fas fa-check" aria-hidden="true"></i>收起并暂存</button>
                 </div>
               </div>
             </div>
@@ -2842,7 +2838,7 @@ function renderProviderList() {
           openclawBadge +
           '<span id="lat-' + pId + '-' + mi + '" class="latency-chip" title="模型通信延迟"><i class="fas fa-gauge-high"></i> <span class="lat-val">-- ms</span></span>' +
           unblockBtn +
-          '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-idx="' + mi + '" title="单独测试模型延迟" aria-label="测试模型延迟"><i class="fas fa-gauge-high" aria-hidden="true"></i></button>' +
+          '<button class="icon-btn test-mdl-btn" onclick="testMdlBtn(this)" data-pid="' + pId + '" data-mid="' + mId + '" data-idx="' + mi + '" title="测试此模型延迟与可用性" aria-label="测试模型"><i class="fas fa-plug" aria-hidden="true"></i></button>' +
         '</div>' +
         '</div>';
     }).join('');
@@ -2878,23 +2874,19 @@ function renderProviderList() {
       '<input type="search" id="msearch-' + pId + '" data-pid="' + pId + '" placeholder="搜索本提供商中的模型 ID 或分类..." oninput="filterAdminModels(this)" autocomplete="off" style="padding-left:30px;font-size:12px;height:32px;width:100%;box-sizing:border-box;border-radius:var(--radius-control);border:1px solid var(--color-rule);background:var(--color-paper);" class="fx1">' +
       '</div>';
 
-    var opencodeBtn = pId === 'opencode'
-      ? '<button class="btn btn-s" onclick="fetchEditModelsBtn(this)" data-pid="' + pId + '"><i class="fas fa-download" aria-hidden="true"></i>获取模型</button>'
-      : '';
-
     return '<article class="pi ' + pStatusClass + '" data-id="' + pId + '">' +
       '<div class="ps" onclick="togBtn(this)" data-pid="' + pId + '" role="button" tabindex="0" onkeydown="togKey(event,this)" aria-controls="dt-' + pId + '">' +
         '<div class="l"><i class="fas fa-chevron-right provider-chevron" aria-hidden="true" id="ch-' + pId + '"></i><span class="provider-avatar" aria-hidden="true">' + escapeHtml((pName.charAt(0) || 'A').toUpperCase()) + '</span><div><h3>' + pName + '</h3><div class="pu"><code>' + pId + '</code><span>' + (isAnthropic ? 'Anthropic' : 'OpenAI') + '</span><span>' + keysArr.length + ' Keys</span><span>' + modelsArr.length + ' 模型</span>' + statusChipsHtml + '</div></div></div>' +
         '<div class="fc fx-s0" onclick="event.stopPropagation()"><label class="tg"><input type="checkbox" ' + (isEnabled ? 'checked' : '') + ' id="en-' + pId + '" onchange="togglePbBtn(this)" data-pid="' + pId + '" aria-label="启用 ' + pName + '"><span class="sl"></span></label><span class="bd ' + (isEnabled ? 'bd-on' : 'bd-off') + '">' + (isEnabled ? '已启用' : '未启用') + '</span></div>' +
       '</div>' +
       '<div class="pd" id="dt-' + pId + '">' +
-        '<div class="detail-heading"><div><h3>编辑 ' + pName + '</h3><p>修改暂存在内存中，点击顶部【统一保存】落盘写入 KV。</p></div><span class="protocol-chip">' + (isAnthropic ? 'ANTHROPIC' : 'OPENAI') + '</span></div>' +
+        '<div class="detail-heading"><div><h3>编辑 ' + pName + '</h3><p>修改暂存在内存中，点击顶部或左侧【统一保存】批量写入 KV。</p></div><span class="protocol-chip">' + (isAnthropic ? 'ANTHROPIC' : 'OPENAI') + '</span></div>' +
         '<div class="fr"><div class="fg"><label>名称</label><input type="text" id="nm-' + pId + '" value="' + pName + '" oninput="markDirty(true)"></div><div class="fg"><label>ID</label><input type="text" value="' + pId + '" disabled></div></div>' +
         '<div class="fg"><label>API 地址</label><input type="url" id="url-' + pId + '" value="' + pUrl + '" oninput="markDirty(true)"></div>' +
         '<div class="fg"><label>API 格式</label><select id="at-' + pId + '" class="select-sm" onchange="markDirty(true)"><option value="openai" ' + (!isAnthropic ? 'selected' : '') + '>OpenAI 兼容</option><option value="anthropic" ' + (isAnthropic ? 'selected' : '') + '>Anthropic 兼容</option></select></div>' +
         '<fieldset class="form-group"><legend>上游 API Keys</legend><div id="keys-' + pId + '">' + keysHtml + '</div><div class="fc mt-1 field-row"><input type="text" id="nk-' + pId + '" placeholder="新的 API Key" class="fx1"><button class="btn btn-s btn-xs" onclick="addKeyRowBtn(this)" data-pid="' + pId + '"><i class="fas fa-plus" aria-hidden="true"></i>添加</button></div></fieldset>' +
         '<fieldset class="form-group"><legend>模型</legend>' + providerModelActions + '<div id="ml-' + pId + '">' + modelsHtml + '</div><div class="fc mt-1 field-row"><input type="text" id="nmid-' + pId + '" placeholder="新的模型 ID" class="fx1"><button class="btn btn-s btn-xs" onclick="addMdlBtn(this)" data-pid="' + pId + '"><i class="fas fa-plus" aria-hidden="true"></i>添加</button></div></fieldset>' +
-        '<div class="detail-actions"><div id="tr-' + pId + '" aria-live="polite"></div><div>' + opencodeBtn + '<button class="btn btn-d" onclick="delBtn(this)" data-pid="' + pId + '"><i class="fas fa-trash" aria-hidden="true"></i>删除</button><button class="btn btn-p" onclick="saveBtn(this)" data-pid="' + pId + '"><i class="fas fa-save" aria-hidden="true"></i>暂存更改</button></div></div>' +
+        '<div class="detail-actions"><div id="tr-' + pId + '" aria-live="polite"></div><div><button class="btn btn-d" onclick="delBtn(this)" data-pid="' + pId + '"><i class="fas fa-trash" aria-hidden="true"></i>删除提供商</button><button class="btn btn-p" onclick="saveBtn(this)" data-pid="' + pId + '" title="收起此卡片并将修改暂存至内存"><i class="fas fa-check" aria-hidden="true"></i>收起并暂存</button></div></div>' +
       '</div>' +
     '</article>';
   }).join('');
