@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
+ * 版本号: v1.3.3
+ * 更新说明: 优化绘图梯队池连通性与真实测速探针：修复绘图模型延迟显示“海选中”问题，支持绘图席位真实网络延迟测速与毫秒级指标展示，整轮探测严格遵循单次顺风车打包落盘与 0 冗余 KV 写入机制。
  */
 import { Context } from 'hono'
 import { getProvider, getProviders, updateProvider, setMemoryCacheOnly, kvGet, kvPut, kvDelete, addRequestLog, getDebugMode, getCustomModelRoutes } from './storage'
@@ -351,31 +351,20 @@ export async function testModelConnection(
     const isEmbedding = category === '嵌入' ||
       /^(text-embedding|embedding|bge-|rerank|clip)/i.test(modelId)
 
-    // 1. 纯绘图/嵌入模型：无需向其发送复杂的智能体工具探针，直接判定健康
-    if (isDrawing || isEmbedding) {
-      const assignedCategory = isDrawing ? '绘图' : '嵌入'
-      return {
-        success: true,
-        message: `${assignedCategory}模型 (已标记分类，专用于图像生成)`,
-        statusCode: 200,
-        latencyMs: 15,
-        category: assignedCategory,
-        openclaw: {
-          tested: true,
-          compatible: false,
-          reason: `非对话/智能体模型 (${assignedCategory})`,
-        },
-      }
-    }
-
-    // 2. 区分阶梯化探测：已测过 OpenClaw 资质的模型切换为极简轻量测速探针；未测过的执行一次性 OpenClaw 资质探测
-    const alreadyTested = !!existingOpenClaw?.openclawTested
-    const knownCompatible = !!existingOpenClaw?.openclawCompatible
-    const knownReason = existingOpenClaw?.openclawReason || (knownCompatible ? '已确认兼容 OpenClaw' : '已确认不兼容 OpenClaw')
+    // 1. 区分阶梯化探测：
+    // - 绘图/嵌入模型或已知 OpenClaw 资质的模型：发送极低 Token 轻量连通性与测速探针，测量真实网络延迟
+    // - 未知且非绘图模型：发送携带 Tools 的 OpenClaw 探针，一次性完成连通性、延迟与 OpenClaw 资质检测
+    const alreadyTested = isDrawing || isEmbedding || !!existingOpenClaw?.openclawTested
+    const knownCompatible = isDrawing || isEmbedding ? false : !!existingOpenClaw?.openclawCompatible
+    const knownReason = isDrawing
+      ? '绘图专属模型（免测智能体工具）'
+      : isEmbedding
+      ? '嵌入专属模型（非对话模型）'
+      : existingOpenClaw?.openclawReason || (knownCompatible ? '已确认兼容 OpenClaw' : '已确认不兼容 OpenClaw')
 
     let reqBody: Record<string, unknown>
     if (alreadyTested) {
-      // 已知 OpenClaw 资质：仅测试网络健康与延迟 (极低 Token，无 tools 请求体)
+      // 轻量测速探针：仅测试网络健康与真实延迟 (极低 Token，无 tools 请求体)
       reqBody = apiType === 'anthropic'
         ? {
             model: modelId,
@@ -452,9 +441,9 @@ export async function testModelConnection(
     // 处理 400 类的参数不兼容（说明模型可连接，但探针发现不支持 Tools 或其为纯绘图模型）
     if (response.status === 400 || response.status === 422) {
       const lowerErr = rawText.toLowerCase()
-      // 检查上游是否明确反馈为绘图模型
+      // 检查是否为绘图模型或上游明确反馈为绘图模型
       const isUpstreamImageModel = lowerErr.includes('image model') || lowerErr.includes('images/generations') || lowerErr.includes('drawing')
-      if (isUpstreamImageModel) {
+      if (isDrawing || isUpstreamImageModel) {
         return {
           success: true, // 证明 API Key 合法、网络通畅且上游模型就绪
           message: '绘图模型连通正常 (专用于图像生成)',

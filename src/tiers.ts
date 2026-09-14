@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
+ * 版本号: v1.3.3
+ * 更新说明: 优化绘图梯队池连通性与真实测速探针：修复绘图模型延迟显示“海选中”问题，支持绘图席位真实网络延迟测速与毫秒级指标展示，整轮探测严格遵循单次顺风车打包落盘与 0 冗余 KV 写入机制。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, setMemoryCacheOnly, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'

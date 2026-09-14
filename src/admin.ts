@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.1
- * 更新说明: 贯彻“全自动打理、整轮测试 1 次打包写入 KV”与“游标定位雨露均沾”机制：探测全过程（模型打标、测速、游标步进）保持纯内存缓存更新（0 碎片化 KV 写入），测试完成后通过顺风车机制统一 1 次落盘。
+ * 版本号: v1.3.3
+ * 更新说明: 优化绘图梯队池连通性与真实测速探针：修复绘图模型延迟显示“海选中”问题，支持绘图席位真实网络延迟测速与毫秒级指标展示，整轮探测严格遵循单次顺风车打包落盘与 0 冗余 KV 写入机制。
  */
 import { Context } from 'hono'
 import {
@@ -773,6 +773,29 @@ export async function handleRunProbe(c: Context<{ Bindings: Env }>) {
           const metric = await runSingleModelProbe(c.env, item.provider, modelToTest.id)
           tierStorage.probeStats[`${item.provider.id}/${modelToTest.id}`] = metric
 
+          if (metric.success) {
+            successCount++
+          } else {
+            failedCount++
+          }
+        }
+      }
+    }
+
+    // 2.5 顺带为绘图梯队中已就绪席位的模型执行轻量连通性测速，确保绘图池卡片展示真实延迟指标
+    const seatedDrawing = tierStorage.tierDrawing || []
+    for (const dRef of seatedDrawing) {
+      // 避免重复测试刚刚在游标轮转中已测过的模型
+      if (tierStorage.probeStats[dRef.fullId]?.lastTestedAt && Date.now() - tierStorage.probeStats[dRef.fullId].lastTestedAt < 60000) {
+        continue
+      }
+      const p = activeProviders.find((x) => x.id === dRef.providerId)
+      if (p) {
+        const m = p.models.find((x) => x.id === dRef.modelId)
+        if (m && m.enabled !== false && !m.permanentlyDisabled) {
+          testedCount++
+          const metric = await runSingleModelProbe(c.env, p, dRef.modelId)
+          tierStorage.probeStats[dRef.fullId] = metric
           if (metric.success) {
             successCount++
           } else {
