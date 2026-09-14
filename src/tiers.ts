@@ -1726,10 +1726,23 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       }
     }
 
-    // 若检测到任何梯队调整或补位，顺风车单次写入 KV
-    if (changed) {
-      storage.updatedAt = new Date().toISOString()
-      await saveTierStorage(env, storage)
+    // 指纹对比比对函数：比较梯队模型 ID 列表是否发生任何实际变化
+    const getFingerprint = (s: TierStorage) => {
+      const t1 = (s.tier1 || []).map((x) => x.fullId).sort().join(',')
+      const t2 = (s.tier2 || []).map((x) => x.fullId).sort().join(',')
+      const to = (s.tierOpenclaw || []).map((x) => x.fullId).sort().join(',')
+      const td = (s.tierDrawing || []).map((x) => x.fullId).sort().join(',')
+      return `${t1}|${t2}|${to}|${td}`
+    }
+
+    // 若检测到任何梯队调整或补位，且真实数据指纹发生改变，顺风车单次写入 KV；未改变则绝对 0 写入
+    const currentFingerprint = getFingerprint(storage)
+    const originalFingerprint = getFingerprint(existing)
+    if (changed || currentFingerprint !== originalFingerprint) {
+      if (currentFingerprint !== originalFingerprint) {
+        storage.updatedAt = new Date().toISOString()
+        await saveTierStorage(env, storage)
+      }
     }
     return storage
   }
@@ -1812,9 +1825,8 @@ export async function selectAutoModel(
   // 1. OpenClaw 专属梯队池选择
   if (poolType === 'openclaw') {
     let pool = (storage.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
-    const slotsConfig = getTierSlotsConfig(storage)
-    // 当 OpenClaw 池当前模型数量少于配置的目标席位数时，自动触发探针探测并自动补齐席位
-    if (pool.length < slotsConfig.tierOpenclawSlots) {
+    // 只有在池子完全没有模型可用时，才触发一次后备补位；绝不因为未满席位而每次重复发起外网探测
+    if (pool.length === 0) {
       const backfilled = await backfillOpenclawTier(env, storage)
       pool = (backfilled.tierOpenclaw || []).filter((m) => modelMap.has(m.fullId))
     }
@@ -1855,9 +1867,8 @@ export async function selectAutoModel(
   // 2. 绘图专属梯队池选择
   if (poolType === 'drawing') {
     let pool = (storage.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
-    const slotsConfig = getTierSlotsConfig(storage)
-    // 绘图池模型数量少于配置席位时全力补位
-    if (pool.length < slotsConfig.tierDrawingSlots) {
+    // 只有在绘图池完全空时才启动后备补位；不强制要求满席
+    if (pool.length === 0) {
       const backfilled = await backfillDrawingTier(env, storage)
       pool = (backfilled.tierDrawing || []).filter((m) => modelMap.has(m.fullId))
     }

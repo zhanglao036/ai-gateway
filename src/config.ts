@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.2.7
- * 更新说明: 严防死守海选门槛，杜绝未测/故障模型混入梯队池；打通第一梯队、OpenClaw智能体池、绘图专属池全梯队实时故障淘汰与自动补位机制；彻底清除“故障避让”僵尸占坑模型。
+ * 版本号: v1.2.8
+ * 更新说明: 贯彻“故障果断剔除，宁缺毋滥”策略，支持动态席位自定义；增加真实数据指纹对比，彻底消除席位未满时的无效补位与死循环 KV 写入，确保日常定时请求纯内存 0 写入。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.2.7'
+export const VERSION = 'v1.2.8'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',

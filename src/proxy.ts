@@ -128,10 +128,10 @@ async function recordModelFailure(env: Env, providerId: string, modelId: string,
         storage.updatedAt = new Date().toISOString()
         await saveTierStorage(env, storage)
 
-        // 尝试自动补位新模型填补空位
-        if (inTier1 || isPermDisabled) await backfillTier1FromTier2(env, storage)
-        if (inOpenclaw || isPermDisabled) await backfillOpenclawTier(env, storage)
-        if (inDrawing || isPermDisabled) await backfillDrawingTier(env, storage)
+        // 尝试自动补位新模型填补空位（严格按发生故障的池子进行精准补位，池间隔离，绝不跨池触发）
+        if (inTier1) await backfillTier1FromTier2(env, storage)
+        if (inOpenclaw) await backfillOpenclawTier(env, storage)
+        if (inDrawing) await backfillDrawingTier(env, storage)
       }
     }
   } catch (err) {
