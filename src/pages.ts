@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.4
- * 更新说明: 修复梯队池席位数分母显示不准与手动修改未即时生效问题；整体升级移动端与桌面端 UI 界面，采用双层流式移动导航并彻底隐藏原生丑陋滚动条，确保指标卡片动态精准联动与 0 额外 KV 消耗。
+ * 版本号: v1.3.5
+ * 更新说明: 日志控制栏优化：实施方案 B，默认隐藏缓存阈值输入项，仅在开启调试模式时动态展开，保持日常运维界面简洁；优化调试联动逻辑，0 额外 KV 消耗。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -1239,8 +1239,8 @@ ${H('管理')}
         </div>
 
         <div class="log-control-card">
-          <div class="log-control-group">
-            <div class="log-control-item" title="正常请求达到设置条数后批量写入 KV。注意：超时、断连、报错异常将立即直接写入 KV，正常请求随系统写操作顺风车打包落盘">
+          <div class="log-control-group" id="log-buffer-config-box" style="${isDebug ? '' : 'display:none;'}">
+            <div class="log-control-item" title="调试模式下正常请求达到设置条数后批量写入 KV。注意：超时、断连、报错异常将立即直接写入 KV，未开启调试模式时所有日志通过顺风车静默打包落盘">
               <label for="log-cfg-max-count"><i class="fas fa-layer-group" style="color:var(--color-focus);"></i> 缓存阈值</label>
               <div class="log-input-badge">
                 <input type="number" id="log-cfg-max-count" value="${logConfig.bufferMaxCount}" min="1" max="500" onchange="saveLogBufferConfig()">
@@ -1249,7 +1249,7 @@ ${H('管理')}
             </div>
           </div>
 
-          <div class="log-debug-box" title="开启调试模式后前端将开启每 4 秒自动刷新日志，无论开启与否均采用配置的批量落盘策略保护 KV 额度">
+          <div class="log-debug-box" title="开启调试模式后前端将开启每 4 秒自动刷新日志，并展开缓存阈值设置；未开启调试时日志随系统写操作顺风车批量打包落盘，保护 KV 免费额度">
             <span class="log-debug-title"><i class="fas fa-bug" style="color:#eab308;"></i> 调试模式 (自动刷新)</span>
             <label class="tg">
               <input type="checkbox" id="debug-mode-toggle" ${isDebug ? 'checked' : ''} onchange="toggleDebugMode(this.checked)">
@@ -3043,7 +3043,7 @@ async function fetchLogs() {
       if (dbgToggle && typeof json.data.debugMode === 'boolean') {
         dbgToggle.checked = json.data.debugMode;
         var cfgBox = document.getElementById('log-buffer-config-box');
-        if (cfgBox) cfgBox.style.display = json.data.debugMode ? 'none' : 'flex';
+        if (cfgBox) cfgBox.style.display = json.data.debugMode ? '' : 'none';
         setupAutoRefresh(json.data.debugMode);
       }
       if (json.data.config) {
@@ -3074,9 +3074,14 @@ function setupAutoRefresh(enabled) {
 }
 
 async function toggleDebugMode(checked) {
+  var cfgBox = document.getElementById('log-buffer-config-box');
+  if (cfgBox) cfgBox.style.display = checked ? '' : 'none';
+
   try {
-    var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '20', 10);
-    var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '60', 10);
+    var cntInput = document.getElementById('log-cfg-max-count');
+    var cntVal = parseInt(cntInput && cntInput.value ? cntInput.value : '20', 10);
+    var intInput = document.getElementById('log-cfg-interval');
+    var intVal = parseInt(intInput && intInput.value ? intInput.value : '60', 10);
 
     var res = await fetch('/admin/api/debug-mode', {
       method: 'POST',
@@ -3094,16 +3099,25 @@ async function toggleDebugMode(checked) {
       fetchLogs();
     } else {
       toast(json.message || '切换调试模式失败', 'error');
+      if (cfgBox) cfgBox.style.display = (!checked) ? '' : 'none';
+      var dbgToggle = document.getElementById('debug-mode-toggle');
+      if (dbgToggle) dbgToggle.checked = !checked;
     }
   } catch (err) {
     toast('切换调试模式请求异常', 'error');
+    if (cfgBox) cfgBox.style.display = (!checked) ? '' : 'none';
+    var dbgToggle = document.getElementById('debug-mode-toggle');
+    if (dbgToggle) dbgToggle.checked = !checked;
   }
 }
 
 async function saveLogBufferConfig() {
-  var cntVal = parseInt(document.getElementById('log-cfg-max-count')?.value || '20', 10);
-  var intVal = parseInt(document.getElementById('log-cfg-interval')?.value || '60', 10);
-  var dbgChecked = document.getElementById('debug-mode-toggle')?.checked || false;
+  var cntInput = document.getElementById('log-cfg-max-count');
+  var cntVal = parseInt(cntInput && cntInput.value ? cntInput.value : '20', 10);
+  var intInput = document.getElementById('log-cfg-interval');
+  var intVal = parseInt(intInput && intInput.value ? intInput.value : '60', 10);
+  var dbgToggle = document.getElementById('debug-mode-toggle');
+  var dbgChecked = dbgToggle ? dbgToggle.checked : false;
 
   try {
     var res = await fetch('/admin/api/debug-mode', {

@@ -1,10 +1,10 @@
 /**
- * 版本号: v1.3.4
- * 更新说明: 修复梯队池席位数分母显示不准与手动修改未即时生效问题；整体升级移动端与桌面端 UI 界面，采用双层流式移动导航并彻底隐藏原生丑陋滚动条，确保指标卡片动态精准联动与 0 额外 KV 消耗。
+ * 版本号: v1.3.5
+ * 更新说明: 日志控制栏优化：实施方案 B，默认隐藏缓存阈值输入项，仅在开启调试模式时动态展开，保持日常运维界面简洁；优化调试联动逻辑，0 额外 KV 消耗。
  */
 import type { Provider } from './types'
 
-export const VERSION = 'v1.3.4'
+export const VERSION = 'v1.3.5'
 
 export const SITE_CONFIG = {
   title: 'AI Gateway',
