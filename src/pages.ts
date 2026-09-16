@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.3
- * 更新说明: 优化绘图梯队池连通性与真实测速探针：修复绘图模型延迟显示“海选中”问题，支持绘图席位真实网络延迟测速与毫秒级指标展示，整轮探测严格遵循单次顺风车打包落盘与 0 冗余 KV 写入机制。
+ * 版本号: v1.3.4
+ * 更新说明: 修复梯队池席位数分母显示不准与手动修改未即时生效问题；整体升级移动端与桌面端 UI 界面，采用双层流式移动导航并彻底隐藏原生丑陋滚动条，确保指标卡片动态精准联动与 0 额外 KV 消耗。
  */
 import { Context } from 'hono'
 import { getProviders, getProxyKeys, getLogs, getDebugMode, getLogConfig, getCustomModelRoutes } from './storage'
@@ -904,6 +904,7 @@ export async function renderAdminPage(c: Context<{ Bindings: Env }>) {
   const tierDrawingModels = tierData.tierDrawing || []
   const tier2Count = (tierData.tier2 || []).length
   const totalTierOnlineCount = tier1Models.length + tierOpenclawModels.length + tierDrawingModels.length
+  const slotsConfig = getTierSlotsConfig(tierData)
 
   const isDebug = logConfig.debugMode
   const enabledProvidersCount = providers.filter((provider) => provider.enabled).length
@@ -944,10 +945,25 @@ ${H('管理')}
 
   <div class="admin-main">
     <header class="admin-topbar">
-      <a class="brand" href="/"><span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span><span class="brand__name">${SITE_CONFIG.title}</span><span class="version-badge" style="font-size:11px;padding:2px 7px;border-radius:999px;background:rgba(37,99,235,0.1);color:#2563eb;margin-left:8px;font-weight:600;border:1px solid rgba(37,99,235,0.2);">${SITE_CONFIG.version}</span></a>
-      <nav aria-label="移动端控制台导航"><a href="#overview">概览</a><a href="#tiers">梯队池</a><a href="#providers">提供商</a><a href="#custom-routes">指定路由</a><a href="#proxy-keys">Key</a><a href="#logs">日志</a></nav>
-      <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
-      <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
+      <div class="admin-topbar__header">
+        <a class="brand" href="/" aria-label="AI Gateway 首页">
+          <span class="brand__mark" aria-hidden="true"><i class="fas fa-cloud"></i></span>
+          <span class="brand__name">${SITE_CONFIG.title}</span>
+          <span class="version-badge">${SITE_CONFIG.version}</span>
+        </a>
+        <div class="admin-topbar__actions">
+          <button class="btn-save-all btn-save-mobile" onclick="saveAllConfig()"><i class="fas fa-save" aria-hidden="true"></i> 保存</button>
+          <a class="icon-btn" href="/admin/logout" onclick="localStorage.removeItem('admin_token')" aria-label="退出登录" title="退出登录"><i class="fas fa-sign-out-alt" aria-hidden="true"></i></a>
+        </div>
+      </div>
+      <nav class="admin-topbar__nav" aria-label="移动端控制台导航">
+        <a href="#overview" class="is-active"><i class="fas fa-chart-pie" aria-hidden="true"></i>概览</a>
+        <a href="#tiers"><i class="fas fa-layer-group" aria-hidden="true"></i>梯队池</a>
+        <a href="#providers"><i class="fas fa-server" aria-hidden="true"></i>提供商</a>
+        <a href="#custom-routes"><i class="fas fa-route" aria-hidden="true"></i>指定路由</a>
+        <a href="#proxy-keys"><i class="fas fa-key" aria-hidden="true"></i>Key</a>
+        <a href="#logs"><i class="fas fa-list-alt" aria-hidden="true"></i>日志</a>
+      </nav>
     </header>
 
     <main class="admin-content">
@@ -968,9 +984,9 @@ ${H('管理')}
         <div class="admin-metrics" aria-label="配置统计">
           <div><span>${providers.length}</span><p>提供商</p><small>${enabledProvidersCount} 个已启用</small></div>
           <div><span>${modelsCount}</span><p>模型</p><small>${enabledModelsCount} 个可用</small></div>
-          <div><span>${tier1Models.length} / 9</span><p>第一梯队在线</p><small>候选池 ${tier2Count} 个</small></div>
-          <div><span>${tierOpenclawModels.length} / 6</span><p>OpenClaw 在线</p><small>智能体专用池</small></div>
-          <div><span>${tierDrawingModels.length} / 6</span><p>绘图池在线</p><small>绘图专属池</small></div>
+          <div id="metric-tier1"><span id="metric-tier1-val">${tier1Models.length} / ${slotsConfig.tier1Slots}</span><p>第一梯队在线</p><small id="metric-tier1-sub">候选池 ${tier2Count} 个</small></div>
+          <div id="metric-openclaw"><span id="metric-openclaw-val">${tierOpenclawModels.length} / ${slotsConfig.tierOpenclawSlots}</span><p>OpenClaw 在线</p><small>智能体专用池</small></div>
+          <div id="metric-drawing"><span id="metric-drawing-val">${tierDrawingModels.length} / ${slotsConfig.tierDrawingSlots}</span><p>绘图池在线</p><small>绘图专属池</small></div>
           <div><span>${proxyKeys.length}</span><p>转发 Key</p><small>${enabledProxyKeysCount} 个可用</small></div>
         </div>
       </section>
@@ -1283,6 +1299,29 @@ function changeTierSlots(poolType, delta) {
   onTierSlotsInput(poolType, newVal);
 }
 
+function updateSlotsDisplay() {
+  // 1. 联动更新第一梯队徽章与概览卡片分母
+  var t1Badge = document.getElementById('tier1-slots-badge');
+  var t1Val = document.getElementById('metric-tier1-val');
+  var curT1Online = (initTierData.tier1 || []).length;
+  if (t1Badge) t1Badge.textContent = '已连接 ' + curT1Online + ' / ' + draftTierSlots.tier1Slots + ' 席';
+  if (t1Val) t1Val.textContent = curT1Online + ' / ' + draftTierSlots.tier1Slots;
+
+  // 2. 联动更新 OpenClaw 徽章与概览卡片分母
+  var toBadge = document.getElementById('tier-openclaw-slots-badge');
+  var toVal = document.getElementById('metric-openclaw-val');
+  var curToOnline = (initTierData.tierOpenclaw || []).length;
+  if (toBadge) toBadge.textContent = '已连接 ' + curToOnline + ' / ' + draftTierSlots.tierOpenclawSlots + ' 席';
+  if (toVal) toVal.textContent = curToOnline + ' / ' + draftTierSlots.tierOpenclawSlots;
+
+  // 3. 联动更新绘图专属池徽章与概览卡片分母
+  var tdBadge = document.getElementById('tier-drawing-slots-badge');
+  var tdVal = document.getElementById('metric-drawing-val');
+  var curTdOnline = (initTierData.tierDrawing || []).length;
+  if (tdBadge) tdBadge.textContent = '已连接 ' + curTdOnline + ' / ' + draftTierSlots.tierDrawingSlots + ' 席';
+  if (tdVal) tdVal.textContent = curTdOnline + ' / ' + draftTierSlots.tierDrawingSlots;
+}
+
 function onTierSlotsInput(poolType, val) {
   var num = parseInt(val, 10);
   var maxLimit = poolType === 'tier1' ? 30 : 20;
@@ -1297,11 +1336,39 @@ function onTierSlotsInput(poolType, val) {
     draftTierSlots.tierDrawingSlots = num;
   }
   markDirty(true);
+  updateSlotsDisplay();
+}
+
+// 刷新梯队数据
+async function loadTierData() {
+  try {
+    var resp = await fetch('/admin/api/tiers');
+    var data = await resp.json();
+    if (data && data.success && data.data) {
+      initTierData = data.data;
+      var updatedSlots = initTierData.slotsConfig || {};
+      if (updatedSlots.tier1Slots) draftTierSlots.tier1Slots = updatedSlots.tier1Slots;
+      if (updatedSlots.tierOpenclawSlots) draftTierSlots.tierOpenclawSlots = updatedSlots.tierOpenclawSlots;
+      if (updatedSlots.tierDrawingSlots) draftTierSlots.tierDrawingSlots = updatedSlots.tierDrawingSlots;
+
+      var inT1 = document.getElementById('tier-slots-tier1');
+      var inTo = document.getElementById('tier-slots-openclaw');
+      var inTd = document.getElementById('tier-slots-drawing');
+      if (inT1) inT1.value = draftTierSlots.tier1Slots;
+      if (inTo) inTo.value = draftTierSlots.tierOpenclawSlots;
+      if (inTd) inTd.value = draftTierSlots.tierDrawingSlots;
+
+      updateSlotsDisplay();
+    }
+  } catch (e) {
+    console.warn('获取梯队池数据异常', e);
+  }
 }
 
 // 单独应用保存当前池子席位（支持快捷单项生效或统一保存）
 async function applySingleTierSlots(poolType) {
   try {
+    toast('正在应用席位配置并执行补位...', 'info');
     var resp = await fetch('/admin/api/tiers/slots', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1309,10 +1376,11 @@ async function applySingleTierSlots(poolType) {
     });
     var data = await resp.json();
     if (data && data.success) {
-      toast('梯队池席位配置已更新！', 'success');
+      toast('梯队池席位配置已更新并完成自动补位！', 'success');
+      markDirty(false);
       setTimeout(function() {
         window.location.reload();
-      }, 500);
+      }, 400);
     } else {
       aM('更新席位失败：' + ((data && data.message) || '未知错误'), 'error');
     }
@@ -1404,6 +1472,9 @@ async function saveAllConfig() {
       if (typeof loadTierData === 'function') {
         loadTierData();
       }
+      setTimeout(function() {
+        window.location.reload();
+      }, 500);
     } else {
       var errMsg = (data && data.message) ? data.message : '未知系统错误';
       aM('保存失败：' + errMsg, 'error');

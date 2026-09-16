@@ -1,6 +1,6 @@
 /**
- * 版本号: v1.3.3
- * 更新说明: 优化绘图梯队池连通性与真实测速探针：修复绘图模型延迟显示“海选中”问题，支持绘图席位真实网络延迟测速与毫秒级指标展示，整轮探测严格遵循单次顺风车打包落盘与 0 冗余 KV 写入机制。
+ * 版本号: v1.3.4
+ * 更新说明: 修复梯队池席位数分母显示不准与手动修改未即时生效问题；严格执行席位上限约束与平滑裁剪，调大席位自动触发自愈补位，保障指标卡片与池子容量动态同步。
  */
 import { KV_KEYS, TIER_1_MAX_SLOTS, TIER_OPENCLAW_MAX_SLOTS, TIER_DRAWING_MAX_SLOTS } from './config'
 import { kvGet, kvPut, setMemoryCacheOnly, getProviders, getProvider, updateProvider, flushPendingWrites, getDebugMode } from './storage'
@@ -92,6 +92,12 @@ export async function updateTierSlotsConfig(
   }
 
   await saveTierStorage(env, storage)
+  // 如果席位发生变动，顺风车触发自愈对齐（补齐空位或平滑修剪），保持内存与存储完全一致
+  try {
+    storage = await ensureTierStorage(env)
+  } catch {
+    // 安全容错
+  }
   return { storage, slotsConfig: effectiveSlots }
 }
 
@@ -1660,6 +1666,28 @@ export async function ensureTierStorage(env: Env): Promise<TierStorage> {
       return availableSet.has(m.fullId) && isEligibleForActiveTier(storage, m.fullId, now)
     })
     if (storage.tierDrawing.length !== prevDrawingLength) {
+      changed = true
+    }
+
+    // 1.1 严格执行席位上限约束：如果席位被调小或历史数据超标，裁剪多余席位，防止出现分子大于分母
+    if (storage.tier1.length > slotsConfig.tier1Slots) {
+      const keep = storage.tier1.slice(0, slotsConfig.tier1Slots)
+      const excess = storage.tier1.slice(slotsConfig.tier1Slots)
+      storage.tier1 = keep
+      storage.tier2 = storage.tier2 || []
+      for (const m of excess) {
+        if (!storage.tier2.some((x) => x.fullId === m.fullId)) {
+          storage.tier2.push(m)
+        }
+      }
+      changed = true
+    }
+    if ((storage.tierOpenclaw || []).length > slotsConfig.tierOpenclawSlots) {
+      storage.tierOpenclaw = storage.tierOpenclaw.slice(0, slotsConfig.tierOpenclawSlots)
+      changed = true
+    }
+    if ((storage.tierDrawing || []).length > slotsConfig.tierDrawingSlots) {
+      storage.tierDrawing = storage.tierDrawing.slice(0, slotsConfig.tierDrawingSlots)
       changed = true
     }
 
